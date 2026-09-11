@@ -1,7 +1,6 @@
 // Copyright (c) 2026 lucabRTrender contributors.
 #include "lrt/gpu/algo/RadixSort.h"
 
-#include <cstdlib>
 #include <utility>
 
 #include "lrt/gpu/CommandBatch.h"
@@ -96,6 +95,21 @@ Result<void> RadixSort::sort(CommandBatch& batch, SortBuffers& buffers, uint32_t
     const uint32_t chunks = (count + chunk - 1) / chunk;
     LRT_TRY(reserve(chunks));
     chunks_ = chunks;
+    // The stand-ins are indexed like the pairs, so they are as long as them.
+    if (!wide && standInPairs_ < count) {
+        BufferDesc desc;
+        desc.bytes = uint64_t{count} * sizeof(uint32_t);
+        desc.elementBytes = sizeof(uint32_t);
+        desc.label = "radix.standIn.lo";
+        auto lo = Buffer::create(*device_, desc);
+        if (!lo) return std::move(lo).error();
+        desc.label = "radix.standIn.hi";
+        auto hi = Buffer::create(*device_, desc);
+        if (!hi) return std::move(hi).error();
+        standInLo_ = *lo;
+        standInHi_ = *hi;
+        standInPairs_ = count;
+    }
 
     Buffer* srcLo = &buffers.keysLo;
     Buffer* srcHi = wide ? &buffers.keysHi : &dummy_;
@@ -124,15 +138,15 @@ Result<void> RadixSort::sort(CommandBatch& batch, SortBuffers& buffers, uint32_t
             cursor["chunkStarts"].setBinding(chunkStarts_.rhi());
             setParams(cursor, count, chunks, shift, wide);
         });
-        // Distinct placeholders for the unused hi bindings: a buffer bound as
-        // both read-only and read-write in one dispatch is refused by D3D and
-        // Vulkan validation even when the kernel never touches it. The
-        // placeholders are the sort's own buffers, big enough for any index
-        // the kernel could form before it decides it has no high words: a
-        // one-element stand-in is read out of bounds on a target that
-        // evaluates both arms of the choice.
-        Buffer* scatterSrcHi = wide ? srcHi : &chunkStarts_;
-        Buffer* scatterDstHi = wide ? dstHi : &histogramBuffer_;
+        // Stand-ins for the high-word names when keys are 32 bits. Each name
+        // gets a buffer of its own: a buffer bound as both read-only and
+        // read-write in one dispatch is refused by D3D and Vulkan validation
+        // even when the kernel never touches it, and nothing here may be the
+        // buffer another name in the same dispatch already has. They are as
+        // long as the pairs, so any index the kernel forms before it decides
+        // it has no high words is inside them.
+        Buffer* scatterSrcHi = wide ? srcHi : &standInLo_;
+        Buffer* scatterDstHi = wide ? dstHi : &standInHi_;
         scatter_.dispatch(batch, {chunks, 1, 1}, [&](rhi::ShaderCursor cursor) {
             cursor["srcKeysLo"].setBinding(srcLo->rhi());
             cursor["srcKeysHi"].setBinding(scatterSrcHi->rhi());
@@ -143,9 +157,6 @@ Result<void> RadixSort::sort(CommandBatch& batch, SortBuffers& buffers, uint32_t
             cursor["chunkStarts"].setBinding(chunkStarts_.rhi());
             setParams(cursor, count, chunks, shift, wide);
         });
-        if (std::getenv("LRT_RADIX_SUBMIT_EACH_PASS") != nullptr) {
-            LRT_TRY(batch.submit(true));
-        }
         std::swap(srcLo, dstLo);
         std::swap(srcHi, dstHi);
         std::swap(srcVal, dstVal);

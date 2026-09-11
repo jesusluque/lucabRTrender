@@ -139,7 +139,7 @@ TEST_CASE("a scatter-shaped kernel reads and writes the words it was given", "[g
     gpu::Buffer starts = test::uintBuffer(*gpu->device, kDigits, "chunkStarts");
     gpu::Buffer spare = test::uintBuffer(*gpu->device, kDigits, "spare");
     gpu::Buffer spareHi = test::uintBuffer(*gpu->device, kDigits, "spareHi");
-    gpu::Buffer saw = test::uintBuffer(*gpu->device, kPairs * 3, "saw");
+    gpu::Buffer saw = test::uintBuffer(*gpu->device, kPairs * 4, "saw");
     REQUIRE(srcLo.write(*gpu->device, 0, sizeof(keys), keys));
     REQUIRE(srcVal.write(*gpu->device, 0, sizeof(values), values));
     gpu::CommandBatch batch(*gpu->device);
@@ -160,19 +160,20 @@ TEST_CASE("a scatter-shaped kernel reads and writes the words it was given", "[g
         p["wide"].setData(uint32_t{0});
     });
     REQUIRE(batch.submit(true));
-    std::array<uint32_t, kPairs * 3> read{};
+    std::array<uint32_t, kPairs * 4> read{};
     std::array<uint32_t, kPairs> wroteKeys{};
     std::array<uint32_t, kPairs> wroteValues{};
     REQUIRE(saw.read(*gpu->device, 0, sizeof(read), read.data()));
     REQUIRE(dstLo.read(*gpu->device, 0, sizeof(wroteKeys), wroteKeys.data()));
     REQUIRE(dstVal.read(*gpu->device, 0, sizeof(wroteValues), wroteValues.data()));
     for (uint32_t k = 0; k < kPairs; ++k) {
-        std::printf("  element %u saw key %#x value %#x; wrote key %#x value %#x\n", k, read[k * 3], read[k * 3 + 2],
-                    wroteKeys[k], wroteValues[k]);
+        std::printf("  element %u saw key %#x value %#x at slot %u; wrote key %#x value %#x\n", k, read[k * 4],
+                    read[k * 4 + 2], read[k * 4 + 3], wroteKeys[k], wroteValues[k]);
     }
     for (uint32_t k = 0; k < kPairs; ++k) {
-        CHECK(read[k * 3] == keys[k]);          // the reads gave the words that were written
-        CHECK(read[k * 3 + 2] == values[k]);
+        CHECK(read[k * 4] == keys[k]);          // the reads gave the words that were written
+        CHECK(read[k * 4 + 2] == values[k]);
+        CHECK(read[k * 4 + 3] == k);            // and each element took the next slot
         CHECK(wroteKeys[k] == keys[k]);         // and the writes landed where the cursor said
         CHECK(wroteValues[k] == values[k]);
     }

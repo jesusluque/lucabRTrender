@@ -23,7 +23,7 @@ RWStructuredBuffer<uint>   dstKeysLo;
 RWStructuredBuffer<uint>   dstKeysHi;
 RWStructuredBuffer<uint>   dstValues;
 RWStructuredBuffer<uint>   chunkStarts;
-RWStructuredBuffer<uint>   saw;          // count * 3: the lo, hi and value each read gave
+RWStructuredBuffer<uint>   saw;          // count * 4: the lo, hi and value each read gave, and the slot used
 ConstantBuffer<ShapeParams> params;
 
 [shader("compute")]
@@ -38,13 +38,14 @@ void scatterShapeProbe(uint3 tid: SV_DispatchThreadID) {
     for (uint i = begin; i < end; ++i) {
         const uint lo = srcKeysLo[i];
         const uint hi = params.wide != 0 ? srcKeysHi[i] : 0;
-        saw[i * 3] = lo;
-        saw[i * 3 + 1] = hi;
-        saw[i * 3 + 2] = srcValues[i];
+        saw[i * 4] = lo;
+        saw[i * 4 + 1] = hi;
+        saw[i * 4 + 2] = srcValues[i];
         // The writes the scatter makes, to the slots it would use, so the
         // dispatch has the same reads and writes in flight as the real one.
         const uint at = chunkStarts[c * 256];
         chunkStarts[c * 256] = at + 1;
+        saw[i * 4 + 3] = at;   // the slot both writes below are meant to use
         // Written from the buffer, not from the local the loop carried: on
         // CUDA the local delivered the iteration before's word.
         dstKeysLo[at] = srcKeysLo[i];
