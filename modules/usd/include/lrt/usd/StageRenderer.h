@@ -39,6 +39,10 @@ public:
     [[nodiscard]] Result<StageImage> render(const render::Camera& camera, double time, uint32_t width,
                                             uint32_t height, const std::string& technique = "raster");
 
+    /// The Hydra outputs renders produce, colour and depth always among them
+    /// ("primId", "instanceId", "elementId", "Neye", "normal", "primvars:st"...).
+    void requestOutputs(const std::vector<std::string>& aovs);
+
     /// The last render's Hydra render buffer for `aov` ("color", "depth"), as
     /// a host mapping it reads it: the buffer's own format, top row first.
     [[nodiscard]] Result<std::vector<uint8_t>> mappedOutput(const std::string& aov);

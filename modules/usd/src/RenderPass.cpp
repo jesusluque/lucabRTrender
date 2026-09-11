@@ -37,49 +37,83 @@ void HdLrtRenderPass::_Execute(HdRenderPassStateSharedPtr const& state, TfTokenV
     lrt::render::RenderSettings settings;
     settings.width = width;
     settings.height = height;
-    HdLrtRenderBuffer* colourBuffer = nullptr;
-    HdLrtRenderBuffer* depthBuffer = nullptr;
+    // Every AOV binding: what each reads, and what the frame must compute.
+    struct Output {
+        HdLrtRenderBuffer*      buffer;
+        lrt::usd::AovSource     source;
+    };
+    std::vector<Output> outputs;
+    lrt::usd::AovRequest request;
     for (HdRenderPassAovBinding const& binding : state->GetAovBindings()) {
         auto* buffer = dynamic_cast<HdLrtRenderBuffer*>(binding.renderBuffer);
         if (buffer == nullptr) {
             continue;
         }
+        const std::string& name = binding.aovName.GetString();
+        lrt::usd::AovSource source;
         if (binding.aovName == HdAovTokens->color) {
-            colourBuffer = buffer;
+            source.kind = lrt::usd::AovKind::Colour;
             if (binding.clearValue.IsHolding<GfVec4f>()) {
                 const GfVec4f c = binding.clearValue.UncheckedGet<GfVec4f>();
                 settings.background = {c[0] * c[3], c[1] * c[3], c[2] * c[3], c[3]};
             }
         } else if (binding.aovName == HdAovTokens->depth) {
-            depthBuffer = buffer;
+            source.kind = lrt::usd::AovKind::Depth;
+        } else if (binding.aovName == HdAovTokens->primId) {
+            source.kind = lrt::usd::AovKind::PrimId;
+            request.ids = true;
+        } else if (binding.aovName == HdAovTokens->instanceId) {
+            source.kind = lrt::usd::AovKind::InstanceId;
+            request.ids = true;
+        } else if (binding.aovName == HdAovTokens->elementId) {
+            source.kind = lrt::usd::AovKind::ElementId;
+            request.ids = true;
+        } else if (binding.aovName == HdAovTokens->Neye) {
+            source.kind = lrt::usd::AovKind::EyeNormal;
+            request.normals = true;
+        } else if (binding.aovName == HdAovTokens->normal) {
+            source.kind = lrt::usd::AovKind::WorldNormal;
+            request.normals = true;
+        } else if (name.rfind("primvars:", 0) == 0) {
+            source.kind = lrt::usd::AovKind::Primvar;
+            source.primvar = static_cast<uint32_t>(request.primvars.size());
+            request.primvars.push_back(name.substr(9));
+        } else {
+            continue;
         }
+        outputs.push_back({buffer, source});
     }
 
     const auto technique = _delegate != nullptr ? _delegate->GetTechnique() : lrt::usd::Technique::Raster;
     const bool settle = _delegate != nullptr && _delegate->GetSettleStreams();
-    if (auto drawn = _engine->render(projection, settings, _targets, technique, settle, &renderTags); !drawn) {
+    if (auto drawn = _engine->render(projection, settings, _targets, technique, settle, &renderTags, request);
+        !drawn) {
         lrt::log::error("hdLrt: {}", drawn.error().toString());
         return;
     }
-    const auto fill = [&](HdLrtRenderBuffer* buffer, bool depth) {
-        if (buffer == nullptr || buffer->GetWidth() != width || buffer->GetHeight() != height) {
-            return;
+    for (const Output& output : outputs) {
+        HdLrtRenderBuffer* buffer = output.buffer;
+        if (buffer->GetWidth() != width || buffer->GetHeight() != height) {
+            continue;
         }
         const HdFormat component = HdGetComponentFormat(buffer->GetFormat());
         lrt::usd::AovLayout layout;
         layout.channels = static_cast<uint32_t>(HdGetComponentCount(buffer->GetFormat()));
         layout.componentBytes = static_cast<uint32_t>(HdDataSizeOfFormat(component));
-        layout.componentKind = component == HdFormatUNorm8 ? 0u : component == HdFormatFloat16 ? 1u : 2u;
-        if (component != HdFormatUNorm8 && component != HdFormatFloat16 && component != HdFormatFloat32) {
+        switch (component) {
+        case HdFormatUNorm8: layout.componentKind = 0; break;
+        case HdFormatFloat16: layout.componentKind = 1; break;
+        case HdFormatFloat32: layout.componentKind = 2; break;
+        case HdFormatInt32: layout.componentKind = 3; break;
+        default:
             lrt::log::warn("hdLrt: render buffer format {} is not filled", static_cast<int>(buffer->GetFormat()));
-            return;
+            continue;
         }
-        if (auto written = _engine->writeAov(_targets, depth, layout, proj.data(), buffer->Bytes()); !written) {
+        if (auto written = _engine->writeAov(_targets, output.source, layout, proj.data(), buffer->Bytes());
+            !written) {
             lrt::log::error("hdLrt: {}", written.error().toString());
         }
-    };
-    fill(colourBuffer, false);
-    fill(depthBuffer, true);
+    }
 }
 
 PXR_NAMESPACE_CLOSE_SCOPE

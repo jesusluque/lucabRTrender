@@ -385,6 +385,48 @@ TEST_CASE("displayColor reaches the pixels per face and per indexed face-vertex"
     CHECK(cornerRight[2] > cornerRight[0]);
     CHECK(std::abs(cornerMiddle[0] - cornerMiddle[2]) < 0.1F);
     CHECK(cornerMiddle[1] == 0.0F);
+
+    // The same frame's ids, normals and a primvar, as Hydra's outputs.
+    (*renderer)->requestOutputs({"primId", "elementId", "Neye", "normal", "primvars:displayColor"});
+    REQUIRE((*renderer)->render("/Camera", 0.0, w, h));
+    auto primId = (*renderer)->mappedOutput("primId");
+    auto elementId = (*renderer)->mappedOutput("elementId");
+    auto eye = (*renderer)->mappedOutput("Neye");
+    auto world = (*renderer)->mappedOutput("normal");
+    auto colour = (*renderer)->mappedOutput("primvars:displayColor");
+    REQUIRE(primId);
+    REQUIRE(elementId);
+    REQUIRE(eye);
+    REQUIRE(world);
+    REQUIRE(colour);
+    // Hydra's buffers are top row first.
+    const auto at = [&](const std::vector<uint8_t>& bytes, uint32_t x, uint32_t y, uint32_t channels, uint32_t c) {
+        int32_t v = 0;
+        std::memcpy(&v, bytes.data() + (size_t{h - 1 - y} * w + x) * channels * 4 + c * 4, 4);
+        return v;
+    };
+    const auto atFloat = [&](const std::vector<uint8_t>& bytes, uint32_t x, uint32_t y, uint32_t channels,
+                             uint32_t c) {
+        float v = 0.0F;
+        std::memcpy(&v, bytes.data() + (size_t{h - 1 - y} * w + x) * channels * 4 + c * 4, 4);
+        return v;
+    };
+    const uint32_t lx = w / 2 - 20, rx = w / 2 + 20, fy = h / 2 + 15, cy = h / 2 - 15;
+    std::printf("  primId %d %d %d, background %d; elementId %d %d; Neye z %.3f; normal z %.3f; displayColor r %.3f\n",
+                at(*primId, lx, fy, 1, 0), at(*primId, rx, fy, 1, 0), at(*primId, w / 2, cy, 1, 0),
+                at(*primId, 2, 2, 1, 0), at(*elementId, lx, fy, 1, 0), at(*elementId, rx, fy, 1, 0),
+                double(atFloat(*eye, lx, fy, 3, 2)), double(atFloat(*world, lx, fy, 3, 2)),
+                double(atFloat(*colour, lx, fy, 3, 0)));
+    CHECK(at(*primId, lx, fy, 1, 0) == at(*primId, rx, fy, 1, 0));
+    CHECK(at(*primId, lx, fy, 1, 0) != at(*primId, w / 2, cy, 1, 0));
+    CHECK(at(*primId, lx, fy, 1, 0) >= 0);
+    CHECK(at(*primId, 2, 2, 1, 0) == -1);
+    CHECK(at(*elementId, lx, fy, 1, 0) == 0);
+    CHECK(at(*elementId, rx, fy, 1, 0) == 1);
+    CHECK(atFloat(*eye, lx, fy, 3, 2) == Catch::Approx(1.0F).margin(1e-4F));
+    CHECK(atFloat(*world, lx, fy, 3, 2) == Catch::Approx(1.0F).margin(1e-4F));
+    CHECK(atFloat(*colour, lx, fy, 3, 0) == Catch::Approx(1.0F).margin(1e-5F));
+    CHECK(atFloat(*colour, lx, fy, 3, 1) == Catch::Approx(0.0F).margin(1e-5F));
 }
 
 TEST_CASE("a PointInstancer draws as its instances authored one by one", "[usd][gpu][mesh][instancing]") {

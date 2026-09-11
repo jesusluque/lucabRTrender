@@ -13,11 +13,13 @@ struct AovParams {
     uint  width;
     uint  height;
     uint  words;           // output words
-    uint  source;          // 0 colour (float4), 1 depth (view z, 0 empty)
+    uint  source;          // 0 float4 (colour, normals, primvars), 1 depth (view z, 0 empty), 2 uint ids
     uint  channels;        // components per pixel
     uint  componentBytes;  // 1, 2 or 4
-    uint  componentKind;   // 0 unorm8, 1 float16, 2 float32
-    uint  pad0;
+    uint  componentKind;   // 0 unorm8, 1 float16, 2 float32, 3 int32 (the source's bits)
+    uint  stride;          // source elements per pixel
+    uint  offset;          // which of them
+    uint  pad1; uint pad2; uint pad3;
     // The host projection's terms that take view z to clip depth (row-vector
     // matrices: clip = v * P).
     float p22; float p32; float p23; float p33;
@@ -25,6 +27,7 @@ struct AovParams {
 
 StructuredBuffer<float4>   colour;
 StructuredBuffer<float>    depth;
+StructuredBuffer<uint>     idSource;
 RWStructuredBuffer<uint>   words;
 ConstantBuffer<AovParams>  params;
 
@@ -33,8 +36,9 @@ float valueOf(uint pixel, uint channel) {
     const uint y = pixel / params.width;
     const uint at = (params.height - 1 - y) * params.width + x;
     if (params.source == 0) {
-        return channel < 4 ? colour[at][channel] : 0.0;
+        return channel < 4 ? colour[at * params.stride + params.offset][channel] : 0.0;
     }
+
     const float z = depth[at];
     if (!(z > 0.0)) {
         return 1.0;   // nothing drawn: the far plane
@@ -44,6 +48,13 @@ float valueOf(uint pixel, uint channel) {
     return saturate((clipZ / clipW) * 0.5 + 0.5);
 }
 
+uint idAt(uint pixel) {
+    const uint x = pixel % params.width;
+    const uint y = pixel / params.width;
+    const uint at = (params.height - 1 - y) * params.width + x;
+    return idSource[at * params.stride + params.offset];
+}
+
 uint bitsOf(float v) {
     if (params.componentKind == 0) {
         return uint(round(saturate(v) * 255.0));
@@ -51,6 +62,7 @@ uint bitsOf(float v) {
     if (params.componentKind == 1) {
         return f32tof16(halfSafe(v));
     }
+
     return bit_cast<uint>(v);
 }
 
@@ -71,7 +83,8 @@ void aovConvert(uint3 tid: SV_DispatchThreadID) {
         }
         const uint pixel = at / pixelBytes;
         const uint inPixel = at % pixelBytes;
-        const uint bits = bitsOf(valueOf(pixel, inPixel / params.componentBytes));
+        // Ids keep their own bits (-1 is not a float's to round-trip).
+        const uint bits = params.source == 2 ? idAt(pixel) : bitsOf(valueOf(pixel, inPixel / params.componentBytes));
         word |= ((bits >> (8 * (inPixel % params.componentBytes))) & 0xFFu) << (8 * b);
     }
     words[w] = word;

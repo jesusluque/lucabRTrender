@@ -1,6 +1,7 @@
 // Copyright (c) 2026 lucabRTrender contributors.
 #include "lrt/usd/StageRenderer.h"
 
+#include <algorithm>
 #include <cstring>
 
 #include <pxr/base/plug/registry.h>
@@ -81,6 +82,17 @@ std::vector<std::string> StageRenderer::cameras() const {
         }
     }
     return out;
+}
+
+void StageRenderer::requestOutputs(const std::vector<std::string>& aovs) {
+    TfTokenVector outputs{HdAovTokens->color, HdAovTokens->depth};
+    for (const std::string& aov : aovs) {
+        const TfToken token(aov);
+        if (std::find(outputs.begin(), outputs.end(), token) == outputs.end()) {
+            outputs.push_back(token);
+        }
+    }
+    impl_->controller->SetRenderOutputs(outputs);
 }
 
 Result<std::vector<uint8_t>> StageRenderer::mappedOutput(const std::string& aov) {

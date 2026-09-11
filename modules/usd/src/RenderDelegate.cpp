@@ -139,6 +139,13 @@ HdAovDescriptor HdLrtRenderDelegate::GetDefaultAovDescriptor(TfToken const& name
     if (name == HdAovTokens->depth) {
         return HdAovDescriptor(HdFormatFloat32, false, VtValue(1.0F));
     }
+    if (name == HdAovTokens->primId || name == HdAovTokens->instanceId || name == HdAovTokens->elementId) {
+        return HdAovDescriptor(HdFormatInt32, false, VtValue(-1));
+    }
+    if (name == HdAovTokens->Neye || name == HdAovTokens->normal ||
+        name.GetString().rfind("primvars:", 0) == 0) {
+        return HdAovDescriptor(HdFormatFloat32Vec3, false, VtValue(GfVec3f(0.0F)));
+    }
     return HdAovDescriptor();
 }
 

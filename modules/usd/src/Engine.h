@@ -99,6 +99,21 @@ struct AovLayout {
     uint32_t componentKind = 2;   ///< 0 unorm8, 1 float16, 2 float32
 };
 
+/// Which image an AOV reads.
+enum class AovKind { Colour, Depth, PrimId, InstanceId, ElementId, EyeNormal, WorldNormal, Primvar };
+
+struct AovSource {
+    AovKind  kind = AovKind::Colour;
+    uint32_t primvar = 0;   ///< AovKind::Primvar: its index in AovRequest::primvars
+};
+
+/// What a frame should compute beyond colour and depth.
+struct AovRequest {
+    bool                     ids = false;       ///< primId, instanceId, elementId
+    bool                     normals = false;   ///< Neye, normal
+    std::vector<std::string> primvars;          ///< "primvars:NAME" outputs, by NAME
+};
+
 /// How the engine draws a frame.
 enum class Technique {
     Raster,     ///< tile rasteriser, points composited
@@ -135,7 +150,8 @@ public:
     /// the frames that follow.
     Result<void> render(const render::Projection& projection, const render::RenderSettings& settings,
                         render::RenderTargets& targets, Technique technique = Technique::Raster,
-                        bool settleStreams = false, const pxr::TfTokenVector* renderTags = nullptr);
+                        bool settleStreams = false, const pxr::TfTokenVector* renderTags = nullptr,
+                        const AovRequest& aovs = {});
 
     [[nodiscard]] gpu::Device& device() noexcept { return *device_; }
 
@@ -146,8 +162,8 @@ public:
     /// device -- format, row order, and for depth the host projection's [0, 1]
     /// from view z (`projection` is the host's row-vector matrix, 16 values) --
     /// and read into `into`.
-    [[nodiscard]] Result<void> writeAov(const render::RenderTargets& targets, bool depth, const AovLayout& layout,
-                                        const double* projection, std::span<uint8_t> into);
+    [[nodiscard]] Result<void> writeAov(const render::RenderTargets& targets, AovSource source,
+                                        const AovLayout& layout, const double* projection, std::span<uint8_t> into);
 
 private:
     Engine() = default;
@@ -176,6 +192,9 @@ private:
     std::optional<technique::HeadlightShading> headlight_;
     std::optional<gpu::ComputeKernel>          nearest_;
     technique::VisibilityTargets              visibility_;
+    std::optional<technique::AovShading>      aovShading_;
+    technique::AovBuffers                     aovs_;
+    bool                                      aovsValid_ = false;
     render::RenderTargets                     meshLayer_;
     render::RenderTargets                     opaqueLayer_;
 };

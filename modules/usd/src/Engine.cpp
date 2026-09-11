@@ -243,15 +243,39 @@ Result<size_t> Engine::commit() {
     return uploaded;
 }
 
-Result<void> Engine::writeAov(const render::RenderTargets& targets, bool depth, const AovLayout& layout,
+Result<void> Engine::writeAov(const render::RenderTargets& targets, AovSource aov, const AovLayout& layout,
                               const double* projection, std::span<uint8_t> into) {
+    const bool depth = aov.kind == AovKind::Depth;
     const uint64_t bytes = uint64_t{targets.width} * targets.height * layout.channels * layout.componentBytes;
     if (into.size() < bytes || layout.channels == 0 || layout.channels > 4 ||
         (layout.componentBytes != 1 && layout.componentBytes != 2 && layout.componentBytes != 4)) {
         return Error(ErrorCode::InvalidArgument, "a render buffer the engine cannot fill");
     }
-    const gpu::Buffer& source = depth ? targets.depth : targets.colour;
-    if (!source.valid()) {
+    // What the AOV reads, and where in each pixel.
+    const gpu::Buffer* source = depth ? &targets.depth : &targets.colour;
+    uint32_t kind = depth ? 1u : 0u;
+    uint32_t stride = 1;
+    uint32_t offset = 0;
+    const bool fromAovs = aov.kind != AovKind::Colour && aov.kind != AovKind::Depth;
+    if (fromAovs) {
+        if (!aovsValid_ || aovs_.width != targets.width || aovs_.height != targets.height ||
+            (aov.kind == AovKind::Primvar && aov.primvar >= aovs_.primvarSlots)) {
+            // Nothing a mesh drew: the clear value, -1 for ids and 0 otherwise.
+            const bool ids = aov.kind == AovKind::PrimId || aov.kind == AovKind::InstanceId ||
+                             aov.kind == AovKind::ElementId;
+            std::fill(into.begin(), into.begin() + static_cast<std::ptrdiff_t>(bytes), static_cast<uint8_t>(ids ? 0xFF : 0));
+            return ok();
+        }
+        switch (aov.kind) {
+        case AovKind::PrimId: source = &aovs_.ids; kind = 2; stride = 3; offset = 0; break;
+        case AovKind::InstanceId: source = &aovs_.ids; kind = 2; stride = 3; offset = 1; break;
+        case AovKind::ElementId: source = &aovs_.ids; kind = 2; stride = 3; offset = 2; break;
+        case AovKind::EyeNormal: source = &aovs_.eyeNormals; break;
+        case AovKind::WorldNormal: source = &aovs_.worldNormals; break;
+        default: source = &aovs_.primvars; stride = aovs_.primvarSlots; offset = aov.primvar; break;
+        }
+    }
+    if (!source->valid()) {
         return Error(ErrorCode::InvalidArgument, "nothing rendered to convert");
     }
     if (!aovConvert_.has_value()) {
@@ -274,14 +298,17 @@ Result<void> Engine::writeAov(const render::RenderTargets& targets, bool depth, 
     if (!placeholder) return std::move(placeholder).error();
     gpu::CommandBatch batch(*device_);
     aovConvert_->dispatch(batch, {words, 1, 1}, [&](rhi::ShaderCursor cursor) {
-        cursor["colour"].setBinding(depth ? placeholder->rhi() : source.rhi());
-        cursor["depth"].setBinding(depth ? source.rhi() : placeholder->rhi());
+        cursor["colour"].setBinding(kind == 0 ? source->rhi() : placeholder->rhi());
+        cursor["depth"].setBinding(kind == 1 ? source->rhi() : placeholder->rhi());
+        cursor["idSource"].setBinding(kind == 2 ? source->rhi() : placeholder->rhi());
         cursor["words"].setBinding(out->rhi());
         rhi::ShaderCursor p = cursor["params"];
         p["width"].setData(targets.width);
         p["height"].setData(targets.height);
         p["words"].setData(words);
-        p["source"].setData(uint32_t{depth ? 1u : 0u});
+        p["source"].setData(kind);
+        p["stride"].setData(stride);
+        p["offset"].setData(offset);
         p["channels"].setData(layout.channels);
         p["componentBytes"].setData(layout.componentBytes);
         p["componentKind"].setData(layout.componentKind);
@@ -298,8 +325,9 @@ Result<void> Engine::writeAov(const render::RenderTargets& targets, bool depth, 
 
 Result<void> Engine::render(const render::Projection& projection, const render::RenderSettings& settings,
                             render::RenderTargets& targets, Technique technique, bool settleStreams,
-                            const pxr::TfTokenVector* renderTags) {
+                            const pxr::TfTokenVector* renderTags, const AovRequest& aovRequest) {
     lastTargets_ = &targets;
+    aovsValid_ = false;
     std::vector<world::MeshInstance> meshInstances;
     std::vector<world::InstanceSet> meshSets;
     std::vector<render::SplatInstance> splats;
@@ -479,10 +507,24 @@ Result<void> Engine::render(const render::Projection& projection, const render::
             if (!shading) return std::move(shading).error();
             headlight_.emplace(std::move(*shading));
         }
+        scene_->setExtraPrimvarSlots(aovRequest.primvars);
         LRT_TRY(scene_->update(meshInstances, projection, meshSets));
         gpu::CommandBatch batch(*device_);
         LRT_TRY(visibilityRaster_->render(batch, *scene_, projection, settings.width, settings.height, visibility_));
         LRT_TRY(headlight_->shade(batch, *scene_, visibility_, projection, meshLayer_));
+        if (aovRequest.ids || aovRequest.normals || !aovRequest.primvars.empty()) {
+            if (!aovShading_.has_value()) {
+                auto made = technique::AovShading::create(*library_);
+                if (!made) return std::move(made).error();
+                aovShading_.emplace(std::move(*made));
+            }
+            std::vector<uint32_t> slots;
+            for (const std::string& name : aovRequest.primvars) {
+                slots.push_back(scene_->slotOf(name));
+            }
+            LRT_TRY(aovShading_->shade(batch, *scene_, visibility_, projection, slots, aovs_));
+            aovsValid_ = true;
+        }
         LRT_TRY(batch.submit(true));
     }
     const bool pointLayer = !points.empty() && pointRasterizer_.has_value();

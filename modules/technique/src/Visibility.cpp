@@ -254,4 +254,68 @@ Result<void> HeadlightShading::shade(gpu::CommandBatch& batch, const world::GpuS
     return ok();
 }
 
+Result<AovShading> AovShading::create(gpu::ShaderLibrary& library) {
+    auto kernel = gpu::ComputeKernel::create(library, "lrt/technique/aovs", "aovs");
+    if (!kernel) return std::move(kernel).error();
+    AovShading shading;
+    shading.device_ = &library.device();
+    shading.aovs_ = std::move(*kernel);
+    return shading;
+}
+
+Result<void> AovShading::shade(gpu::CommandBatch& batch, const world::GpuScene& scene,
+                               const VisibilityTargets& targets, const render::Projection& projection,
+                               std::span<const uint32_t> slots, AovBuffers& out) {
+    const uint64_t pixels = uint64_t{targets.width} * targets.height;
+    const uint32_t slotCount = static_cast<uint32_t>(slots.size());
+    const auto make = [&](gpu::Buffer& into, uint64_t count, uint32_t element, const char* label) -> Result<void> {
+        gpu::BufferDesc desc;
+        desc.bytes = std::max<uint64_t>(count, 1) * element;
+        desc.elementBytes = element;
+        desc.label = label;
+        auto made = gpu::Buffer::create(*device_, desc);
+        if (!made) return std::move(made).error();
+        into = std::move(*made);
+        return ok();
+    };
+    if (out.width != targets.width || out.height != targets.height || out.primvarSlots != slotCount ||
+        !out.ids.valid()) {
+        LRT_TRY(make(out.ids, pixels * 3, 4, "aov.ids"));
+        LRT_TRY(make(out.eyeNormals, pixels, 16, "aov.Neye"));
+        LRT_TRY(make(out.worldNormals, pixels, 16, "aov.normal"));
+        LRT_TRY(make(out.primvars, pixels * std::max<uint32_t>(slotCount, 1), 16, "aov.primvars"));
+        out.width = targets.width;
+        out.height = targets.height;
+        out.primvarSlots = slotCount;
+    }
+    std::vector<uint32_t> slotList(slots.begin(), slots.end());
+    if (slotList.empty()) {
+        slotList.push_back(0);
+    }
+    auto slotBuffer = gpu::Buffer::fromSpan<uint32_t>(*device_, slotList, "aov.slots");
+    if (!slotBuffer) return std::move(slotBuffer).error();
+    auto ids = targets.ids.view(0);
+    if (!ids) return std::move(ids).error();
+    aovs_.dispatch(batch, {targets.width, targets.height, 1}, [&](rhi::ShaderCursor cursor) {
+        cursor["positions"].setBinding(scene.positions().rhi());
+        cursor["indices"].setBinding(scene.indices().rhi());
+        cursor["meshes"].setBinding(scene.meshRecords().rhi());
+        cursor["instances"].setBinding(scene.instanceRecords().rhi());
+        cursor["primvarRecords"].setBinding(scene.primvarRecords().rhi());
+        cursor["primvarValues"].setBinding(scene.primvarValues().rhi());
+        cursor["primvarSlots"].setBinding(scene.primvarSlots().rhi());
+        cursor["triangleCorners"].setBinding(scene.triangleCorners().rhi());
+        cursor["triangleFaces"].setBinding(scene.triangleFaces().rhi());
+        cursor["visibility"].setBinding((*ids).get());
+        cursor["ids"].setBinding(out.ids.rhi());
+        cursor["eyeNormals"].setBinding(out.eyeNormals.rhi());
+        cursor["worldNormals"].setBinding(out.worldNormals.rhi());
+        cursor["primvarsOut"].setBinding(out.primvars.rhi());
+        cursor["primvarSlotOf"].setBinding(slotBuffer->rhi());
+        setCamera(cursor["camera"], projection, targets.width, targets.height);
+        cursor["params"]["primvarSlots"].setData(slotCount);
+    });
+    return ok();
+}
+
 }   // namespace lrt::technique

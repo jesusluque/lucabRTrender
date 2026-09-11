@@ -8,6 +8,7 @@
 #pragma once
 
 #include <cstdint>
+#include <span>
 
 #include "lrt/core/Result.h"
 #include "lrt/gpu/ComputeKernel.h"
@@ -95,6 +96,33 @@ public:
 private:
     gpu::Device*       device_ = nullptr;
     gpu::ComputeKernel shade_;
+};
+
+/// Arbitrary outputs from visibility, bottom row first: ids (prim, instance,
+/// element; -1 for nothing), eye- and world-space normals, and primvars by
+/// scene slot.
+struct AovBuffers {
+    uint32_t    width = 0;
+    uint32_t    height = 0;
+    uint32_t    primvarSlots = 0;
+    gpu::Buffer ids;            ///< uint, 3 per pixel (int32 bits)
+    gpu::Buffer eyeNormals;     ///< float4 per pixel (Hydra's eye space: -Z forward)
+    gpu::Buffer worldNormals;   ///< float4 per pixel
+    gpu::Buffer primvars;       ///< float4, primvarSlots per pixel
+};
+
+class AovShading {
+public:
+    [[nodiscard]] static Result<AovShading> create(gpu::ShaderLibrary& library);
+
+    /// `slots`: the scene primvar slots to write, in output order.
+    [[nodiscard]] Result<void> shade(gpu::CommandBatch& batch, const world::GpuScene& scene,
+                                     const VisibilityTargets& targets, const render::Projection& projection,
+                                     std::span<const uint32_t> slots, AovBuffers& out);
+
+private:
+    gpu::Device*       device_ = nullptr;
+    gpu::ComputeKernel aovs_;
 };
 
 }   // namespace lrt::technique
