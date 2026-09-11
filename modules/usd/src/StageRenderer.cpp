@@ -10,6 +10,9 @@
 #include <pxr/imaging/hd/rprimCollection.h>
 #include <pxr/imaging/hd/tokens.h>
 #include <pxr/imaging/hdx/taskController.h>
+#include <pxr/base/gf/camera.h>
+#include <pxr/base/gf/frustum.h>
+#include <pxr/base/gf/range1f.h>
 #include <pxr/imaging/cameraUtil/framing.h>
 #include <pxr/usd/usd/primRange.h>
 #include <pxr/usd/usd/stage.h>
@@ -126,6 +129,43 @@ Result<StageImage> StageRenderer::render(const std::string& camera, double time,
     impl.sceneIndices.stageSceneIndex->ApplyPendingUpdates();
 
     impl.controller->SetCameraPath(SdfPath(cameraPath));
+    return execute(width, height);
+}
+
+Result<StageImage> StageRenderer::render(const render::Camera& camera, double time, uint32_t width, uint32_t height,
+                                         const std::string& technique) {
+    Impl& impl = *impl_;
+    if (technique != "raster" && technique != "rt") {
+        return Error::make(ErrorCode::InvalidArgument, "technique '{}': raster or rt", technique);
+    }
+    impl.delegate->SetRenderSetting(TfToken("lrt:technique"), VtValue(TfToken(technique)));
+    impl.delegate->SetRenderSetting(TfToken("lrt:settleStreams"), VtValue(true));
+    impl.sceneIndices.stageSceneIndex->SetTime(UsdTimeCode(time));
+    impl.sceneIndices.stageSceneIndex->ApplyPendingUpdates();
+    // A camera's matrices, as a free camera: world to camera, and the lens's
+    // frustum (apertures in the image's aspect, so nothing is conformed).
+    const render::Mat4 toCamera = aofx::xform::inverseAffine(camera.cameraToWorld);
+    GfMatrix4d view;
+    for (int r = 0; r < 4; ++r) {
+        for (int c = 0; c < 4; ++c) {
+            view[c][r] = toCamera.at(r, c);   // row-vector matrices are the transpose
+        }
+    }
+    GfCamera lens;
+    lens.SetFocalLength(static_cast<float>(camera.lens.focal));
+    lens.SetHorizontalAperture(static_cast<float>(camera.lens.haperture));
+    lens.SetVerticalAperture(static_cast<float>(camera.lens.haperture * height / width));
+    lens.SetClippingRange(GfRange1f(static_cast<float>(camera.lens.nearZ), static_cast<float>(camera.lens.farZ)));
+    if (camera.lens.projection == render::Lens::Projection::Orthographic) {
+        lens.SetProjection(GfCamera::Orthographic);
+    }
+    impl.controller->SetCameraPath(SdfPath());
+    impl.controller->SetFreeCameraMatrices(view, lens.GetFrustum().ComputeProjectionMatrix());
+    return execute(width, height);
+}
+
+Result<StageImage> StageRenderer::execute(uint32_t width, uint32_t height) {
+    Impl& impl = *impl_;
     impl.controller->SetRenderBufferSize(GfVec2i(static_cast<int>(width), static_cast<int>(height)));
     impl.controller->SetFraming(CameraUtilFraming(
         GfRect2i(GfVec2i(0), static_cast<int>(width), static_cast<int>(height))));

@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "lrt/core/Result.h"
+#include "lrt/render/Camera.h"
 
 namespace lrt::usd {
 
@@ -33,6 +34,11 @@ public:
                                             uint32_t width, uint32_t height,
                                             const std::string& technique = "raster");
 
+    /// The same, from a camera that is not on the stage (the engine's
+    /// convention: looking down its own -Z, as USD's cameras do).
+    [[nodiscard]] Result<StageImage> render(const render::Camera& camera, double time, uint32_t width,
+                                            uint32_t height, const std::string& technique = "raster");
+
     /// The last render's Hydra render buffer for `aov` ("color", "depth"), as
     /// a host mapping it reads it: the buffer's own format, top row first.
     [[nodiscard]] Result<std::vector<uint8_t>> mappedOutput(const std::string& aov);
@@ -47,6 +53,7 @@ public:
 
 private:
     StageRenderer();
+    [[nodiscard]] Result<StageImage> execute(uint32_t width, uint32_t height);
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };
