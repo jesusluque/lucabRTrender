@@ -52,6 +52,8 @@ public:
 
     /// True when a device opened; a delegate without one draws nothing.
     [[nodiscard]] bool HasEngine() const { return _engine != nullptr; }
+    /// The engine's device; only valid when HasEngine().
+    [[nodiscard]] lrt::gpu::Device& GetEngineDevice() const { return _engine->device(); }
 
 private:
     void _Setup();

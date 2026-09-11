@@ -67,6 +67,11 @@ target_compile_definitions(lrt_aofx_tests PRIVATE
     LRT_AOFX_TEST_BUNDLES="${LRT_AOFX_TEST_BUNDLES}"
     LRT_AOFX_TEST_RUN_BUNDLES="${LRT_AOFX_TEST_RUN_BUNDLES}"
     LRT_AOFX_BUNDLES="${AOFX_BUNDLE_DIR}")
+# The SDK headers against their recorded hashes: aofx compatibility is mandatory.
+add_test(NAME aofx_sdk_manifest
+    COMMAND ${CMAKE_COMMAND} -DSDK_DIR=${CMAKE_SOURCE_DIR}/modules/aofx/sdk/include/aofx
+            -DMANIFEST=${CMAKE_CURRENT_SOURCE_DIR}/aofx/sdk_manifest.txt
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/aofx/CheckSdkManifest.cmake)
 
 lrt_test(lrt_sched_tests
     SOURCES sched/test_clock.cpp

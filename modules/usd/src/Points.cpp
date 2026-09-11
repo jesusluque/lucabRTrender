@@ -48,22 +48,14 @@ void HdLrtPoints::Sync(HdSceneDelegate* delegate, HdRenderParam* renderParam,
         *dirtyBits &= ~HdChangeTracker::AllSceneDirtyBits;
         return;
     }
-    std::optional<lrt::io::RawPoints> raw;
+    std::optional<lrt::usd::PointsArrays> raw;
     std::optional<lrt::render::PointStyle> style;
     if ((*dirtyBits & (HdChangeTracker::DirtyPoints | HdChangeTracker::DirtyPrimvar |
                        HdChangeTracker::DirtyWidths)) != 0) {
         lrt::usd::PointsArrays arrays;
-        VtValue points = delegate->Get(id, HdTokens->points);
-        if (points.IsHolding<VtVec3fArray>()) {
-            arrays.positions = points.UncheckedGet<VtVec3fArray>();
-        }
-        VtValue colours = delegate->Get(id, HdTokens->displayColor);
-        if (colours.IsHolding<VtVec3fArray>()) {
-            arrays.colours = colours.UncheckedGet<VtVec3fArray>();
-        } else if (colours.IsHolding<GfVec3f>()) {
-            arrays.colours = VtVec3fArray{colours.UncheckedGet<GfVec3f>()};
-        }
-        raw = lrt::usd::rawPointsFrom(arrays, id.GetString());
+        arrays.positions = delegate->Get(id, HdTokens->points);
+        arrays.colours = delegate->Get(id, HdTokens->displayColor);
+        raw = std::move(arrays);
 
         lrt::render::PointStyle s;
         s.size = firstFloat(delegate->Get(id, HdTokens->widths), 0.01F);

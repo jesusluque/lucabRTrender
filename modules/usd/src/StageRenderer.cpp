@@ -1,6 +1,8 @@
 // Copyright (c) 2026 lucabRTrender contributors.
 #include "lrt/usd/StageRenderer.h"
 
+#include <cstring>
+
 #include <pxr/base/plug/registry.h>
 #include <pxr/imaging/hd/engine.h>
 #include <pxr/imaging/hd/renderBuffer.h>
@@ -78,6 +80,20 @@ std::vector<std::string> StageRenderer::cameras() const {
     return out;
 }
 
+Result<std::vector<uint8_t>> StageRenderer::mappedOutput(const std::string& aov) {
+    HdRenderBuffer* buffer = impl_->controller->GetRenderOutput(TfToken(aov));
+    if (buffer == nullptr) {
+        return Error::make(ErrorCode::NotFound, "no render output '{}'", aov);
+    }
+    buffer->Resolve();
+    const size_t bytes = size_t{buffer->GetWidth()} * buffer->GetHeight() * HdDataSizeOfFormat(buffer->GetFormat());
+    std::vector<uint8_t> out(bytes);
+    const auto* mapped = static_cast<const uint8_t*>(buffer->Map());
+    std::memcpy(out.data(), mapped, bytes);
+    buffer->Unmap();
+    return out;
+}
+
 double StageRenderer::timeCodesPerSecond() const {
     return impl_->stage->GetTimeCodesPerSecond();
 }
@@ -116,32 +132,25 @@ Result<StageImage> StageRenderer::render(const std::string& camera, double time,
     HdTaskSharedPtrVector tasks = impl.controller->GetRenderingTasks();
     impl.engine.Execute(impl.index, &tasks);
 
+    // The engine's own targets, as the render pass left them: bottom row
+    // first and view z already, so the only step is the readback.
+    auto* param = static_cast<HdLrtRenderParam*>(impl.delegate->GetRenderParam());
+    const lrt::usd::Engine* engine = param != nullptr ? param->GetEngine() : nullptr;
+    const render::RenderTargets* targets = engine != nullptr ? engine->lastTargets() : nullptr;
+    if (targets == nullptr || targets->width != width || targets->height != height) {
+        return Error(ErrorCode::InternalError, "the render pass drew nothing to read");
+    }
     StageImage image;
     image.width = width;
     image.height = height;
+    auto rgba = targets->colour.readAll<float>(impl.delegate->GetEngineDevice());
+    if (!rgba) return std::move(rgba).error();
+    auto depth = targets->depth.readAll<float>(impl.delegate->GetEngineDevice());
+    if (!depth) return std::move(depth).error();
+    image.rgba = std::move(*rgba);
+    image.depth = std::move(*depth);
     image.rgba.resize(size_t{width} * height * 4);
     image.depth.resize(size_t{width} * height);
-    HdRenderBuffer* colour = impl.controller->GetRenderOutput(HdAovTokens->color);
-    HdRenderBuffer* depth = impl.controller->GetRenderOutput(HdAovTokens->depth);
-    if (colour == nullptr || depth == nullptr) {
-        return Error(ErrorCode::InternalError, "the task controller gave no render outputs");
-    }
-    colour->Resolve();
-    depth->Resolve();
-    if (colour->GetWidth() != width || colour->GetFormat() != HdFormatFloat32Vec4) {
-        return Error::make(ErrorCode::InternalError, "unexpected colour output ({}x{}, format {})",
-                           colour->GetWidth(), colour->GetHeight(), static_cast<int>(colour->GetFormat()));
-    }
-    // Render buffers are top row first; the engine's images bottom row first.
-    const auto* c = static_cast<const float*>(colour->Map());
-    const auto* d = static_cast<const float*>(depth->Map());
-    for (uint32_t y = 0; y < height; ++y) {
-        const size_t from = size_t{height - 1 - y} * width;
-        std::memcpy(image.rgba.data() + size_t{y} * width * 4, c + from * 4, size_t{width} * 16);
-        std::memcpy(image.depth.data() + size_t{y} * width, d + from, size_t{width} * 4);
-    }
-    colour->Unmap();
-    depth->Unmap();
     return image;
 }
 

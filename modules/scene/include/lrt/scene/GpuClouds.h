@@ -13,6 +13,8 @@
 #pragma once
 
 #include <array>
+#include <cstddef>
+#include <span>
 #include <filesystem>
 #include <cstdint>
 #include <memory>
@@ -61,6 +63,37 @@ struct GpuPoints {
     Bounds      bounds;
 };
 
+/// A float array as it sits in memory -- float32 values, or float16 when
+/// `half` -- uploaded as bytes and read on the device.
+struct FloatStream {
+    std::span<const std::byte> bytes;
+    bool                       half = false;
+
+    [[nodiscard]] bool   empty() const noexcept { return bytes.empty(); }
+    [[nodiscard]] size_t values() const noexcept { return bytes.size() / (half ? 2 : 4); }
+};
+
+/// A splat cloud as separate arrays, the way USD's ParticleField stores one.
+/// Empty streams take defaults: identity rotation, unit scale, opacity 1, DC 0.
+struct SplatStreams {
+    std::string source;
+    uint32_t    count = 0;
+    FloatStream positions;      ///< xyz
+    FloatStream rotations;      ///< xyzw (GfQuat's layout)
+    FloatStream scales;         ///< xyz, linear
+    FloatStream opacities;      ///< linear
+    uint32_t    coefficients = 0;   ///< SH coefficients per splat, DC first: (degree + 1)^2
+    FloatStream sh;             ///< rgb per coefficient
+};
+
+/// A point cloud as separate arrays, the way UsdGeomPoints stores one.
+struct PointStreams {
+    std::string source;
+    uint32_t    count = 0;
+    FloatStream positions;   ///< xyz
+    FloatStream colours;     ///< rgb, linear: one for every point, one per point, or empty (white)
+};
+
 class CloudLoader {
 public:
     static constexpr uint64_t kSliceBytes = uint64_t{256} << 20;
@@ -77,6 +110,9 @@ public:
     [[nodiscard]] Result<io::RawSplats> records(const io::RawSog& sog, uint32_t maxDegree = 3);
     /// `detail` keeps that fraction of the points, the same ones every time.
     [[nodiscard]] Result<GpuPoints> upload(const io::RawPoints& raw, float detail = 1.0F);
+    /// Arrays uploaded as they are and interleaved into records on the device.
+    [[nodiscard]] Result<GpuSplats> upload(const SplatStreams& streams, uint32_t maxDegree = 3);
+    [[nodiscard]] Result<GpuPoints> upload(const PointStreams& streams, float detail = 1.0F);
 
     /// The extent of `count` float4 positions, computed on the device.
     [[nodiscard]] Result<Bounds> boundsOf(const gpu::Buffer& positions, uint32_t count);
@@ -90,6 +126,10 @@ private:
     [[nodiscard]] Result<uint32_t> decodeSlice(const gpu::Buffer& raw, const io::SplatEncoding& e, uint32_t n,
                                                uint32_t written, uint32_t keep, GpuSplats& splats);
     [[nodiscard]] Result<void> finishSplats(GpuSplats& splats, uint32_t written);
+    [[nodiscard]] Result<uint32_t> decodePoints(const gpu::Buffer& raw, uint32_t n, uint32_t first,
+                                                uint32_t colourKind, float detail, uint32_t written,
+                                                GpuPoints& points);
+    [[nodiscard]] Result<gpu::Buffer> streamBuffer(const FloatStream& stream, const char* label);
 
     gpu::Device*       device_ = nullptr;
     gpu::ComputeKernel sogDecode_;
@@ -98,6 +138,8 @@ private:
     gpu::ComputeKernel splatDecode_;
     gpu::ComputeKernel pointsValidate_;
     gpu::ComputeKernel pointsDecode_;
+    gpu::ComputeKernel splatStreams_;
+    gpu::ComputeKernel pointStreams_;
     gpu::ComputeKernel boundsChunks_;
     gpu::ComputeKernel boundsReduce_;
 };

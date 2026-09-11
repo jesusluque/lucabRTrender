@@ -20,6 +20,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -27,7 +28,7 @@
 
 #include "lrt/gpu/Device.h"
 #include "lrt/gpu/ShaderLibrary.h"
-#include "lrt/io/RawSplats.h"
+#include "lrt/usd/PrimData.h"
 #include "lrt/lod/Lod.h"
 #include "lrt/lod/Lrtc.h"
 #include "lrt/render/GaussianRayTracer.h"
@@ -47,7 +48,7 @@ struct StreamedAsset {
 };
 
 struct SplatEntry {
-    std::optional<io::RawSplats>        pending;   ///< synced, not yet uploaded
+    std::optional<ParticleFieldArrays>  pending;   ///< synced, not yet uploaded
     std::unique_ptr<scene::GpuSplats>   gpu;
     render::Mat4                        objectToWorld = render::Mat4::identity();
     bool                                visible = true;
@@ -59,11 +60,18 @@ struct SplatEntry {
 };
 
 struct PointsEntry {
-    std::optional<io::RawPoints>        pending;
+    std::optional<PointsArrays>         pending;
     std::unique_ptr<scene::GpuPoints>   gpu;
     render::Mat4                        objectToWorld = render::Mat4::identity();
     render::PointStyle                  style;
     bool                                visible = true;
+};
+
+/// The layout of a Hydra render buffer's pixels, for `Engine::writeAov`.
+struct AovLayout {
+    uint32_t channels = 4;
+    uint32_t componentBytes = 4;
+    uint32_t componentKind = 2;   ///< 0 unorm8, 1 float16, 2 float32
 };
 
 /// How the engine draws a frame.
@@ -78,11 +86,11 @@ public:
     static std::unique_ptr<Engine> create(std::string& why);
 
     // --- from Sync (any thread) ---
-    void setSplats(const pxr::SdfPath& id, std::optional<io::RawSplats> raw,
+    void setSplats(const pxr::SdfPath& id, std::optional<ParticleFieldArrays> raw,
                    const render::Mat4* transform, std::optional<bool> visible,
                    std::optional<render::SplatEdit> edit = std::nullopt,
                    std::optional<StreamedAsset> asset = std::nullopt);
-    void setPoints(const pxr::SdfPath& id, std::optional<io::RawPoints> raw,
+    void setPoints(const pxr::SdfPath& id, std::optional<PointsArrays> raw,
                    const render::Mat4* transform, std::optional<bool> visible,
                    std::optional<render::PointStyle> style);
     void remove(const pxr::SdfPath& id);
@@ -100,6 +108,16 @@ public:
 
     [[nodiscard]] gpu::Device& device() noexcept { return *device_; }
 
+    /// The targets the last render drew into (owned by the render pass).
+    [[nodiscard]] const render::RenderTargets* lastTargets() const noexcept { return lastTargets_; }
+
+    /// A render target as a Hydra render buffer's bytes, converted on the
+    /// device -- format, row order, and for depth the host projection's [0, 1]
+    /// from view z (`projection` is the host's row-vector matrix, 16 values) --
+    /// and read into `into`.
+    [[nodiscard]] Result<void> writeAov(const render::RenderTargets& targets, bool depth, const AovLayout& layout,
+                                        const double* projection, std::span<uint8_t> into);
+
 private:
     Engine() = default;
 
@@ -110,6 +128,8 @@ private:
     std::optional<render::PointRasterizer>    pointRasterizer_;
     std::optional<render::GaussianRayTracer>  rayTracer_;   ///< made on first use
     std::optional<lod::CutSelector>           cutter_;      ///< made on first use
+    std::optional<gpu::ComputeKernel>         aovConvert_;  ///< made on first use
+    const render::RenderTargets*              lastTargets_ = nullptr;
     render::RenderTargets                     pointLayer_;
 
     std::mutex                                guard_;

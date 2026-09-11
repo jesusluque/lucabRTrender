@@ -2,14 +2,16 @@
 #pragma once
 
 #include <atomic>
+#include <span>
 #include <vector>
 
 #include <pxr/imaging/hd/renderBuffer.h>
 
 PXR_NAMESPACE_OPEN_SCOPE
 
-/// An AOV in host memory. The render pass writes it after each frame; a host
-/// maps and reads it. Always converged: the engine has no progressive mode.
+/// An AOV in host memory, for a host that maps it. The render pass fills it
+/// after each frame with bytes the device already converted to its format
+/// (Engine::writeAov). Always converged: the engine has no progressive mode.
 class HdLrtRenderBuffer final : public HdRenderBuffer {
 public:
     explicit HdLrtRenderBuffer(SdfPath const& id) : HdRenderBuffer(id) {}
@@ -26,11 +28,8 @@ public:
     void Resolve() override {}
     bool IsConverged() const override { return true; }
 
-    /// Writes an engine image (bottom row first) into this buffer's format,
-    /// top row first as Hydra reads it. `depth`: view z converted to Hydra's
-    /// [0, 1] clip depth with `depthScale`/`depthBias` by the caller.
-    void WriteColour(const float* rgba, unsigned int width, unsigned int height);
-    void WriteDepth(const float* depth01, unsigned int width, unsigned int height);
+    /// Where the converted bytes go.
+    [[nodiscard]] std::span<uint8_t> Bytes() { return {_data.data(), _data.size()}; }
 
 private:
     void _Deallocate() override { _data.clear(); }

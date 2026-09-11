@@ -61,26 +61,25 @@ void HdLrtRenderPass::_Execute(HdRenderPassStateSharedPtr const& state, TfTokenV
         lrt::log::error("hdLrt: {}", drawn.error().toString());
         return;
     }
-    if (colourBuffer != nullptr) {
-        if (auto colour = _targets.colour.readAll<float>(_engine->device())) {
-            colourBuffer->WriteColour(colour->data(), width, height);
+    const auto fill = [&](HdLrtRenderBuffer* buffer, bool depth) {
+        if (buffer == nullptr || buffer->GetWidth() != width || buffer->GetHeight() != height) {
+            return;
         }
-    }
-    if (depthBuffer != nullptr) {
-        if (auto depth = _targets.depth.readAll<float>(_engine->device())) {
-            // View z to Hydra's [0, 1] depth through the host's own projection;
-            // nothing drawn is the far plane.
-            for (float& z : *depth) {
-                if (!(z > 0.0F)) {
-                    z = 1.0F;
-                    continue;
-                }
-                const GfVec3d clip = proj.Transform(GfVec3d(0.0, 0.0, -static_cast<double>(z)));
-                z = static_cast<float>(std::clamp(clip[2] * 0.5 + 0.5, 0.0, 1.0));
-            }
-            depthBuffer->WriteDepth(depth->data(), width, height);
+        const HdFormat component = HdGetComponentFormat(buffer->GetFormat());
+        lrt::usd::AovLayout layout;
+        layout.channels = static_cast<uint32_t>(HdGetComponentCount(buffer->GetFormat()));
+        layout.componentBytes = static_cast<uint32_t>(HdDataSizeOfFormat(component));
+        layout.componentKind = component == HdFormatUNorm8 ? 0u : component == HdFormatFloat16 ? 1u : 2u;
+        if (component != HdFormatUNorm8 && component != HdFormatFloat16 && component != HdFormatFloat32) {
+            lrt::log::warn("hdLrt: render buffer format {} is not filled", static_cast<int>(buffer->GetFormat()));
+            return;
         }
-    }
+        if (auto written = _engine->writeAov(_targets, depth, layout, proj.data(), buffer->Bytes()); !written) {
+            lrt::log::error("hdLrt: {}", written.error().toString());
+        }
+    };
+    fill(colourBuffer, false);
+    fill(depthBuffer, true);
 }
 
 PXR_NAMESPACE_CLOSE_SCOPE

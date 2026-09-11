@@ -80,6 +80,8 @@ Result<CloudLoader> CloudLoader::create(gpu::ShaderLibrary& library) {
     LRT_TRY(make(loader.splatDecode_, "lrt/scene/splat_decode", "splatDecode"));
     LRT_TRY(make(loader.pointsValidate_, "lrt/scene/points_validate", "pointsValidate"));
     LRT_TRY(make(loader.pointsDecode_, "lrt/scene/points_decode", "pointsDecode"));
+    LRT_TRY(make(loader.splatStreams_, "lrt/scene/streams", "splatStreams"));
+    LRT_TRY(make(loader.pointStreams_, "lrt/scene/streams", "pointStreams"));
     LRT_TRY(make(loader.boundsChunks_, "lrt/scene/bounds_chunks", "boundsChunks"));
     LRT_TRY(make(loader.boundsReduce_, "lrt/scene/bounds_reduce", "boundsReduce"));
     return loader;
@@ -348,6 +350,47 @@ Result<io::RawSplats> CloudLoader::records(const io::RawSog& sog, uint32_t maxDe
     return raw;
 }
 
+Result<uint32_t> CloudLoader::decodePoints(const gpu::Buffer& raw, uint32_t n, uint32_t first,
+                                           uint32_t colourKind, float detail, uint32_t written,
+                                           GpuPoints& points) {
+    auto valid = deviceBuffer(*device_, n, 4, "points.valid");
+    if (!valid) return std::move(valid).error();
+    auto dest = deviceBuffer(*device_, n, 4, "points.dest");
+    if (!dest) return std::move(dest).error();
+    auto total = deviceBuffer(*device_, 1, 4, "points.total");
+    if (!total) return std::move(total).error();
+    const auto params = [&](rhi::ShaderCursor cursor) {
+        cursor["params"]["count"].setData(n);
+        cursor["params"]["base"].setData(first);
+        cursor["params"]["colourKind"].setData(colourKind);
+        cursor["params"]["detail"].setData(detail);
+    };
+    gpu::CommandBatch batch(*device_);
+    pointsValidate_.dispatch(batch, {n, 1, 1}, [&](rhi::ShaderCursor cursor) {
+        cursor["raw"].setBinding(raw.rhi());
+        cursor["valid"].setBinding(valid->rhi());
+        params(cursor);
+    });
+    LRT_TRY(prefix_.apply(batch, *valid, *dest, *total, n));
+    LRT_TRY(batch.submit(true));
+    gpu::CommandBatch decode(*device_);
+    pointsDecode_.dispatch(decode, {n, 1, 1}, [&](rhi::ShaderCursor cursor) {
+        cursor["raw"].setBinding(raw.rhi());
+        cursor["valid"].setBinding(valid->rhi());
+        cursor["dest"].setBinding(dest->rhi());
+        cursor["positions"].setBinding(points.positions.rhi());
+        cursor["colours"].setBinding(points.colours.rhi());
+        params(cursor);
+        // The decode writes at base + dest; base here is where this
+        // slice's survivors start, not where its records started.
+        cursor["params"]["base"].setData(written);
+    });
+    LRT_TRY(decode.submit(true));
+    uint32_t kept = 0;
+    LRT_TRY(total->read(*device_, 0, sizeof(kept), &kept));
+    return kept;
+}
+
 Result<GpuPoints> CloudLoader::upload(const io::RawPoints& raw, float detail) {
     if (raw.count == 0 || raw.records.size() < size_t{raw.count} * 6) {
         return Error::make(ErrorCode::InvalidArgument, "'{}': no points", raw.source);
@@ -369,42 +412,9 @@ Result<GpuPoints> CloudLoader::upload(const io::RawPoints& raw, float detail) {
         auto rawBuffer = deviceBuffer(*device_, uint64_t{n} * 6, 4, "points.raw",
                                       raw.records.data() + size_t{first} * 6);
         if (!rawBuffer) return std::move(rawBuffer).error();
-        auto valid = deviceBuffer(*device_, n, 4, "points.valid");
-        if (!valid) return std::move(valid).error();
-        auto dest = deviceBuffer(*device_, n, 4, "points.dest");
-        if (!dest) return std::move(dest).error();
-        auto total = deviceBuffer(*device_, 1, 4, "points.total");
-        if (!total) return std::move(total).error();
-        const auto params = [&](rhi::ShaderCursor cursor) {
-            cursor["params"]["count"].setData(n);
-            cursor["params"]["base"].setData(first);
-            cursor["params"]["colourKind"].setData(raw.colourKind);
-            cursor["params"]["detail"].setData(detail);
-        };
-        gpu::CommandBatch batch(*device_);
-        pointsValidate_.dispatch(batch, {n, 1, 1}, [&](rhi::ShaderCursor cursor) {
-            cursor["raw"].setBinding(rawBuffer->rhi());
-            cursor["valid"].setBinding(valid->rhi());
-            params(cursor);
-        });
-        LRT_TRY(prefix_.apply(batch, *valid, *dest, *total, n));
-        LRT_TRY(batch.submit(true));
-        gpu::CommandBatch decode(*device_);
-        pointsDecode_.dispatch(decode, {n, 1, 1}, [&](rhi::ShaderCursor cursor) {
-            cursor["raw"].setBinding(rawBuffer->rhi());
-            cursor["valid"].setBinding(valid->rhi());
-            cursor["dest"].setBinding(dest->rhi());
-            cursor["positions"].setBinding(points.positions.rhi());
-            cursor["colours"].setBinding(points.colours.rhi());
-            params(cursor);
-            // The decode writes at base + dest; base here is where this
-            // slice's survivors start, not where its records started.
-            cursor["params"]["base"].setData(written);
-        });
-        LRT_TRY(decode.submit(true));
-        uint32_t kept = 0;
-        LRT_TRY(total->read(*device_, 0, sizeof(kept), &kept));
-        written += kept;
+        auto kept = decodePoints(*rawBuffer, n, first, raw.colourKind, detail, written, points);
+        if (!kept) return std::move(kept).error();
+        written += *kept;
     }
     points.count = written;
     if (points.count == 0) {
@@ -414,6 +424,181 @@ Result<GpuPoints> CloudLoader::upload(const io::RawPoints& raw, float detail) {
     if (!bounds) return std::move(bounds).error();
     points.bounds = *bounds;
     log::info("{}: {} points of {}", raw.source, points.count, points.declared);
+    return points;
+}
+
+Result<gpu::Buffer> CloudLoader::streamBuffer(const FloatStream& stream, const char* label) {
+    // Words of four bytes; an odd count of halves leaves the last word short,
+    // so the bytes are written into a buffer already the whole word long.
+    const uint64_t words = std::max<uint64_t>((stream.bytes.size() + 3) / 4, 1);
+    auto made = deviceBuffer(*device_, words, 4, label);
+    if (!made) return std::move(made).error();
+    if (!stream.empty()) {
+        LRT_TRY(made->write(*device_, 0, stream.bytes.size(), stream.bytes.data()));
+    }
+    return made;
+}
+
+namespace {
+
+constexpr uint32_t kPositions = 1, kRotations = 2, kScales = 4, kOpacities = 8, kSh = 16, kColours = 32;
+
+}   // namespace
+
+Result<GpuSplats> CloudLoader::upload(const SplatStreams& in, uint32_t maxDegree) {
+    const uint32_t n = in.count;
+    const auto holds = [&](const FloatStream& stream, uint64_t perElement) {
+        return stream.empty() || stream.values() >= uint64_t{n} * perElement;
+    };
+    const bool shapes = in.coefficients == 0 || in.coefficients == 1 || in.coefficients == 4 ||
+                        in.coefficients == 9 || in.coefficients == 16;
+    if (n == 0 || in.positions.values() < uint64_t{n} * 3 || !holds(in.rotations, 4) || !holds(in.scales, 3) ||
+        !holds(in.opacities, 1) || !shapes || !holds(in.sh, uint64_t{in.coefficients} * 3)) {
+        return Error::make(ErrorCode::InvalidArgument, "'{}': splat arrays of the wrong lengths", in.source);
+    }
+    const bool haveSh = !in.sh.empty() && in.coefficients > 0;
+    static constexpr uint32_t kPerDegree[] = {0, 3, 8, 15};
+    const uint32_t keep = haveSh ? std::min(in.coefficients - 1, kPerDegree[std::min(maxDegree, 3u)]) : 0;
+
+    io::SplatEncoding e;
+    e.floatsPerRecord = 14 + keep * 3;
+    e.x = 0; e.y = 1; e.z = 2; e.opacity = 3;
+    e.scale0 = 4; e.scale1 = 5; e.scale2 = 6;
+    e.rotW = 7; e.rotX = 8; e.rotY = 9; e.rotZ = 10;
+    e.dc0 = 11; e.dc1 = 12; e.dc2 = 13;
+    e.restBase = 14; e.restPerColour = keep; e.restColourOuter = 0;
+    e.opacity_ = io::SplatEncoding::Opacity::Linear;
+    e.scale_ = io::SplatEncoding::Scale::Linear;
+    e.colour = io::SplatEncoding::Colour::ShDc;
+    e.rotation = io::SplatEncoding::Rotation::Float;
+
+    uint32_t present = kPositions;
+    uint32_t halves = in.positions.half ? kPositions : 0;
+    const auto note = [&](const FloatStream& stream, uint32_t bit) {
+        present |= stream.empty() ? 0 : bit;
+        halves |= (!stream.empty() && stream.half) ? bit : 0;
+    };
+    note(in.rotations, kRotations);
+    note(in.scales, kScales);
+    note(in.opacities, kOpacities);
+    if (haveSh) {
+        note(in.sh, kSh);
+    }
+    auto positions = streamBuffer(in.positions, "splats.stream.positions");
+    if (!positions) return std::move(positions).error();
+    auto rotations = streamBuffer(in.rotations, "splats.stream.rotations");
+    if (!rotations) return std::move(rotations).error();
+    auto scales = streamBuffer(in.scales, "splats.stream.scales");
+    if (!scales) return std::move(scales).error();
+    auto opacities = streamBuffer(in.opacities, "splats.stream.opacities");
+    if (!opacities) return std::move(opacities).error();
+    auto sh = streamBuffer(haveSh ? in.sh : FloatStream{}, "splats.stream.sh");
+    if (!sh) return std::move(sh).error();
+    auto none = streamBuffer({}, "splats.stream.none");
+    if (!none) return std::move(none).error();
+
+    auto splats = startSplats(in.source, n, keep);
+    if (!splats) return std::move(splats).error();
+    const uint32_t perSlice = static_cast<uint32_t>(std::max<uint64_t>(1, kSliceBytes / (uint64_t{e.floatsPerRecord} * 4)));
+    uint32_t written = 0;
+    for (uint32_t first = 0; first < n; first += perSlice) {
+        const uint32_t count = std::min(perSlice, n - first);
+        auto records = deviceBuffer(*device_, uint64_t{count} * e.floatsPerRecord, 4, "splats.raw");
+        if (!records) return std::move(records).error();
+        {
+            gpu::CommandBatch batch(*device_);
+            splatStreams_.dispatch(batch, {count, 1, 1}, [&](rhi::ShaderCursor cursor) {
+                cursor["positions"].setBinding(positions->rhi());
+                cursor["rotations"].setBinding(rotations->rhi());
+                cursor["scales"].setBinding(scales->rhi());
+                cursor["opacities"].setBinding(opacities->rhi());
+                cursor["sh"].setBinding(sh->rhi());
+                cursor["colours"].setBinding(none->rhi());
+                cursor["records"].setBinding(records->rhi());
+                rhi::ShaderCursor p = cursor["params"];
+                p["count"].setData(count);
+                p["first"].setData(first);
+                p["stride"].setData(e.floatsPerRecord);
+                p["keep"].setData(keep);
+                p["coefficients"].setData(in.coefficients);
+                p["present"].setData(present);
+                p["halves"].setData(halves);
+                p["colourMode"].setData(uint32_t{0});
+            });
+            LRT_TRY(batch.submit(true));
+        }
+        auto kept = decodeSlice(*records, e, count, written, keep, *splats);
+        if (!kept) return std::move(kept).error();
+        written += *kept;
+    }
+    LRT_TRY(finishSplats(*splats, written));
+    return splats;
+}
+
+Result<GpuPoints> CloudLoader::upload(const PointStreams& in, float detail) {
+    const uint32_t n = in.count;
+    const uint64_t colours = in.colours.values() / 3;
+    if (n == 0 || in.positions.values() < uint64_t{n} * 3 || (!in.colours.empty() && colours != 1 && colours < n)) {
+        return Error::make(ErrorCode::InvalidArgument, "'{}': point arrays of the wrong lengths", in.source);
+    }
+    const uint32_t colourMode = in.colours.empty() ? 0 : colours >= n && n > 1 ? 2 : 1;
+    GpuPoints points;
+    points.source = in.source;
+    points.declared = n;
+    auto positionsOut = deviceBuffer(*device_, n, 16, "points.positions");
+    if (!positionsOut) return std::move(positionsOut).error();
+    auto coloursOut = deviceBuffer(*device_, uint64_t{n} * 2, 4, "points.colours");
+    if (!coloursOut) return std::move(coloursOut).error();
+    points.positions = *positionsOut;
+    points.colours = *coloursOut;
+
+    auto positions = streamBuffer(in.positions, "points.stream.positions");
+    if (!positions) return std::move(positions).error();
+    auto colourStream = streamBuffer(in.colours, "points.stream.colours");
+    if (!colourStream) return std::move(colourStream).error();
+    auto none = streamBuffer({}, "points.stream.none");
+    if (!none) return std::move(none).error();
+    const uint32_t halves = (in.positions.half ? kPositions : 0) | (in.colours.half ? kColours : 0);
+
+    const uint32_t perSlice = static_cast<uint32_t>(kSliceBytes / 24);
+    uint32_t written = 0;
+    for (uint32_t first = 0; first < n; first += perSlice) {
+        const uint32_t count = std::min(perSlice, n - first);
+        auto records = deviceBuffer(*device_, uint64_t{count} * 6, 4, "points.raw");
+        if (!records) return std::move(records).error();
+        {
+            gpu::CommandBatch batch(*device_);
+            pointStreams_.dispatch(batch, {count, 1, 1}, [&](rhi::ShaderCursor cursor) {
+                cursor["positions"].setBinding(positions->rhi());
+                cursor["colours"].setBinding(colourStream->rhi());
+                for (const char* unused : {"rotations", "scales", "opacities", "sh"}) {
+                    cursor[unused].setBinding(none->rhi());
+                }
+                cursor["records"].setBinding(records->rhi());
+                rhi::ShaderCursor p = cursor["params"];
+                p["count"].setData(count);
+                p["first"].setData(first);
+                p["stride"].setData(uint32_t{6});
+                p["keep"].setData(uint32_t{0});
+                p["coefficients"].setData(uint32_t{0});
+                p["present"].setData(kPositions | (colourMode != 0 ? kColours : 0));
+                p["halves"].setData(halves);
+                p["colourMode"].setData(colourMode);
+            });
+            LRT_TRY(batch.submit(true));
+        }
+        auto kept = decodePoints(*records, count, first, colourMode != 0 ? 2u : 0u, detail, written, points);
+        if (!kept) return std::move(kept).error();
+        written += *kept;
+    }
+    points.count = written;
+    if (points.count == 0) {
+        return Error::make(ErrorCode::InvalidArgument, "'{}': no point survived", in.source);
+    }
+    auto bounds = boundsOf(points.positions, points.count);
+    if (!bounds) return std::move(bounds).error();
+    points.bounds = *bounds;
+    log::info("{}: {} points of {}", in.source, points.count, points.declared);
     return points;
 }
 

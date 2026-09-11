@@ -19,7 +19,7 @@ struct StageImage {
     uint32_t           width = 0;
     uint32_t           height = 0;
     std::vector<float> rgba;    ///< bottom row first, linear, premultiplied
-    std::vector<float> depth;   ///< Hydra depth in [0, 1], bottom row first
+    std::vector<float> depth;   ///< view z (distance along the view axis; 0 where nothing was drawn), bottom row first
 };
 
 class StageRenderer {
@@ -32,6 +32,10 @@ public:
     [[nodiscard]] Result<StageImage> render(const std::string& camera, double time,
                                             uint32_t width, uint32_t height,
                                             const std::string& technique = "raster");
+
+    /// The last render's Hydra render buffer for `aov` ("color", "depth"), as
+    /// a host mapping it reads it: the buffer's own format, top row first.
+    [[nodiscard]] Result<std::vector<uint8_t>> mappedOutput(const std::string& aov);
 
     /// Every camera prim on the stage.
     [[nodiscard]] std::vector<std::string> cameras() const;

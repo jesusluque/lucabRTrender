@@ -136,16 +136,6 @@ lrt::usd::StreamedAsset assetOf(HdSceneDelegate* delegate, SdfPath const& id) {
     return asset;
 }
 
-VtVec3fArray vec3fOf(VtValue const& value) {
-    if (value.IsHolding<VtVec3fArray>()) {
-        return value.UncheckedGet<VtVec3fArray>();
-    }
-    if (value.IsHolding<VtVec3hArray>()) {
-        const auto& h = value.UncheckedGet<VtVec3hArray>();
-        return VtVec3fArray(h.begin(), h.end());
-    }
-    return {};
-}
 
 }   // namespace
 
@@ -164,39 +154,24 @@ void HdLrtParticleField::Sync(HdSceneDelegate* delegate, HdRenderParam* renderPa
         return;
     }
 
-    std::optional<lrt::io::RawSplats> raw;
+    std::optional<lrt::usd::ParticleFieldArrays> raw;
     if ((*dirtyBits & (HdChangeTracker::DirtyPoints | HdChangeTracker::DirtyPrimvar)) != 0) {
+        // The float attribute, or its half twin: kept as they come, halves
+        // turned into floats on the device.
+        const auto either = [&](TfToken const& full, TfToken const& half) {
+            VtValue value = delegate->Get(id, full);
+            return lrt::usd::streamOf(value).empty() ? delegate->Get(id, half) : value;
+        };
         lrt::usd::ParticleFieldArrays arrays;
-        arrays.positions = vec3fOf(delegate->Get(id, UsdVolTokens->positions));
-        if (arrays.positions.empty()) {
-            arrays.positions = vec3fOf(delegate->Get(id, UsdVolTokens->positionsh));
-        }
-        VtValue orientations = delegate->Get(id, UsdVolTokens->orientations);
-        if (orientations.IsHolding<VtQuatfArray>()) {
-            arrays.orientations = orientations.UncheckedGet<VtQuatfArray>();
-        } else if (VtValue h = delegate->Get(id, UsdVolTokens->orientationsh); h.IsHolding<VtQuathArray>()) {
-            const auto& q = h.UncheckedGet<VtQuathArray>();
-            arrays.orientations = VtQuatfArray(q.begin(), q.end());
-        }
-        arrays.scales = vec3fOf(delegate->Get(id, UsdVolTokens->scales));
-        if (arrays.scales.empty()) {
-            arrays.scales = vec3fOf(delegate->Get(id, UsdVolTokens->scalesh));
-        }
-        VtValue opacities = delegate->Get(id, UsdVolTokens->opacities);
-        if (opacities.IsHolding<VtFloatArray>()) {
-            arrays.opacities = opacities.UncheckedGet<VtFloatArray>();
-        } else if (VtValue h = delegate->Get(id, UsdVolTokens->opacitiesh); h.IsHolding<VtHalfArray>()) {
-            const auto& o = h.UncheckedGet<VtHalfArray>();
-            arrays.opacities = VtFloatArray(o.begin(), o.end());
-        }
+        arrays.positions = either(UsdVolTokens->positions, UsdVolTokens->positionsh);
+        arrays.orientations = either(UsdVolTokens->orientations, UsdVolTokens->orientationsh);
+        arrays.scales = either(UsdVolTokens->scales, UsdVolTokens->scalesh);
+        arrays.opacities = either(UsdVolTokens->opacities, UsdVolTokens->opacitiesh);
         VtValue degree = delegate->Get(id, UsdVolTokens->radianceSphericalHarmonicsDegree);
         arrays.shDegree = degree.IsHolding<int>() ? degree.UncheckedGet<int>() : 0;
-        arrays.shCoefficients = vec3fOf(delegate->Get(id, UsdVolTokens->radianceSphericalHarmonicsCoefficients));
-        if (arrays.shCoefficients.empty()) {
-            arrays.shCoefficients =
-                vec3fOf(delegate->Get(id, UsdVolTokens->radianceSphericalHarmonicsCoefficientsh));
-        }
-        raw = lrt::usd::rawSplatsFrom(arrays, id.GetString());
+        arrays.shCoefficients = either(UsdVolTokens->radianceSphericalHarmonicsCoefficients,
+                                       UsdVolTokens->radianceSphericalHarmonicsCoefficientsh);
+        raw = std::move(arrays);
     }
     std::optional<lrt::render::SplatEdit> edit;
     std::optional<lrt::usd::StreamedAsset> asset;

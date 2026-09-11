@@ -8,6 +8,7 @@
 #include <catch2/catch_approx.hpp>
 
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <memory>
@@ -22,6 +23,11 @@
 #include <pxr/usd/usdGeom/camera.h>
 #include <pxr/usd/usdGeom/points.h>
 #include <pxr/usd/usdGeom/xformCommonAPI.h>
+#include <pxr/usd/usdGeom/xform.h>
+#include <pxr/usd/usdVol/particleField3DGaussianSplat.h>
+#include <pxr/base/gf/quath.h>
+#include <pxr/base/gf/vec3h.h>
+#include <cstdio>
 
 #include "lrt/io/Readers.h"
 #include "lrt/lod/Lod.h"
@@ -38,6 +44,13 @@ namespace fs = std::filesystem;
 PXR_NAMESPACE_USING_DIRECTIVE
 
 namespace {
+
+// Before any case builds USD's schema registry: registered later, a plugin's
+// schemas are not seen by a registry that already exists.
+[[maybe_unused]] const bool kPluginsRegistered = [] {
+    PlugRegistry::GetInstance().RegisterPlugins(fs::path(LRT_HYDRA_PLUGIN_DIR).string());
+    return true;
+}();
 
 fs::path scratch(const std::string& name) {
     const fs::path dir = fs::temp_directory_path() / "lrt-tests" / "usd";
@@ -195,8 +208,30 @@ TEST_CASE("a UsdGeomPoints prim draws through Hydra", "[usd][gpu][points]") {
     CHECK(image->rgba[centre + 3] > 0.99F);
     CHECK(image->rgba[centre] > 0.9F);
     CHECK(image->rgba[centre + 1] == Catch::Approx(0.5F).margin(0.02F));
-    CHECK(image->depth[64 * 128 + 64] < 1.0F);
-    CHECK(image->depth[2 * 128 + 2] == 1.0F);   // nothing in the corner: the far plane
+    // View z: the points plane sits 4 units from the camera; the corner is empty.
+    CHECK(image->depth[64 * 128 + 64] == Catch::Approx(4.0F).margin(0.05F));
+    CHECK(image->depth[2 * 128 + 2] == 0.0F);
+
+    // What a host that maps Hydra's render buffers reads: converted on the
+    // device, top row first, depth in the projection's [0, 1].
+    auto colour = (*renderer)->mappedOutput("color");
+    auto depth = (*renderer)->mappedOutput("depth");
+    REQUIRE(colour);
+    REQUIRE(depth);
+    REQUIRE(colour->size() == size_t{128} * 128 * 16);
+    REQUIRE(depth->size() == size_t{128} * 128 * 4);
+    const auto floatAt = [](const std::vector<uint8_t>& bytes, size_t index) {
+        float v = 0.0F;
+        std::memcpy(&v, bytes.data() + index * 4, 4);
+        return v;
+    };
+    // Row 64 from the top is row 63 from the bottom: the centre texel's neighbour, still inside the grid.
+    CHECK(floatAt(*colour, (64 * 128 + 64) * 4 + 3) == image->rgba[(63 * 128 + 64) * 4 + 3]);
+    CHECK(floatAt(*colour, (64 * 128 + 64) * 4 + 1) == image->rgba[(63 * 128 + 64) * 4 + 1]);
+    const float centreDepth = floatAt(*depth, 64 * 128 + 64);
+    CHECK(centreDepth > 0.0F);
+    CHECK(centreDepth < 1.0F);
+    CHECK(floatAt(*depth, 2 * 128 + 2) == 1.0F);   // nothing: the far plane
 }
 
 TEST_CASE("the hdLrt plugin loads through USD's renderer plugin registry", "[usd][plugin]") {
@@ -401,6 +436,87 @@ TEST_CASE("a .lrtc referenced from USD is cut and streamed through Hydra as it i
         CHECK(diff->p99 <= 1);
         CHECK(diff->max <= 2);
     }
+}
+
+TEST_CASE("a cloud authored in half floats draws as the same cloud in floats", "[usd][gpu]") {
+    LRT_REQUIRE_GPU(gpu);
+    const io::RawSplats raw = cloud(2500);
+    const fs::path floats = scratch("floats.usdc");
+    const fs::path halves = scratch("halves.usdc");
+    fs::remove(floats);
+    fs::remove(halves);
+    REQUIRE(usd::writeParticleFieldStage(*gpu->library, raw, floats, {.addCamera = false}));
+    {
+        // The fixture: the same attributes, authored as their half twins.
+        UsdStageRefPtr from = UsdStage::Open(floats.string());
+        REQUIRE(from);
+        const UsdVolParticleField3DGaussianSplat source(from->GetPrimAtPath(SdfPath("/World/Splats")));
+        UsdStageRefPtr to = UsdStage::CreateNew(halves.string());
+        UsdGeomXform::Define(to, SdfPath("/World"));
+        auto target = UsdVolParticleField3DGaussianSplat::Define(to, SdfPath("/World/Splats"));
+        const auto halve3 = [](const VtVec3fArray& in) {
+            VtVec3hArray out(in.size());
+            for (size_t i = 0; i < in.size(); ++i) {
+                out[i] = GfVec3h(in[i]);
+            }
+            return out;
+        };
+        VtVec3fArray positions, scales, coefficients;
+        VtQuatfArray orientations;
+        VtFloatArray opacities;
+        int degree = 0;
+        REQUIRE(source.GetPositionsAttr().Get(&positions));
+        REQUIRE(source.GetScalesAttr().Get(&scales));
+        REQUIRE(source.GetOrientationsAttr().Get(&orientations));
+        REQUIRE(source.GetOpacitiesAttr().Get(&opacities));
+        REQUIRE(source.GetRadianceSphericalHarmonicsCoefficientsAttr().Get(&coefficients));
+        REQUIRE(source.GetRadianceSphericalHarmonicsDegreeAttr().Get(&degree));
+        VtQuathArray orientationsh(orientations.size());
+        for (size_t i = 0; i < orientations.size(); ++i) {
+            orientationsh[i] = GfQuath(orientations[i]);
+        }
+        target.CreatePositionshAttr(VtValue(halve3(positions)));
+        target.CreateScaleshAttr(VtValue(halve3(scales)));
+        target.CreateOrientationshAttr(VtValue(orientationsh));
+        target.CreateOpacitieshAttr(VtValue(VtHalfArray(opacities.begin(), opacities.end())));
+        target.CreateRadianceSphericalHarmonicsCoefficientshAttr(VtValue(halve3(coefficients)));
+        target.CreateRadianceSphericalHarmonicsDegreeAttr(VtValue(degree));
+        REQUIRE(to->GetRootLayer()->Save());
+    }
+    const auto shotOf = [&](const std::string& name, const std::string& cloudFile) {
+        const fs::path shot = scratch(name);
+        std::ofstream out(shot);
+        out << "#usda 1.0\n(\n    defaultPrim = \"World\"\n    upAxis = \"Y\"\n)\n"
+               "def Xform \"World\"\n{\n"
+               "    def \"Cloud\" ( references = @./" << cloudFile << "@</World/Splats> )\n    {\n    }\n"
+               "    def Camera \"Shot\"\n    {\n"
+               "        float2 clippingRange = (0.1, 1000)\n        float focalLength = 30\n"
+               "        float horizontalAperture = 24.576\n        float verticalAperture = 18.432\n"
+               "        double3 xformOp:translate = (0.4, 0.2, 7)\n"
+               "        uniform token[] xformOpOrder = [\"xformOp:translate\"]\n    }\n}\n";
+        return shot;
+    };
+    auto a = usd::StageRenderer::open(shotOf("floats-shot.usda", "floats.usdc"));
+    auto b = usd::StageRenderer::open(shotOf("halves-shot.usda", "halves.usdc"));
+    if (!a) FAIL(a.error().toString());
+    if (!b) FAIL(b.error().toString());
+    auto imageA = (*a)->render("/World/Shot", 0.0, 240, 180);
+    auto imageB = (*b)->render("/World/Shot", 0.0, 240, 180);
+    if (!imageA) FAIL(imageA.error().toString());
+    if (!imageB) FAIL(imageB.error().toString());
+    gpu::BufferDesc desc;
+    desc.bytes = imageA->rgba.size() * sizeof(float);
+    desc.elementBytes = 16;
+    auto bufferA = gpu::Buffer::create(*gpu->device, desc, imageA->rgba.data());
+    auto bufferB = gpu::Buffer::create(*gpu->device, desc, imageB->rgba.data());
+    REQUIRE(bufferA);
+    REQUIRE(bufferB);
+    auto diff = render::compareImages(*gpu->library, *bufferA, *bufferB, 240, 180);
+    REQUIRE(diff);
+    std::printf("  half against float: p99 %u, max %u\n", diff->p99, diff->max);
+    // Half precision moves a unit-scale position by up to 1/1024: sub-pixel here.
+    CHECK(diff->p99 <= 1);
+    CHECK(diff->over2 * 100 <= diff->pixels);
 }
 
 TEST_CASE("the codeless lrt schemas register, with their defaults", "[usd][schema]") {

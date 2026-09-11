@@ -4,6 +4,7 @@
 #include <algorithm>
 
 #include "lrt/core/Log.h"
+#include "lrt/gpu/CommandBatch.h"
 
 namespace lrt::usd {
 
@@ -38,7 +39,7 @@ std::unique_ptr<Engine> Engine::create(std::string& why) {
     return engine;
 }
 
-void Engine::setSplats(const pxr::SdfPath& id, std::optional<io::RawSplats> raw,
+void Engine::setSplats(const pxr::SdfPath& id, std::optional<ParticleFieldArrays> raw,
                        const render::Mat4* transform, std::optional<bool> visible,
                        std::optional<render::SplatEdit> edit, std::optional<StreamedAsset> asset) {
     const std::lock_guard<std::mutex> held(guard_);
@@ -60,7 +61,7 @@ void Engine::setSplats(const pxr::SdfPath& id, std::optional<io::RawSplats> raw,
     }
 }
 
-void Engine::setPoints(const pxr::SdfPath& id, std::optional<io::RawPoints> raw,
+void Engine::setPoints(const pxr::SdfPath& id, std::optional<PointsArrays> raw,
                        const render::Mat4* transform, std::optional<bool> visible,
                        std::optional<render::PointStyle> style) {
     const std::lock_guard<std::mutex> held(guard_);
@@ -125,10 +126,11 @@ Result<size_t> Engine::commit() {
         if (!entry.pending.has_value()) {
             continue;
         }
-        if (entry.pending->count == 0) {
+        const scene::SplatStreams streams = splatStreams(*entry.pending, id.GetString());
+        if (streams.count == 0) {
             entry.gpu.reset();
         } else {
-            auto splats = loader_->upload(*entry.pending);
+            auto splats = loader_->upload(streams);
             if (!splats) {
                 log::warn("hdLrt: {}: {}", id.GetString(), splats.error().toString());
                 entry.gpu.reset();
@@ -143,10 +145,11 @@ Result<size_t> Engine::commit() {
         if (!entry.pending.has_value()) {
             continue;
         }
-        if (entry.pending->count == 0) {
+        const scene::PointStreams streams = pointStreams(*entry.pending, id.GetString());
+        if (streams.count == 0) {
             entry.gpu.reset();
         } else {
-            auto points = loader_->upload(*entry.pending);
+            auto points = loader_->upload(streams);
             if (!points) {
                 log::warn("hdLrt: {}: {}", id.GetString(), points.error().toString());
                 entry.gpu.reset();
@@ -160,8 +163,62 @@ Result<size_t> Engine::commit() {
     return uploaded;
 }
 
+Result<void> Engine::writeAov(const render::RenderTargets& targets, bool depth, const AovLayout& layout,
+                              const double* projection, std::span<uint8_t> into) {
+    const uint64_t bytes = uint64_t{targets.width} * targets.height * layout.channels * layout.componentBytes;
+    if (into.size() < bytes || layout.channels == 0 || layout.channels > 4 ||
+        (layout.componentBytes != 1 && layout.componentBytes != 2 && layout.componentBytes != 4)) {
+        return Error(ErrorCode::InvalidArgument, "a render buffer the engine cannot fill");
+    }
+    const gpu::Buffer& source = depth ? targets.depth : targets.colour;
+    if (!source.valid()) {
+        return Error(ErrorCode::InvalidArgument, "nothing rendered to convert");
+    }
+    if (!aovConvert_.has_value()) {
+        auto made = gpu::ComputeKernel::create(*library_, "lrt/usd/aov_convert", "aovConvert");
+        if (!made) return std::move(made).error();
+        aovConvert_.emplace(std::move(*made));
+    }
+    const uint32_t words = static_cast<uint32_t>((bytes + 3) / 4);
+    gpu::BufferDesc desc;
+    desc.bytes = uint64_t{words} * 4;
+    desc.elementBytes = 4;
+    desc.label = "hydra.aov";
+    auto out = gpu::Buffer::create(*device_, desc);
+    if (!out) return std::move(out).error();
+    gpu::BufferDesc one;
+    one.bytes = 16;
+    one.elementBytes = 16;
+    one.label = "hydra.placeholder";
+    auto placeholder = gpu::Buffer::create(*device_, one);
+    if (!placeholder) return std::move(placeholder).error();
+    gpu::CommandBatch batch(*device_);
+    aovConvert_->dispatch(batch, {words, 1, 1}, [&](rhi::ShaderCursor cursor) {
+        cursor["colour"].setBinding(depth ? placeholder->rhi() : source.rhi());
+        cursor["depth"].setBinding(depth ? source.rhi() : placeholder->rhi());
+        cursor["words"].setBinding(out->rhi());
+        rhi::ShaderCursor p = cursor["params"];
+        p["width"].setData(targets.width);
+        p["height"].setData(targets.height);
+        p["words"].setData(words);
+        p["source"].setData(uint32_t{depth ? 1u : 0u});
+        p["channels"].setData(layout.channels);
+        p["componentBytes"].setData(layout.componentBytes);
+        p["componentKind"].setData(layout.componentKind);
+        // Matrix terms, not data: the host's projection, as floats.
+        p["p22"].setData(static_cast<float>(projection[10]));
+        p["p32"].setData(static_cast<float>(projection[14]));
+        p["p23"].setData(static_cast<float>(projection[11]));
+        p["p33"].setData(static_cast<float>(projection[15]));
+    });
+    LRT_TRY(batch.submit(true));
+    // A readback for a host that maps the buffer: output IO, the only copy.
+    return out->read(*device_, 0, bytes, into.data());
+}
+
 Result<void> Engine::render(const render::Projection& projection, const render::RenderSettings& settings,
                             render::RenderTargets& targets, Technique technique, bool settleStreams) {
+    lastTargets_ = &targets;
     std::vector<render::SplatInstance> splats;
     std::vector<render::PointInstance> points;
     std::vector<lod::LodInstance> cuts;
