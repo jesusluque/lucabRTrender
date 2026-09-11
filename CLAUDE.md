@@ -6,7 +6,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```sh
 cmake --preset macos-arm64-debug && cmake --build --preset macos-arm64-debug
+cmake --preset linux-x86_64-debug && cmake --build --preset linux-x86_64-debug   # Linux, CUDA
 ctest --preset macos-arm64-debug                          # all tests, one at a time (they share the GPU)
+ctest --preset linux-x86_64-debug                        # the same on Linux (docs/decisions.md: what CUDA skips)
 ctest --test-dir build/macos-arm64-debug -R lod           # tests matching a name
 build/macos-arm64-debug/bin/lrt_lod_tests "chunks*"       # one Catch2 case by name (or a [tag])
 cmake --build build/macos-arm64-debug --target lrt_render_tests   # one test binary

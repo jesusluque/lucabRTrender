@@ -885,3 +885,104 @@ delegate.
 - **Time.** The time slider sets the stage time; animation itself is M7.
 - **Platforms.** Linux and Windows windows are untested. X11 is wired
   through GLFW's native handle; Wayland is not.
+
+
+## Linux, on the 94 (M11's first half)
+
+The engine built and ran on Linux for the first time: Ubuntu 24.04, an NVIDIA
+L4, CUDA as the backend. What follows is what the port needed, what it found
+and what is still wrong.
+
+### The toolchain
+
+- **OpenUSD 26.08** with MaterialX 1.39.5 and OpenVDB/NanoVDB, from
+  `scripts/build-usd.sh`. `--ignore-homebrew` is a macOS-only option of
+  `build_usd.py`, so the script passes it only there.
+- **OIDN 2.5.1** with the CUDA device. Its CUDA device wants CUDA 12.8 or
+  newer and Ubuntu 24.04 ships 12.0, so `cuda-toolkit-12-8` goes beside it and
+  both `scripts/build-oidn.sh` and the top-level CMake pick the newest
+  `/usr/local/cuda-*` (`LRT_CUDA_ROOT` overrides). One toolkit for gpe's
+  kernels, slang-rhi's CUDA device and OIDN.
+- **zlib** is found at the top level now: an imported target belongs to the
+  directory that found it, and the tests link `ZLIB::ZLIB` too.
+- **`<cstring>`** before slang-rhi's `acceleration-structure-utils.h`, which
+  calls `memcpy` without including it -- libc++ carries it in anyway,
+  libstdc++ does not.
+
+### The CUDA driver's names were slang-rhi's variables
+
+slang-rhi loads the CUDA driver with `dlopen` and keeps its entry points in
+variables named after the driver's own functions (`cuInit`, `cuLaunchKernel`,
+...). At global scope those variables are the definitions the rest of the
+program binds to, and a strong data definition in an object file beats a
+shared library's function whatever the link order -- both orders were tried.
+
+So gpe and OIDN, which call the driver directly, called through slang-rhi's
+pointers instead of through libcuda and died on a null one: `lrt info` exited
+139 after printing correctly, and the gpu_host tests, every aofx host test and
+`single_tbb` crashed in what the backtrace called `cuInit ()` at an address in
+the executable's BSS.
+
+`cmake/patches/slang-rhi-cuda-driver-symbols.patch` puts the block in
+`namespace rhi::cuda_driver` with a using-declaration after it: the names keep
+working inside slang-rhi and collide with nothing outside it. After it,
+`cuInit` is undefined in our binaries (resolved from libcuda), `lrt info`
+exits 0 and reports `denoiser OIDN 2.5.1 on CUDA` and `tbb libraries 1`, the
+aofx tests are green and `single_tbb` passes.
+
+### The radix sort is wrong on CUDA, and it is not ordering
+
+For as little as two pairs, one chunk and one pass: the generator writes
+`(1766601275, v0) (3252568193, v1)` and the sort leaves
+`(1766601275, v1) (0, v0's slot never written)` -- two destinations collided.
+What that rules out, each measured rather than argued:
+
+- **The generator** is right: the probe dumps the pairs before the sort.
+- **Ordering between passes** is not it: CUDA launches all go on one stream,
+  and `LRT_RADIX_SUBMIT_EACH_PASS=1` -- a submit and a wait between every pass
+  -- changes nothing, the same 89 assertions fail.
+- **The constants** reach each dispatch: four dispatches queued into one batch
+  with four different parameter blocks each read back their own `count`,
+  `chunkCount` and `shift`.
+
+What is left is one of the four kernels miscompiled or misbehaving on this
+backend, most likely the scatter's read-modify-write of its chunk's cursors.
+This one bug cascades: the tile rasteriser, the ray tracer, the LOD, geom's
+smooth normals and most USD tests sort, and all of them fail here.
+
+### What else the port found
+
+- **`SampleGrad` is not available in a compute entry point on the CUDA
+  target** (Slang `E36107`), so `lrt/material/texture_table`'s `sampleTexture`
+  does not compile there and the texture tests fail to build their kernel.
+  The material system is being written now; whether this becomes an explicit
+  LOD path on CUDA or a documented skip is that work's call.
+- **gpu_host**: a 4 KB buffer fails to allocate (`OutOfMemory`) in the second
+  test, once gpe has adopted the context and allocated in it; plain
+  allocations and the first shared-buffer test are fine.
+- **The free-running clock test** wants each frame waited for within a
+  millisecond and measured 2.18 ms on a box with eight cores and other work on
+  them. It is the machine, not the code.
+- **Tests skip rather than fail where CUDA cannot answer**: no rasterisation,
+  so the raster visibility, mesh and Storm-oracle tests skip with a reason, as
+  does `lrt view` with no display.
+
+### Measured (NVIDIA L4, Ubuntu 24.04, debug)
+
+`ctest --preset linux-x86_64-debug`: **52 of 84 pass, 32 fail, 19 skip**.
+Passing outright: the prefix sum, textures, mips, the texture table and its
+sRGB views, the shader cache and link constants, every loader (PLY, .splat,
+SPZ, SOG, points), the lobe library, the display transform, the codeless
+schemas, the hdLrt plugin, timecode and PTP, the aofx host and its SDK
+manifest hash. The 32 failures are the radix cascade, the CUDA `SampleGrad`
+gap, the one gpu_host allocation and the clock's tolerance.
+
+### Not done
+
+- The radix kernel itself, which is where the cascade ends.
+- A release build and any timing: nothing is worth timing until the sort is
+  right.
+- Vulkan: the backend is compiled in and untried, since CUDA is what gpe
+  shares.
+- OptiX: absent on this box, so slang-rhi warns and falls back to CUDA
+  compute.
