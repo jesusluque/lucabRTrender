@@ -164,12 +164,78 @@ float3 sampleCone(float cosMax, float2 u) {
 }
 
 /// An orthonormal frame around `z`.
-void lightFrame(float3 z, out float3 x, out float3 y) {
+public void lightFrame(float3 z, out float3 x, out float3 y) {
     const float sign = z.z >= 0.0 ? 1.0 : -1.0;
     const float a = -1.0 / (sign + z.z);
     const float b = z.x * z.y * a;
     x = float3(1.0 + sign * z.x * z.x * a, sign * b, -sign * z.x);
     y = float3(b, sign + z.y * z.y * a, -z.y);
+}
+
+/// The density `sampleLight` draws `wi` with, as a function of direction:
+/// what a chi-square asks for, and what MIS will weigh a hit by. Zero where
+/// the light cannot be reached that way, and zero for a delta light, which
+/// has no density at all.
+public float lightPdf(LightRecord l, float3 p, float3 n, float3 wi) {
+    switch (l.kind) {
+    case kLightDistant: {
+        const float cosMax = cos(0.5 * max(l.sizeX, 0.0));
+        if (cosMax >= 1.0) {
+            return 0.0;   // a delta direction
+        }
+        return dot(wi, lightAxisZ(l)) >= cosMax ? 1.0 / (2.0 * 3.14159265358979 * (1.0 - cosMax)) : 0.0;
+    }
+    case kLightDome:
+        // Cosine weighted around the surface, as the dome is sampled.
+        return max(dot(n, wi), 0.0) / 3.14159265358979;
+    case kLightSphere: {
+        const float3 offset = lightOrigin(l) - p;
+        const float distance2 = dot(offset, offset);
+        const float radius = max(l.sizeX, 0.0);
+        if (radius <= 0.0 || distance2 <= radius * radius) {
+            return 0.0;   // a point, or inside the light
+        }
+        const float cosMax = sqrt(max(0.0, 1.0 - radius * radius / distance2));
+        return dot(wi, normalize(offset)) >= cosMax ? 1.0 / (2.0 * 3.14159265358979 * (1.0 - cosMax)) : 0.0;
+    }
+    case kLightDisk:
+    case kLightRect: {
+        // Where the ray meets the light's plane, if it does so in front and
+        // inside the shape: the area density turned into a solid angle one.
+        const float3 normal = -lightAxisZ(l);
+        const float facing = dot(normal, -wi);
+        if (facing <= 0.0) {
+            return 0.0;
+        }
+        const float3 centre = lightOrigin(l);
+        const float denominator = dot(wi, -normal);
+        if (denominator <= 0.0) {
+            return 0.0;
+        }
+        const float t = dot(centre - p, -normal) / denominator;
+        if (!(t > 0.0)) {
+            return 0.0;
+        }
+        const float3 at = p + wi * t - centre;
+        const float x = dot(at, lightAxisX(l));
+        const float y = dot(at, lightAxisY(l));
+        float area;
+        if (l.kind == kLightDisk) {
+            if (x * x + y * y > l.sizeX * l.sizeX) {
+                return 0.0;
+            }
+            area = 3.14159265358979 * l.sizeX * l.sizeX;
+        } else {
+            if (abs(x) > 0.5 * l.sizeX || abs(y) > 0.5 * l.sizeY) {
+                return 0.0;
+            }
+            area = l.sizeX * l.sizeY;
+        }
+        return area > 0.0 ? (t * t) / (facing * area) : 0.0;
+    }
+    default:
+        return 0.0;
+    }
 }
 
 /// One sample of `l` as seen from `p`, whose surface faces `n`. Only a dome
@@ -215,7 +281,10 @@ public LightSample sampleLight(LightRecord l, float3 p, float3 n, float2 u) {
         const float2 d = sampleDisk(u);
         const float z = sqrt(max(0.0, 1.0 - dot(d, d)));
         s.wi = normalize(x * d.x + y * d.y + n * z);
-        s.pdf = max(z, 1.0e-6) / 3.14159265358979;
+        // The density lightPdf reports for this direction, to the letter: a
+        // sample along the horizon carries no light and is not drawn at all,
+        // rather than being given a floor its pdf does not have.
+        s.pdf = max(dot(n, s.wi), 0.0) / 3.14159265358979;
         s.radiance = emission * domeImage(l, s.wi);
         break;
     }

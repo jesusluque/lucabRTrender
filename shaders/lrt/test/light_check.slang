@@ -1,0 +1,285 @@
+// Copyright (c) 2026 lucabRTrender contributors.
+//
+// Each light against itself on the device: directions drawn by sampleLight
+// from one shading point, binned over the sphere, against lightPdf integrated
+// over each bin. A light whose samples do not follow the density it reports
+// would light a path tracer wrongly however right its radiance looked.
+module light_check;
+import lrt.light.lights;
+
+struct LightCheckParams {
+    uint   thetaBins;
+    uint   phiBins;
+    uint   samples;
+    uint   pad0;
+    float4 point;    // xyz: where the surface is
+    float4 normal;   // xyz: the way it faces
+};
+
+StructuredBuffer<LightRecord>    lights;
+RWStructuredBuffer<uint>         bins;       // per sample: its bin, or thetaBins * phiBins where none
+RWStructuredBuffer<float>        observed;   // per bin
+RWStructuredBuffer<float>        expected;   // per bin
+RWStructuredBuffer<float4>       result;
+RWStructuredBuffer<uint>         mismatches;   // [samples whose reported pdf differs from lightPdf]
+RWStructuredBuffer<float>        worst;        // [the worst relative difference]
+ConstantBuffer<LightCheckParams> params;
+
+static const float kPiCheck = 3.14159265358979;
+
+/// Two numbers for sample i, spread rather than stratified: the statistic
+/// asks for independence, not for low discrepancy.
+float2 sampleAt(uint i) {
+    uint h = i * 2654435761u;
+    h ^= h >> 15; h *= 2246822519u; h ^= h >> 13; h *= 3266489917u; h ^= h >> 16;
+    const uint g = h * 1664525u + 1013904223u;
+    return float2(float(h >> 8) * (1.0 / 16777216.0), float(g >> 8) * (1.0 / 16777216.0));
+}
+
+/// A cone light's axis and the cosine of its half angle, or false where the
+/// light is not a cone.
+bool coneOf(LightRecord l, out float3 axis, out float cosMax) {
+    axis = float3(0.0, 0.0, 1.0);
+    cosMax = -1.0;
+    if (l.kind == kLightDistant) {
+        axis = lightAxisZ(l);
+        cosMax = cos(0.5 * max(l.sizeX, 0.0));
+        return cosMax < 1.0;
+    }
+    if (l.kind == kLightSphere) {
+        const float3 offset = lightOrigin(l) - params.point.xyz;
+        const float distance2 = dot(offset, offset);
+        const float radius = max(l.sizeX, 0.0);
+        if (radius <= 0.0 || distance2 <= radius * radius) {
+            return false;
+        }
+        axis = normalize(offset);
+        cosMax = sqrt(max(0.0, 1.0 - radius * radius / distance2));
+        return true;
+    }
+    return false;
+}
+
+/// Bins over a cone's own solid angle: cosine from its axis, then around it.
+/// A grid in world axes cuts a small cone badly, and then the statistic
+/// measures the grid rather than the light.
+uint coneBinOf(float3 axis, float cosMax, float3 w) {
+    const float cosTheta = dot(axis, w);
+    if (cosTheta < cosMax) {
+        return params.thetaBins * params.phiBins;   // outside the cone
+    }
+    float3 x, y;
+    lightFrame(axis, x, y);
+    float phi = atan2(dot(y, w), dot(x, w));
+    if (phi < 0.0) {
+        phi += 2.0 * kPiCheck;
+    }
+    const float span = max(1.0 - cosMax, 1.0e-9);
+    const uint t = min(uint((1.0 - cosTheta) / span * float(params.thetaBins)), params.thetaBins - 1);
+    const uint p = min(uint(phi / (2.0 * kPiCheck) * float(params.phiBins)), params.phiBins - 1);
+    return t * params.phiBins + p;
+}
+
+/// Whether the light is an area one, and its half extents in its own axes.
+bool areaOf(LightRecord l, out float2 half) {
+    half = float2(0.0, 0.0);
+    if (l.kind == kLightDisk) {
+        half = float2(l.sizeX, l.sizeX);
+        return l.sizeX > 0.0;
+    }
+    if (l.kind == kLightRect) {
+        half = float2(0.5 * l.sizeX, 0.5 * l.sizeY);
+        return l.sizeX > 0.0 && l.sizeY > 0.0;
+    }
+    return false;
+}
+
+/// A point in the light's own axes, or false where the ray misses its plane.
+bool areaHit(LightRecord l, float3 w, out float2 at) {
+    at = float2(0.0, 0.0);
+    const float3 normal = -lightAxisZ(l);
+    const float denominator = dot(w, -normal);
+    if (denominator <= 0.0) {
+        return false;
+    }
+    const float t = dot(lightOrigin(l) - params.point.xyz, -normal) / denominator;
+    if (!(t > 0.0)) {
+        return false;
+    }
+    const float3 offset = params.point.xyz + w * t - lightOrigin(l);
+    at = float2(dot(offset, lightAxisX(l)), dot(offset, lightAxisY(l)));
+    return true;
+}
+
+/// Bins over the light's own surface, where a sampler uniform in area must
+/// fill the histogram uniformly. A grid in world angles cuts a straight edge
+/// diagonally, and then the statistic measures the grid.
+uint areaBinOf(LightRecord l, float2 half, float3 w) {
+    float2 at;
+    if (!areaHit(l, w, at)) {
+        return params.thetaBins * params.phiBins;
+    }
+    if (l.kind == kLightDisk ? dot(at, at) > half.x * half.x
+                             : (abs(at.x) > half.x || abs(at.y) > half.y)) {
+        return params.thetaBins * params.phiBins;
+    }
+    const uint u = min(uint((at.x + half.x) / (2.0 * half.x) * float(params.thetaBins)), params.thetaBins - 1);
+    const uint v = min(uint((at.y + half.y) / (2.0 * half.y) * float(params.phiBins)), params.phiBins - 1);
+    return u * params.phiBins + v;
+}
+
+uint binOf(float3 w) {
+    const float theta = acos(clamp(w.z, -1.0, 1.0));
+    float phi = atan2(w.y, w.x);
+    if (phi < 0.0) {
+        phi += 2.0 * kPiCheck;
+    }
+    const uint t = min(uint(theta / kPiCheck * float(params.thetaBins)), params.thetaBins - 1);
+    const uint p = min(uint(phi / (2.0 * kPiCheck) * float(params.phiBins)), params.phiBins - 1);
+    return t * params.phiBins + p;
+}
+
+[shader("compute")]
+[numthreads(256, 1, 1)]
+void lightDraw(uint3 tid: SV_DispatchThreadID) {
+    const uint i = tid.x;
+    if (i >= params.samples) {
+        return;
+    }
+    const LightSample s = sampleLight(lights[0], params.point.xyz, params.normal.xyz, sampleAt(i));
+    float3 axis;
+    float cosMax;
+    float2 half;
+    const bool cone = coneOf(lights[0], axis, cosMax);
+    const bool area = areaOf(lights[0], half);
+    uint bin = params.thetaBins * params.phiBins;
+    if (s.valid && !s.delta) {
+        bin = cone ? coneBinOf(axis, cosMax, s.wi) : (area ? areaBinOf(lights[0], half, s.wi) : binOf(s.wi));
+    }
+    bins[i] = bin;
+}
+
+/// The density a sample was drawn with, against the density the same
+/// direction has: a disagreement here is a sampler and its pdf parting ways,
+/// which no amount of binning would show and which MIS would weigh wrongly.
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void lightConsistent(uint3 tid: SV_DispatchThreadID) {
+    uint differ = 0;
+    float worstRelative = 0.0;
+    for (uint i = 0; i < params.samples; ++i) {
+        const LightSample s = sampleLight(lights[0], params.point.xyz, params.normal.xyz, sampleAt(i));
+        if (!s.valid || s.delta) {
+            continue;
+        }
+        const float density = lightPdf(lights[0], params.point.xyz, params.normal.xyz, s.wi);
+        const float relative = abs(density - s.pdf) / max(s.pdf, 1.0e-9);
+        worstRelative = max(worstRelative, relative);
+        differ += relative > 1.0e-3 ? 1u : 0u;
+    }
+    mismatches[0] = differ;
+    worst[0] = worstRelative;
+}
+
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void lightCount(uint3 tid: SV_DispatchThreadID) {
+    const uint n = params.thetaBins * params.phiBins;
+    for (uint b = 0; b <= n; ++b) {
+        observed[b] = 0.0;
+    }
+    for (uint i = 0; i < params.samples; ++i) {
+        observed[bins[i]] += 1.0;
+    }
+}
+
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void lightExpect(uint3 tid: SV_DispatchThreadID) {
+    const LightRecord light = lights[0];
+    const uint sub = 8;
+    float3 axis;
+    float cosMax;
+    const bool cone = coneOf(light, axis, cosMax);
+    float2 half;
+    const bool area = areaOf(light, half);
+    float3 coneX, coneY;
+    lightFrame(axis, coneX, coneY);
+    // Over the same parametrisation the samples were binned in, so the
+    // measure is dcos dphi for a cone and sin(theta) dtheta dphi otherwise.
+    const float dCos = cone ? (1.0 - cosMax) / float(params.thetaBins * sub) : 0.0;
+    const float dTheta = kPiCheck / float(params.thetaBins * sub);
+    const float dPhi = 2.0 * kPiCheck / float(params.phiBins * sub);
+    float integral = 0.0;
+    for (uint t = 0; t < params.thetaBins; ++t) {
+        for (uint p = 0; p < params.phiBins; ++p) {
+            float sum = 0.0;
+            if (area) {
+                // Uniform in area: what a bin should hold is the part of it
+                // that lies on the light, over the light's whole area.
+                const float cellX = 2.0 * half.x / float(params.thetaBins * sub);
+                const float cellY = 2.0 * half.y / float(params.phiBins * sub);
+                const float total = light.kind == kLightDisk ? 3.14159265358979 * half.x * half.x
+                                                             : 4.0 * half.x * half.y;
+                for (uint j = 0; j < sub; ++j) {
+                    const float x = -half.x + (float(t * sub + j) + 0.5) * cellX;
+                    for (uint k = 0; k < sub; ++k) {
+                        const float y = -half.y + (float(p * sub + k) + 0.5) * cellY;
+                        const bool inside = light.kind == kLightDisk ? (x * x + y * y <= half.x * half.x) : true;
+                        sum += inside ? cellX * cellY / total : 0.0;
+                    }
+                }
+                expected[t * params.phiBins + p] = sum * float(params.samples);
+                integral += sum;
+                continue;
+            }
+            for (uint j = 0; j < sub; ++j) {
+                const float theta = (float(t * sub + j) + 0.5) * dTheta;
+                const float sinTheta = sin(theta);
+                const float cosTheta = 1.0 - (float(t * sub + j) + 0.5) * dCos;
+                const float coneSin = sqrt(max(0.0, 1.0 - cosTheta * cosTheta));
+                for (uint k = 0; k < sub; ++k) {
+                    const float phi = (float(p * sub + k) + 0.5) * dPhi;
+                    if (cone) {
+                        const float3 w = normalize(axis * cosTheta + coneX * (coneSin * cos(phi)) +
+                                                   coneY * (coneSin * sin(phi)));
+                        sum += lightPdf(light, params.point.xyz, params.normal.xyz, w) * dCos * dPhi;
+                    } else {
+                        const float3 w = float3(sinTheta * cos(phi), sinTheta * sin(phi), cos(theta));
+                        sum += lightPdf(light, params.point.xyz, params.normal.xyz, w) * sinTheta * dTheta * dPhi;
+                    }
+                }
+            }
+            expected[t * params.phiBins + p] = sum * float(params.samples);
+            integral += sum;
+        }
+    }
+    result[0] = float4(integral, 0.0, 0.0, 0.0);
+}
+
+/// Pearson's statistic over bins expecting at least 5, the rest pooled.
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void lightStatistic(uint3 tid: SV_DispatchThreadID) {
+    const uint n = params.thetaBins * params.phiBins;
+    float statistic = 0.0;
+    float dof = 0.0;
+    float pooledObserved = 0.0;
+    float pooledExpected = 0.0;
+    float drawn = 0.0;
+    for (uint b = 0; b < n; ++b) {
+        drawn += observed[b];
+        if (expected[b] < 5.0) {
+            pooledObserved += observed[b];
+            pooledExpected += expected[b];
+            continue;
+        }
+        statistic += (observed[b] - expected[b]) * (observed[b] - expected[b]) / expected[b];
+        dof += 1.0;
+    }
+    if (pooledExpected >= 5.0) {
+        statistic += (pooledObserved - pooledExpected) * (pooledObserved - pooledExpected) / pooledExpected;
+        dof += 1.0;
+    }
+    result[1] = float4(statistic, max(dof - 1.0, 1.0), drawn / float(params.samples), 0.0);
+}

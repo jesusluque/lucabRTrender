@@ -7,6 +7,7 @@
 #include "../gpu/GpuTest.h"
 
 #include <array>
+#include <cmath>
 #include <cstdio>
 #include <vector>
 
@@ -271,5 +272,115 @@ TEST_CASE("a Lambert plane under a sphere, a disk and a rectangle is lit as the 
                     c2[1], double(relative));
         CHECK(c2[0] > 5000);
         CHECK(c2[1] == 0);
+    }
+}
+
+TEST_CASE("each light's samples follow the density it reports", "[technique][lights][chi2]") {
+    LRT_REQUIRE_GPU(gpu);
+    auto table = light::LightTable::create(*gpu->device);
+    if (!table) FAIL(table.error().toString());
+    const auto kernel = [&](const char* entry) {
+        auto made = gpu::ComputeKernel::create(*gpu->library, "lrt/test/light_check", entry);
+        if (!made) FAIL(made.error().toString());
+        return std::move(*made);
+    };
+    gpu::ComputeKernel draw = kernel("lightDraw");
+    gpu::ComputeKernel count = kernel("lightCount");
+    gpu::ComputeKernel expect = kernel("lightExpect");
+    gpu::ComputeKernel statistic = kernel("lightStatistic");
+    gpu::ComputeKernel consistent = kernel("lightConsistent");
+
+    // Fine enough that a light of small support is resolved by its bins and
+    // not smeared across one: the coarse grid a lobe needs is not enough here.
+    const uint32_t thetaBins = 128;
+    const uint32_t phiBins = 256;
+    const uint32_t bins = thetaBins * phiBins;
+    const uint32_t samples = 1u << 20;
+    gpu::BufferDesc binDesc;
+    binDesc.bytes = uint64_t{samples} * 4;
+    binDesc.elementBytes = 4;
+    binDesc.label = "light.bins";
+    auto binBuffer = gpu::Buffer::create(*gpu->device, binDesc);
+    REQUIRE(binBuffer);
+    const std::vector<float> zeros(size_t{bins} + 1, 0.0F);
+    auto observed = gpu::Buffer::fromSpan<float>(*gpu->device, zeros, "light.observed");
+    auto expected = gpu::Buffer::fromSpan<float>(*gpu->device, zeros, "light.expected");
+    const std::vector<float> resultZeros(8, 0.0F);
+    auto result = gpu::Buffer::fromSpan<float>(*gpu->device, resultZeros, "light.result");
+    gpu::Buffer mismatches = test::uintBuffer(*gpu->device, 1, "light.mismatches");
+    gpu::Buffer worstPdf = test::uintBuffer(*gpu->device, 1, "light.worstPdf");
+    REQUIRE(observed);
+    REQUIRE(expected);
+    REQUIRE(result);
+
+    struct Case {
+        const char*      name;
+        light::LightKind kind;
+        float            sizeX;
+        float            sizeY;
+    };
+    const std::array<Case, 5> cases{Case{"sphere", light::LightKind::Sphere, 0.4F, 0.0F},
+                                    Case{"disk", light::LightKind::Disk, 0.6F, 0.0F},
+                                    Case{"rect", light::LightKind::Rect, 1.2F, 0.8F},
+                                    Case{"sun (0.2 rad)", light::LightKind::Distant, 0.2F, 0.0F},
+                                    Case{"dome", light::LightKind::Dome, 0.0F, 0.0F}};
+    for (const Case& c : cases) {
+        light::Light lamp;
+        lamp.kind = c.kind;
+        lamp.lightToWorld = aofx::xform::translation({0.0, 0.0, -3.0});
+        lamp.radius = c.sizeX;
+        lamp.width = c.sizeX;
+        lamp.height = c.sizeY;
+        lamp.angle = c.kind == light::LightKind::Distant ? c.sizeX : 0.0F;
+        lamp.shadow = false;
+        REQUIRE(table->set(std::span<const light::Light>(&lamp, 1)));
+        const auto bind = [&](rhi::ShaderCursor cursor) {
+            // Only `lights` here: LightTable::bind would also set lightCount,
+            // which this program does not declare.
+            cursor["lights"].setBinding(table->records().rhi());
+            cursor["bins"].setBinding(binBuffer->rhi());
+            cursor["observed"].setBinding(observed->rhi());
+            cursor["expected"].setBinding(expected->rhi());
+            cursor["result"].setBinding(result->rhi());
+            cursor["mismatches"].setBinding(mismatches.rhi());
+            cursor["worst"].setBinding(worstPdf.rhi());
+            rhi::ShaderCursor p = cursor["params"];
+            p["thetaBins"].setData(thetaBins);
+            p["phiBins"].setData(phiBins);
+            p["samples"].setData(samples);
+            const float point[4] = {0.0F, 0.0F, -5.0F, 0.0F};
+            const float normal[4] = {0.0F, 0.0F, 1.0F, 0.0F};
+            p["point"].setData(point, sizeof(point));
+            p["normal"].setData(normal, sizeof(normal));
+        };
+        {
+            gpu::CommandBatch batch(*gpu->device);
+            consistent.dispatch(batch, {1, 1, 1}, bind);
+            draw.dispatch(batch, {samples, 1, 1}, bind);
+            count.dispatch(batch, {1, 1, 1}, bind);
+            expect.dispatch(batch, {1, 1, 1}, bind);
+            statistic.dispatch(batch, {1, 1, 1}, bind);
+            REQUIRE(batch.submit(true));
+        }
+        float r[8] = {};
+        REQUIRE(result->read(*gpu->device, 0, sizeof(r), r));
+        const float integral = r[0];
+        const float chi2 = r[4];
+        const float dof = r[5];
+        const float drawn = r[6];
+        // Pearson's statistic has mean dof and variance 2 dof.
+        const float z = (chi2 - dof) / std::sqrt(2.0F * dof);
+        uint32_t differ = 0;
+        float worstRelative = 0.0F;
+        REQUIRE(mismatches.read(*gpu->device, 0, sizeof(differ), &differ));
+        REQUIRE(worstPdf.read(*gpu->device, 0, sizeof(worstRelative), &worstRelative));
+        std::printf("  %-13s: chi2 %.1f on %.0f dof (z %.2f), pdf integral %.4f against %.4f drawn; %u samples "
+                    "disagree with lightPdf (worst %.2e)\n",
+                    c.name, double(chi2), double(dof), double(z), double(integral), double(drawn), differ,
+                    double(worstRelative));
+        CHECK(differ == 0);
+        CHECK(std::abs(z) < 4.0F);
+        // The pdf integrates to the fraction of samples the light drew.
+        CHECK(std::abs(integral - drawn) < 0.02F);
     }
 }
