@@ -13,8 +13,11 @@
 //     (`renderView`), and a slang-rhi buffer is one gpe can adopt
 //     (`computeView`): no copies in either direction;
 //   - ordering is the queue's (Metal commits in order on one queue) or the
-//     stream's (CUDA). gpe's uploads ride its own transfer queue/stream and
-//     are ordered against gpe's work only, so `flushCompute()` is what a pass
+//     stream's (CUDA). gpe holds dispatches back in batches on Metal, so the
+//     render device hands gpe's batch over before every submission of its
+//     own (gpu::Device::setBeforeSubmit): the calls run in the order they
+//     were made. gpe's uploads ride its own transfer queue/stream and are
+//     ordered against gpe's work only, so `flushCompute()` is what a pass
 //     calls before slang-rhi reads bytes gpe *uploaded*.
 //
 // On Vulkan there is no gpe backend: `compute()` is null and aofx is not
@@ -85,8 +88,8 @@ public:
     [[nodiscard]] Result<uint64_t> computeView(const gpu::Buffer& buffer);
 
     /// Waits for gpe's queued work and transfers. Call before slang-rhi reads
-    /// what gpe uploaded; unnecessary after a gpe dispatch on Metal/CUDA,
-    /// which shares the queue/stream.
+    /// what gpe uploaded; unnecessary after a gpe dispatch, which shares the
+    /// queue/stream and is handed over before the render device submits.
     void flushCompute();
 
     [[nodiscard]] const std::string& backendName() const noexcept;

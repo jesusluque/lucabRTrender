@@ -17,6 +17,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -87,6 +88,19 @@ public:
     /// Blocks until everything submitted has run.
     void waitIdle();
 
+    /// Called before this device submits anything to its queue.
+    ///
+    /// For a second runtime sharing the queue (gpe, see gpu_host::Context)
+    /// that holds work back in batches: it hands its batch over here, so what
+    /// the renderer submits next runs after it -- the order the calls were
+    /// made in, with nothing for a caller to remember.
+    void setBeforeSubmit(std::function<void()> hook) { beforeSubmit_ = std::move(hook); }
+    void beforeSubmit() const {
+        if (beforeSubmit_) {
+            beforeSubmit_();
+        }
+    }
+
 private:
     Device() = default;
 
@@ -96,6 +110,7 @@ private:
     rhi::ComPtr<rhi::IDevice>       device_;
     rhi::ComPtr<rhi::ICommandQueue> queue_;
     rhi::ComPtr<slang::ISession>    session_;
+    std::function<void()>           beforeSubmit_;
 };
 
 /// Where the engine's own .slang files are: $LRT_SHADER_DIR, then

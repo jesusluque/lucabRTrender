@@ -78,6 +78,7 @@ Result<void> Buffer::read(Device& device, uint64_t offset, uint64_t bytes, void*
     if (buffer_ == nullptr || offset + bytes > bytes_) {
         return Error(ErrorCode::InvalidArgument, "read outside the buffer");
     }
+    device.beforeSubmit();
     if (SLANG_FAILED(device.rhi()->readBuffer(buffer_.get(), offset, bytes, into))) {
         return Error(ErrorCode::DeviceFailure, "readBuffer failed");
     }
@@ -90,6 +91,7 @@ Result<void> Buffer::write(Device& device, uint64_t offset, uint64_t bytes, cons
     }
     rhi::ComPtr<rhi::ICommandEncoder> encoder = device.queue()->createCommandEncoder();
     encoder->uploadBufferData(buffer_.get(), offset, bytes, const_cast<void*>(from));
+    device.beforeSubmit();
     if (SLANG_FAILED(device.queue()->submit(encoder->finish()))) {
         return Error(ErrorCode::DeviceFailure, "upload submit failed");
     }

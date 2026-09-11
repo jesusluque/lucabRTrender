@@ -16,6 +16,7 @@ CommandBatch::~CommandBatch() {
 
 Result<void> CommandBatch::submit(bool wait) {
     if (dirty_) {
+        device_.beforeSubmit();
         if (SLANG_FAILED(device_.queue()->submit(encoder_->finish()))) {
             return Error(ErrorCode::DeviceFailure, "command submit failed");
         }
@@ -23,6 +24,7 @@ Result<void> CommandBatch::submit(bool wait) {
         dirty_ = false;
     }
     if (wait) {
+        device_.beforeSubmit();
         device_.queue()->waitOnHost();
     }
     return ok();

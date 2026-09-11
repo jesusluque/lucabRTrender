@@ -118,6 +118,14 @@ Result<std::unique_ptr<Context>> Context::create(const ContextDesc& desc) {
         const size_t poolBudget =
             unified ? desc.budgetBytes : std::max(desc.budgetBytes, available / 4 * 3);
         impl.compute = std::make_shared<gpe::PooledDevice>(std::move(native), poolBudget);
+        // gpe batches its dispatches on the shared queue; whatever slang-rhi
+        // submits must follow them, so it hands the batch over first.
+        impl.device->setBeforeSubmit(
+            [weak = std::weak_ptr<gpe::PooledDevice>(impl.compute)] {
+                if (const auto compute = weak.lock()) {
+                    compute->flush();
+                }
+            });
         impl.storage = std::make_shared<ImageStorage>(
             impl.compute, poolBudget / 2,
             unified ? ImageStorage::Mode::Shared : ImageStorage::Mode::Paired);
