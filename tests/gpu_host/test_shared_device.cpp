@@ -96,6 +96,14 @@ TEST_CASE("a slang-rhi buffer adopted by gpe is the same memory", "[gpu_host][gp
     }
     gpe::PooledDevice& compute = *context->compute();
 
+    // The same allocation off the GPU thread and on it: gpe makes its adopted
+    // CUDA context current for its own work, and a buffer slang-rhi allocates
+    // while that is so goes to whichever context the thread is left in.
+    {
+        std::vector<uint32_t> zeros(kSlots, 0);
+        auto outside = lrt::gpu::Buffer::fromSpan<uint32_t>(context->device(), zeros, "off the GPU thread");
+        if (!outside) FAIL(outside.error().toString());
+    }
     REQUIRE(context->run([&] {
         std::vector<uint32_t> zeros(kSlots, 0);
         auto buffer = lrt::gpu::Buffer::fromSpan<uint32_t>(context->device(), zeros, "rhi-owned");
