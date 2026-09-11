@@ -44,14 +44,13 @@ void scatterShapeProbe(uint3 tid: SV_DispatchThreadID) {
         // The writes the scatter makes, to the slots it would use, so the
         // dispatch has the same reads and writes in flight as the real one.
         const uint at = chunkStarts[c * 256];
-        chunkStarts[c * 256] = at + 1;
-        saw[i * 4 + 3] = at;   // the slot both writes below are meant to use
-        // Written from the buffer, not from the local the loop carried: on
-        // CUDA the local delivered the iteration before's word.
-        dstKeysLo[at] = srcKeysLo[i];
+        saw[i * 4 + 3] = at;   // the slot every write below is meant to use
+        dstKeysLo[at] = lo;
         if (params.wide != 0) {
             dstKeysHi[at] = hi;
         }
         dstValues[at] = srcValues[i];
+        // The cursor advances last, as the scatter's does: see radix_scatter.
+        chunkStarts[c * 256] = at + 1;
     }
 }
