@@ -238,7 +238,11 @@ Result<void> HeadlightShading::shade(gpu::CommandBatch& batch, const world::GpuS
     if (!ids) return std::move(ids).error();
     shade_.dispatch(batch, {targets.width, targets.height, 1}, [&](rhi::ShaderCursor cursor) {
         cursor["positions"].setBinding(scene.positions().rhi());
-        cursor["normals"].setBinding(scene.normals().rhi());
+        cursor["primvarRecords"].setBinding(scene.primvarRecords().rhi());
+        cursor["primvarValues"].setBinding(scene.primvarValues().rhi());
+        cursor["primvarSlots"].setBinding(scene.primvarSlots().rhi());
+        cursor["triangleCorners"].setBinding(scene.triangleCorners().rhi());
+        cursor["triangleFaces"].setBinding(scene.triangleFaces().rhi());
         cursor["indices"].setBinding(scene.indices().rhi());
         cursor["meshes"].setBinding(scene.meshRecords().rhi());
         cursor["instances"].setBinding(scene.instanceRecords().rhi());

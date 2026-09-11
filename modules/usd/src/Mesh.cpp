@@ -86,7 +86,8 @@ void HdLrtMesh::Sync(HdSceneDelegate* delegate, HdRenderParam* renderParam, HdDi
 
     std::optional<lrt::usd::MeshArrays> arrays;
     if ((*dirtyBits & (HdChangeTracker::DirtyPoints | HdChangeTracker::DirtyTopology |
-                       HdChangeTracker::DirtyDisplayStyle | HdChangeTracker::DirtyNormals)) != 0) {
+                       HdChangeTracker::DirtyDisplayStyle | HdChangeTracker::DirtyNormals |
+                       HdChangeTracker::DirtyPrimvar)) != 0) {
         lrt::usd::MeshArrays a;
         const HdMeshTopology topology = GetMeshTopology(delegate);
         a.faceVertexCounts = topology.GetFaceVertexCounts();
@@ -96,6 +97,26 @@ void HdLrtMesh::Sync(HdSceneDelegate* delegate, HdRenderParam* renderParam, HdDi
         a.points = delegate->Get(id, HdTokens->points);
         // Smooth normals where Storm computes them: a subdivision scheme that
         // is not none or bilinear, and no flat shading asked for.
+        // Every numeric primvar, as it is (indices resolved on the device).
+        for (const HdInterpolation interpolation : {HdInterpolationConstant, HdInterpolationUniform,
+                                                    HdInterpolationVarying, HdInterpolationVertex,
+                                                    HdInterpolationFaceVarying}) {
+            for (const HdPrimvarDescriptor& descriptor : GetPrimvarDescriptors(delegate, interpolation)) {
+                if (descriptor.name == HdTokens->points) {
+                    continue;
+                }
+                lrt::usd::PrimvarArrays primvar;
+                primvar.name = descriptor.name.GetString();
+                primvar.interpolation = static_cast<uint32_t>(interpolation);
+                primvar.values = descriptor.indexed
+                                     ? delegate->GetIndexedPrimvar(id, descriptor.name, &primvar.indices)
+                                     : GetPrimvar(delegate, descriptor.name);
+                uint32_t components = 0;
+                if (!lrt::usd::primvarStreamOf(primvar.values, &components).empty()) {
+                    a.primvars.push_back(std::move(primvar));
+                }
+            }
+        }
         const HdDisplayStyle style = GetDisplayStyle(delegate);
         a.smoothNormals = !style.flatShadingEnabled && topology.GetScheme() != PxOsdOpenSubdivTokens->none &&
                           topology.GetScheme() != PxOsdOpenSubdivTokens->bilinear;

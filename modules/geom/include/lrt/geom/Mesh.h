@@ -11,6 +11,8 @@
 #include <cstdint>
 #include <span>
 #include <string>
+#include <string_view>
+#include <vector>
 
 #include "lrt/core/Result.h"
 #include "lrt/gpu/Buffer.h"
@@ -25,6 +27,26 @@ class ShaderLibrary;
 
 namespace lrt::geom {
 
+/// How a primvar's values map onto a mesh (Hydra's HdInterpolation for meshes).
+enum class Interpolation : uint32_t { Constant = 0, Uniform = 1, Varying = 2, Vertex = 3, FaceVarying = 4 };
+
+struct PrimvarInput {
+    std::string              name;
+    Interpolation            interpolation = Interpolation::Constant;
+    uint32_t                 components = 1;   ///< 1..4 per element
+    scene::FloatStream       values;           ///< float, half or double
+    std::span<const int32_t> indices;          ///< empty unless indexed
+};
+
+/// A primvar on the device: one float4 per element (indices resolved).
+struct GpuPrimvar {
+    std::string   name;
+    Interpolation interpolation = Interpolation::Constant;
+    uint32_t      components = 1;
+    uint32_t      count = 0;
+    gpu::Buffer   values;
+};
+
 struct MeshInput {
     std::string                source;
     scene::FloatStream         points;              ///< xyz per point, float or half
@@ -32,9 +54,11 @@ struct MeshInput {
     std::span<const int32_t>   faceVertexIndices;
     std::span<const int32_t>   holeIndices;
     bool                       leftHanded = false;
-    /// Smooth normals are computed when true (no authored normals, and a
-    /// subdivision scheme that is not "none" or "bilinear", as Hydra decides).
+    /// Smooth normals are computed when true (a subdivision scheme that is
+    /// not "none" or "bilinear", as Hydra decides) and no "normals" primvar
+    /// is given; they become the "normals" vertex primvar.
     bool                       smoothNormals = true;
+    std::span<const PrimvarInput> primvars;
 };
 
 struct GpuMesh {
@@ -47,8 +71,17 @@ struct GpuMesh {
     gpu::Buffer   indices;          ///< uint, 3 per triangle: points
     gpu::Buffer   triangleCorners;  ///< uint, 3 per triangle: face-vertex indices
     gpu::Buffer   triangleFaces;    ///< uint per triangle: authored face
-    gpu::Buffer   normals;          ///< float4 per point when computed; invalid otherwise
+    std::vector<GpuPrimvar> primvars;   ///< authored, and "normals" when computed
     scene::Bounds bounds;
+
+    [[nodiscard]] const GpuPrimvar* primvar(std::string_view name) const noexcept {
+        for (const GpuPrimvar& p : primvars) {
+            if (p.name == name) {
+                return &p;
+            }
+        }
+        return nullptr;
+    }
 };
 
 class MeshBuilder {
@@ -64,6 +97,7 @@ private:
     gpu::ComputeKernel points_, holes_, faceCounts_, triangulate_;
     gpu::ComputeKernel cornerKeys_, clearRuns_, pointRuns_, pointNormals_;
     gpu::ComputeKernel boundsChunks_, boundsReduce_;
+    gpu::ComputeKernel expand_;
 };
 
 }   // namespace lrt::geom

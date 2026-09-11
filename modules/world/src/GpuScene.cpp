@@ -2,6 +2,8 @@
 #include "lrt/world/GpuScene.h"
 
 #include <algorithm>
+#include <cstddef>
+#include <cstring>
 #include <map>
 
 #include "lrt/gpu/CommandBatch.h"
@@ -12,7 +14,7 @@ namespace lrt::world {
 namespace {
 
 struct MeshRecord {
-    uint32_t firstPoint, points, firstTriangle, triangles, hasNormals, nodeBase, pad1, pad2;
+    uint32_t firstPoint, points, firstTriangle, triangles, hasNormals, nodeBase, slotBase, pad2;
     float    lo[4];
     float    hi[4];
 };
@@ -26,6 +28,10 @@ struct InstanceRecord {
 };
 static_assert(sizeof(MeshRecord) == 64);
 static_assert(sizeof(InstanceRecord) == 176);
+
+struct PrimvarRecord {
+    uint32_t interpolation, components, first, count;
+};
 
 Result<gpu::Buffer> deviceBuffer(gpu::Device& device, uint64_t count, uint32_t element, const char* label,
                                  const void* data = nullptr) {
@@ -77,21 +83,30 @@ Result<void> GpuScene::repack() {
         return ok();
     };
     LRT_TRY(make(positions_, points, 16, "scene.positions"));
-    LRT_TRY(make(normals_, points, 16, "scene.normals"));
+    uint64_t primvarValues = 0;
+    uint64_t primvarCount = 0;
+    for (const auto& mesh : meshes_) {
+        for (const geom::GpuPrimvar& p : mesh->primvars) {
+            primvarValues += p.count;
+            ++primvarCount;
+        }
+    }
+    LRT_TRY(make(primvarValues_, primvarValues, 16, "scene.primvars"));
     LRT_TRY(make(indices_, triangles * 3, 4, "scene.indices"));
     LRT_TRY(make(triangleCorners_, triangles * 3, 4, "scene.triangleCorners"));
     LRT_TRY(make(triangleFaces_, triangles, 4, "scene.triangleFaces"));
     std::vector<MeshRecord> records(meshes_.size());
+    std::vector<PrimvarRecord> primvars;
+    firstPrimvar_.assign(meshes_.size(), 0);
     uint32_t nodes = 0;
+    uint64_t valueAt = 0;
     gpu::CommandBatch batch(device);
     for (size_t k = 0; k < meshes_.size(); ++k) {
         const geom::GpuMesh& m = *meshes_[k];
         const Range& r = ranges_[k];
         rhi::ICommandEncoder* e = batch.encoder();
         e->copyBuffer(positions_.rhi(), uint64_t{r.firstPoint} * 16, m.positions.rhi(), 0, uint64_t{m.points} * 16);
-        if (m.normals.valid()) {
-            e->copyBuffer(normals_.rhi(), uint64_t{r.firstPoint} * 16, m.normals.rhi(), 0, uint64_t{m.points} * 16);
-        }
+
         if (m.triangles > 0) {
             e->copyBuffer(indices_.rhi(), uint64_t{r.firstTriangle} * 12, m.indices.rhi(), 0,
                           uint64_t{m.triangles} * 12);
@@ -100,17 +115,84 @@ Result<void> GpuScene::repack() {
             e->copyBuffer(triangleFaces_.rhi(), uint64_t{r.firstTriangle} * 4, m.triangleFaces.rhi(), 0,
                           uint64_t{m.triangles} * 4);
         }
-        records[k] = {r.firstPoint, m.points, r.firstTriangle, m.triangles, m.normals.valid() ? 1u : 0u, nodes, 0, 0,
+        firstPrimvar_[k] = static_cast<uint32_t>(primvars.size());
+        for (const geom::GpuPrimvar& p : m.primvars) {
+            e->copyBuffer(primvarValues_.rhi(), valueAt * 16, p.values.rhi(), 0, uint64_t{p.count} * 16);
+            primvars.push_back({static_cast<uint32_t>(p.interpolation), p.components, static_cast<uint32_t>(valueAt),
+                                p.count});
+            valueAt += p.count;
+        }
+        const uint32_t slotBase = static_cast<uint32_t>(k * slotNames_.size());
+        records[k] = {r.firstPoint, m.points, r.firstTriangle, m.triangles, m.primvar("normals") ? 1u : 0u, nodes,
+                      slotBase, 0,
                       {m.bounds.min[0], m.bounds.min[1], m.bounds.min[2], 0.0F},
                       {m.bounds.max[0], m.bounds.max[1], m.bounds.max[2], 0.0F}};
         nodes += std::max<uint32_t>(m.triangles, 1) - 1;   // a mesh's LBVH has triangles - 1 internal nodes
     }
     batch.markDirty();
     LRT_TRY(batch.submit(true));
+    meshRecordWords_.assign(records.size() * sizeof(MeshRecord) / 4, 0);
+    if (!records.empty()) {
+        std::memcpy(meshRecordWords_.data(), records.data(), records.size() * sizeof(MeshRecord));
+    }
     auto made = deviceBuffer(device, records.size(), sizeof(MeshRecord), "scene.meshes", records.data());
     if (!made) return std::move(made).error();
     meshRecords_ = std::move(*made);
+    auto madePrimvars = deviceBuffer(device, primvars.size(), sizeof(PrimvarRecord), "scene.primvarRecords",
+                                     primvars.data());
+    if (!madePrimvars) return std::move(madePrimvars).error();
+    primvarRecords_ = std::move(*madePrimvars);
+    (void)primvarCount;
+    slotsDirty_ = true;
     ++generation_;
+    return ok();
+}
+
+void GpuScene::setExtraPrimvarSlots(std::vector<std::string> names) {
+    std::vector<std::string> all{"displayColor", "displayOpacity", "normals", "st"};
+    all.insert(all.end(), names.begin(), names.end());
+    if (all != slotNames_) {
+        slotNames_ = std::move(all);
+        slotsDirty_ = true;
+    }
+}
+
+uint32_t GpuScene::slotOf(std::string_view name) const noexcept {
+    for (uint32_t k = 0; k < slotNames_.size(); ++k) {
+        if (slotNames_[k] == name) {
+            return k;
+        }
+    }
+    return ~uint32_t{0};
+}
+
+Result<void> GpuScene::writeSlots() {
+    // Per mesh, per slot: the record of the primvar with that name, or none.
+    std::vector<uint32_t> slots(std::max<size_t>(meshes_.size() * slotNames_.size(), 1), ~uint32_t{0});
+    std::vector<MeshRecord> records(meshes_.size());
+    for (size_t k = 0; k < meshes_.size(); ++k) {
+        const auto& primvars = meshes_[k]->primvars;
+        for (size_t p = 0; p < primvars.size(); ++p) {
+            for (size_t slot = 0; slot < slotNames_.size(); ++slot) {
+                if (primvars[p].name == slotNames_[slot]) {
+                    slots[k * slotNames_.size() + slot] = firstPrimvar_[k] + static_cast<uint32_t>(p);
+                }
+            }
+        }
+    }
+    auto made = gpu::Buffer::fromSpan<uint32_t>(*device_, slots, "scene.primvarSlots");
+    if (!made) return std::move(made).error();
+    primvarSlots_ = std::move(*made);
+    // Mesh records carry each mesh's row: rewritten for the slot count.
+    constexpr size_t kWords = sizeof(MeshRecord) / 4;
+    constexpr size_t kSlotBaseWord = offsetof(MeshRecord, slotBase) / 4;
+    for (size_t k = 0; k < meshes_.size(); ++k) {
+        meshRecordWords_[k * kWords + kSlotBaseWord] = static_cast<uint32_t>(k * slotNames_.size());
+    }
+    if (!meshes_.empty()) {
+        LRT_TRY(meshRecords_.write(*device_, 0, meshRecordWords_.size() * 4, meshRecordWords_.data()));
+    }
+    slotsDirty_ = false;
     return ok();
 }
 
@@ -144,6 +226,9 @@ Result<void> GpuScene::update(std::span<const MeshInstance> instances, const ren
     if (meshes != meshes_) {
         meshes_ = std::move(meshes);
         LRT_TRY(repack());
+    }
+    if (slotsDirty_) {
+        LRT_TRY(writeSlots());
     }
 
     std::vector<InstanceRecord> records;

@@ -141,6 +141,17 @@ Result<size_t> Engine::commit() {
         input.holeIndices = std::span<const int32_t>(a.holeIndices.cdata(), a.holeIndices.size());
         input.leftHanded = a.leftHanded;
         input.smoothNormals = a.smoothNormals;
+        std::vector<geom::PrimvarInput> primvars;
+        for (const PrimvarArrays& p : a.primvars) {
+            geom::PrimvarInput primvar;
+            primvar.name = p.name;
+            // HdInterpolation's order is geom::Interpolation's.
+            primvar.interpolation = static_cast<geom::Interpolation>(p.interpolation);
+            primvar.values = primvarStreamOf(p.values, &primvar.components);
+            primvar.indices = std::span<const int32_t>(p.indices.cdata(), p.indices.size());
+            primvars.push_back(std::move(primvar));
+        }
+        input.primvars = primvars;
         entry.gpu.reset();
         if (input.points.values() >= 3 && !a.faceVertexCounts.empty()) {
             if (!meshBuilder_.has_value()) {

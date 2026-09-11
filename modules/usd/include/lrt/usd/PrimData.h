@@ -7,6 +7,7 @@
 #pragma once
 
 #include <array>
+#include <vector>
 #include <string>
 
 #include <pxr/base/vt/array.h>
@@ -34,6 +35,18 @@ struct PointsArrays {
     pxr::VtValue colours;     ///< displayColor: VtVec3fArray (one or per point) or GfVec3f; linear
 };
 
+/// A primvar as Hydra holds it.
+struct PrimvarArrays {
+    std::string        name;
+    uint32_t           interpolation = 0;   ///< geom::Interpolation's values
+    pxr::VtValue       values;
+    pxr::VtArray<int>  indices;             ///< empty unless indexed
+};
+
+/// A numeric primvar's bytes (float, half or double; scalar or array) and
+/// components per element. Empty for anything else.
+[[nodiscard]] scene::FloatStream primvarStreamOf(const pxr::VtValue& value, uint32_t* components);
+
 /// A mesh's topology and points as Hydra holds them (all reference counted).
 struct MeshArrays {
     pxr::VtValue           points;              ///< VtVec3fArray or VtVec3hArray
@@ -42,6 +55,7 @@ struct MeshArrays {
     pxr::VtArray<int>      holeIndices;
     bool                   leftHanded = false;
     bool                   smoothNormals = true;
+    std::vector<PrimvarArrays> primvars;
 };
 
 /// An instancer's primvars as Hydra holds them.

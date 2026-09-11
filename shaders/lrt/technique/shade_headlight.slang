@@ -10,9 +10,9 @@
 module shade_headlight;
 import camera;
 import lrt.world.scene_types;
+import lrt.world.primvars;
 
 StructuredBuffer<float4>          positions;
-StructuredBuffer<float4>          normals;
 StructuredBuffer<uint>            indices;
 StructuredBuffer<MeshRecord>      meshes;
 StructuredBuffer<InstanceRecord>  instances;
@@ -63,9 +63,10 @@ void shadeHeadlight(uint3 tid: SV_DispatchThreadID) {
     const InstanceRecord instance = instances[seen.x - 1];
     const MeshRecord mesh = meshes[instance.mesh];
     const uint triangle = mesh.firstTriangle + seen.y;
-    const uint i0 = mesh.firstPoint + indices[triangle * 3];
-    const uint i1 = mesh.firstPoint + indices[triangle * 3 + 1];
-    const uint i2 = mesh.firstPoint + indices[triangle * 3 + 2];
+    const uint3 points = uint3(indices[triangle * 3], indices[triangle * 3 + 1], indices[triangle * 3 + 2]);
+    const uint i0 = mesh.firstPoint + points.x;
+    const uint i1 = mesh.firstPoint + points.y;
+    const uint i2 = mesh.firstPoint + points.z;
     const float3 a = rowsApply(instance.view0, instance.view1, instance.view2, positions[i0].xyz, 1.0);
     const float3 b = rowsApply(instance.view0, instance.view1, instance.view2, positions[i1].xyz, 1.0);
     const float3 c = rowsApply(instance.view0, instance.view1, instance.view2, positions[i2].xyz, 1.0);
@@ -73,21 +74,26 @@ void shadeHeadlight(uint3 tid: SV_DispatchThreadID) {
     float3 direction;
     viewRay(camera, float2(tid.xy) + 0.5, origin, direction);
     const Hit hit = intersect(origin, direction, a, b, c);
-    const float w0 = 1.0 - hit.barycentrics.x - hit.barycentrics.y;
+    const float3 weights = float3(1.0 - hit.barycentrics.x - hit.barycentrics.y, hit.barycentrics.x,
+                                  hit.barycentrics.y);
 
     float3 n = normalize(cross(b - a, c - a));
-    if (mesh.hasNormals != 0) {
-        const float3 objectNormal = normals[i0].xyz * w0 + normals[i1].xyz * hit.barycentrics.x +
-                                    normals[i2].xyz * hit.barycentrics.y;
+    const uint normals = primvarRecordOf(mesh, kSlotNormals);
+    if (normals != kNoPrimvar) {
+        const float3 objectNormal = primvarAt(normals, mesh, seen.y, points, weights, float4(0.0)).xyz;
         const float3 viewNormal = rowsApply(instance.normal0, instance.normal1, instance.normal2, objectNormal, 0.0);
         const float length2 = dot(viewNormal, viewNormal);
         if (length2 > 0.0) {
             n = viewNormal / sqrt(length2);
         }
     }
+    const float3 displayColor =
+        primvarAt(primvarRecordOf(mesh, kSlotDisplayColor), mesh, seen.y, points, weights, instance.colour).rgb;
+    const float displayOpacity = primvarAt(primvarRecordOf(mesh, kSlotDisplayOpacity), mesh, seen.y, points, weights,
+                                           float4(instance.colour.w)).x;
     const float3 toEye = -normalize(direction);
     const float cosine = abs(dot(n, toEye));
-    const float opacity = instance.colour.w;
-    colour[at] = float4(instance.colour.rgb * cosine * opacity, opacity);
+    const float opacity = saturate(displayOpacity);
+    colour[at] = float4(displayColor * cosine * opacity, opacity);
     depth[at] = camera.orthographic != 0 ? origin.z + hit.t : hit.t;
 }

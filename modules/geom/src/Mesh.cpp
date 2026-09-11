@@ -57,6 +57,7 @@ Result<MeshBuilder> MeshBuilder::create(gpu::ShaderLibrary& library) {
     LRT_TRY(make(b.pointNormals_, "lrt/geom/mesh_normals", "pointNormals"));
     LRT_TRY(make(b.boundsChunks_, "lrt/scene/bounds_chunks", "boundsChunks"));
     LRT_TRY(make(b.boundsReduce_, "lrt/scene/bounds_reduce", "boundsReduce"));
+    LRT_TRY(make(b.expand_, "lrt/geom/primvar_expand", "primvarExpand"));
     return b;
 }
 
@@ -172,8 +173,48 @@ Result<GpuMesh> MeshBuilder::build(const MeshInput& in) {
         LRT_TRY(batch.submit(true));
     }
 
+    // Primvars, their indices resolved on the device.
+    bool authoredNormals = false;
+    for (const PrimvarInput& p : in.primvars) {
+        const uint32_t components = std::clamp<uint32_t>(p.components, 1, 4);
+        const uint64_t elements = p.values.values() / components;
+        const uint32_t count = static_cast<uint32_t>(p.indices.empty() ? elements : p.indices.size());
+        if (count == 0 || p.values.empty()) {
+            continue;
+        }
+        GpuPrimvar primvar;
+        primvar.name = p.name;
+        primvar.interpolation = p.interpolation;
+        primvar.components = components;
+        primvar.count = count;
+        const uint64_t words = std::max<uint64_t>((p.values.bytes.size() + 3) / 4, 1);
+        auto source = deviceBuffer(device, words, 4, "mesh.primvar.words");
+        if (!source) return std::move(source).error();
+        LRT_TRY(source->write(device, 0, p.values.bytes.size(), p.values.bytes.data()));
+        auto primvarIndices = intBuffer(device, p.indices, "mesh.primvar.indices");
+        if (!primvarIndices) return std::move(primvarIndices).error();
+        auto values = deviceBuffer(device, count, 16, "mesh.primvar");
+        if (!values) return std::move(values).error();
+        primvar.values = std::move(*values);
+        gpu::CommandBatch batch(device);
+        expand_.dispatch(batch, {count, 1, 1}, [&](rhi::ShaderCursor cursor) {
+            cursor["words"].setBinding(source->rhi());
+            cursor["indices"].setBinding(primvarIndices->rhi());
+            cursor["expanded"].setBinding(primvar.values.rhi());
+            rhi::ShaderCursor q = cursor["params"];
+            q["count"].setData(count);
+            q["components"].setData(components);
+            q["kind"].setData(p.values.kind());
+            q["indexed"].setData(uint32_t{p.indices.empty() ? 0u : 1u});
+            q["values"].setData(static_cast<uint32_t>(elements));
+        });
+        LRT_TRY(batch.submit(true));
+        authoredNormals = authoredNormals || p.name == "normals";
+        mesh.primvars.push_back(std::move(primvar));
+    }
+
     // Smooth normals: corners keyed by point, sorted, summed per point.
-    if (in.smoothNormals && mesh.corners > 0) {
+    if (in.smoothNormals && !authoredNormals && mesh.corners > 0) {
         gpu::SortBuffers sorting;
         const auto assign = [&](gpu::Buffer& into, const char* label) -> Result<void> {
             auto made = deviceBuffer(device, mesh.corners, 4, label);
@@ -231,7 +272,13 @@ Result<GpuMesh> MeshBuilder::build(const MeshInput& in) {
             normalParams(cursor["params"]);
         });
         LRT_TRY(batch.submit(true));
-        mesh.normals = std::move(*normals);
+        GpuPrimvar primvar;
+        primvar.name = "normals";
+        primvar.interpolation = Interpolation::Vertex;
+        primvar.components = 3;
+        primvar.count = mesh.points;
+        primvar.values = std::move(*normals);
+        mesh.primvars.push_back(std::move(primvar));
     }
 
     // Bounds, on the device.

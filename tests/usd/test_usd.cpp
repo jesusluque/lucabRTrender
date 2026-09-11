@@ -327,6 +327,66 @@ TEST_CASE("a UsdGeomMesh draws through Hydra where, how deep and how lit it anal
     CHECK(depthError < 1e-3F);
 }
 
+TEST_CASE("displayColor reaches the pixels per face and per indexed face-vertex", "[usd][gpu][mesh][primvars]") {
+    LRT_REQUIRE_GPU(gpu);
+    if (!gpu->device->caps().rasterization) {
+        SKIP("no rasterisation on this device");
+    }
+    const fs::path path = scratch("primvars.usda");
+    {
+        std::ofstream out(path);
+        out << "#usda 1.0\n(\n    upAxis = \"Y\"\n)\n"
+               // Two faces, one colour each.
+               "def Mesh \"PerFace\"\n{\n"
+               "    int[] faceVertexCounts = [4, 4]\n"
+               "    int[] faceVertexIndices = [0, 1, 4, 3, 1, 2, 5, 4]\n"
+               "    point3f[] points = [(-2, 0.1, -5), (0, 0.1, -5), (2, 0.1, -5), (-2, 1.5, -5), (0, 1.5, -5), (2, 1.5, -5)]\n"
+               "    uniform token subdivisionScheme = \"none\"\n"
+               "    color3f[] primvars:displayColor = [(1, 0, 0), (0, 1, 0)] ( interpolation = \"uniform\" )\n"
+               "}\n"
+               // One face, red on its left corners and blue on its right, indexed.
+               "def Mesh \"PerCorner\"\n{\n"
+               "    int[] faceVertexCounts = [4]\n"
+               "    int[] faceVertexIndices = [0, 1, 2, 3]\n"
+               "    point3f[] points = [(-2, -1.5, -5), (2, -1.5, -5), (2, -0.1, -5), (-2, -0.1, -5)]\n"
+               "    uniform token subdivisionScheme = \"none\"\n"
+               "    color3f[] primvars:displayColor = [(1, 0, 0), (0, 0, 1)] ( interpolation = \"faceVarying\" )\n"
+               "    int[] primvars:displayColor:indices = [0, 1, 1, 0]\n"
+               "}\n"
+               "def Camera \"Camera\"\n{\n"
+               "    float focalLength = 20\n"
+               "    float horizontalAperture = 24.576\n    float verticalAperture = 18.432\n}\n";
+    }
+    auto renderer = usd::StageRenderer::open(path);
+    if (!renderer) FAIL(renderer.error().toString());
+    const uint32_t w = 160;
+    const uint32_t h = 120;
+    auto image = (*renderer)->render("/Camera", 0.0, w, h);
+    if (!image) FAIL(image.error().toString());
+    // Pixels well inside each region (bottom row first): what they read.
+    const auto pixel = [&](uint32_t x, uint32_t y) {
+        const float* p = image->rgba.data() + (size_t{y} * w + x) * 4;
+        return std::array<float, 3>{p[0], p[1], p[2]};
+    };
+    const auto left = pixel(w / 2 - 20, h / 2 + 15);
+    const auto right = pixel(w / 2 + 20, h / 2 + 15);
+    const auto cornerLeft = pixel(w / 2 - 45, h / 2 - 15);
+    const auto cornerMiddle = pixel(w / 2, h / 2 - 15);
+    const auto cornerRight = pixel(w / 2 + 45, h / 2 - 15);
+    std::printf("  per face: (%.2f %.2f %.2f) | (%.2f %.2f %.2f); per corner: r/b %.2f/%.2f, %.2f/%.2f, %.2f/%.2f\n",
+                double(left[0]), double(left[1]), double(left[2]), double(right[0]), double(right[1]),
+                double(right[2]), double(cornerLeft[0]), double(cornerLeft[2]), double(cornerMiddle[0]),
+                double(cornerMiddle[2]), double(cornerRight[0]), double(cornerRight[2]));
+    CHECK(left[0] > 0.5F);
+    CHECK(left[1] == 0.0F);
+    CHECK(right[1] > 0.5F);
+    CHECK(right[0] == 0.0F);
+    CHECK(cornerLeft[0] > cornerLeft[2]);
+    CHECK(cornerRight[2] > cornerRight[0]);
+    CHECK(std::abs(cornerMiddle[0] - cornerMiddle[2]) < 0.1F);
+    CHECK(cornerMiddle[1] == 0.0F);
+}
+
 TEST_CASE("a PointInstancer draws as its instances authored one by one", "[usd][gpu][mesh][instancing]") {
     LRT_REQUIRE_GPU(gpu);
     if (!gpu->device->caps().rasterization) {

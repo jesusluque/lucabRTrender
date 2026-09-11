@@ -13,7 +13,8 @@ public struct MeshRecord {
     public uint triangles;
     public uint hasNormals;      // 0: shade with the geometric normal
     public uint nodeBase;        // compute BVH: the mesh's first internal node
-    public uint pad1; public uint pad2;
+    public uint slotBase;        // primvars: the mesh's row in the slot table
+    public uint pad2;
     public float4 boundsLo;      // object space
     public float4 boundsHi;
 };

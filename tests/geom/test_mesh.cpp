@@ -68,7 +68,8 @@ Checked check(test::Gpu& gpu, const Authored& a, const geom::GpuMesh& mesh, cons
         cursor["triangles"].setBinding(mesh.indices.rhi());
         cursor["triangleCorners"].setBinding(mesh.triangleCorners.rhi());
         cursor["triangleFaces"].setBinding(mesh.triangleFaces.rhi());
-        cursor["normals"].setBinding(mesh.normals.valid() ? mesh.normals.rhi() : mesh.positions.rhi());
+        const geom::GpuPrimvar* normals = mesh.primvar("normals");
+        cursor["normals"].setBinding(normals != nullptr ? normals->values.rhi() : mesh.positions.rhi());
         cursor["result"].setBinding(result->rhi());
         cursor["counts"].setBinding(countsOut.rhi());
         cursor["params"]["faces"].setData(mesh.faces);
@@ -182,7 +183,7 @@ TEST_CASE("smooth normals match every touching triangle's area-weighted normal",
     }
     auto mesh = builder->build(inputOf(a));
     if (!mesh) FAIL(mesh.error().toString());
-    REQUIRE(mesh->normals.valid());
+    REQUIRE(mesh->primvar("normals") != nullptr);
     const Checked c = check(*gpu, a, *mesh, "bruteNormals");
     std::printf("  height field: %u triangles, worst normal %.2e rad from the brute-force sum\n", mesh->triangles,
                 static_cast<double>(c.worstAngle));
