@@ -17,7 +17,10 @@ ConstantBuffer<CameraParams> camera;
 
 [shader("compute")]
 [numthreads(16, 16, 1)]
-void shadeMaterials(uint3 tid: SV_DispatchThreadID) {
+void shadeMaterials(uint3 group: SV_GroupID, uint index: SV_GroupIndex) {
+    // In quad order, so the nodes that want screen derivatives (bump) find
+    // their neighbours in the thread's quad.
+    const uint2 tid = lrtQuadPixel(group.xy, index);
     if (tid.x >= camera.width || tid.y >= camera.height) {
         return;
     }

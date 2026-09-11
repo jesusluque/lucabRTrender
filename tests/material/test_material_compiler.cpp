@@ -10,6 +10,9 @@
 #include <cstdlib>
 #include <string>
 
+#include "lrt/gpu/Buffer.h"
+#include "lrt/gpu/CommandBatch.h"
+#include "lrt/gpu/ComputeKernel.h"
 #include "lrt/material/MaterialCompiler.h"
 #include "lrt/material/TextureStore.h"
 
@@ -37,6 +40,34 @@ std::string surface(const std::string& node, const std::string& inputs) {
 }
 
 }   // namespace
+
+TEST_CASE("a compute kernel's screen derivatives come from its 2x2 quad", "[material][derivatives]") {
+    LRT_REQUIRE_GPU(gpu);
+    // heighttonormal, and so bump, differences the height across the quad the
+    // thread sits in: that costs nothing where the quad's lanes are a 2x2
+    // block of pixels, which is what this measures on the device at hand.
+    auto kernel = gpu::ComputeKernel::create(*gpu->library, "lrt/test/quad_derivatives", "quadDerivatives");
+    if (!kernel) FAIL(kernel.error().toString());
+    gpu::Buffer counts = test::uintBuffer(*gpu->device, 1, "counts");
+    const uint32_t w = 161;   // partial quads at both edges
+    const uint32_t h = 99;
+    {
+        gpu::CommandBatch batch(*gpu->device);
+        kernel->dispatch(batch, {w, h, 1}, [&](rhi::ShaderCursor cursor) {
+            cursor["counts"].setBinding(counts.rhi());
+            cursor["field"]["ax"].setData(2.0F);
+            cursor["field"]["ay"].setData(-3.0F);
+            cursor["field"]["width"].setData(w);
+            cursor["field"]["height"].setData(h);
+        });
+        REQUIRE(batch.submit(true));
+    }
+    uint32_t differ = 0;
+    REQUIRE(counts.read(*gpu->device, 0, sizeof(differ), &differ));
+    std::printf("  quad derivatives: %u of %u threads differ from the gradient the field was made with\n", differ,
+                w * h);
+    CHECK(differ == 0);
+}
 
 TEST_CASE("MaterialX surface shaders compile to Slang modules the device loads", "[material][materialx]") {
     LRT_REQUIRE_GPU(gpu);

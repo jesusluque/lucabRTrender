@@ -117,6 +117,42 @@ public int2 textureSize(SamplerTexture2D tex, int mipLevel) {
     return int2(max(int(r.width) >> mipLevel, 1), max(int(r.height) >> mipLevel, 1));
 }
 
+// ---- screen derivatives -------------------------------------------------------
+//
+// A material is evaluated in a compute kernel, where there is no dFdx: the
+// nodes that need one (heighttonormal, and so bump) take it from the quad the
+// thread sits in. A quad is four threads whose lane indices differ in the two
+// low bits, and those lanes are handed out along the group's rows -- measured
+// on the device, not assumed -- so a kernel that wants derivatives has to
+// walk its pixels in quad order itself (lrtQuadPixel): then bit 0 of the lane
+// is x and bit 1 is y, and the difference is turned round on the far lane to
+// give the forward derivative a coarse dFdx gives. Every thread of the quad
+// must reach the call: where one of the four shades something else -- a
+// silhouette -- or leaves early, the derivative is that of whatever it did
+// evaluate.
+
+/// The pixel a thread of a [numthreads(16, 16, 1)] group shades, in quad
+/// order: each quad of four lanes covers a 2 x 2 block of pixels.
+public uint2 lrtQuadPixel(uint2 group, uint index) {
+    const uint quad = index >> 2;
+    const uint lane = index & 3u;
+    return uint2(group.x * 16u + (quad & 7u) * 2u + (lane & 1u),
+                 group.y * 16u + (quad >> 3u) * 2u + (lane >> 1u));
+}
+
+public float lrtDdx(float v) {
+    const float other = QuadReadAcrossX(v);
+    return (WaveGetLaneIndex() & 1u) != 0u ? v - other : other - v;
+}
+
+public float lrtDdy(float v) {
+    const float other = QuadReadAcrossY(v);
+    return (WaveGetLaneIndex() & 2u) != 0u ? v - other : other - v;
+}
+
+public float2 lrtDdx(float2 v) { return float2(lrtDdx(v.x), lrtDdx(v.y)); }
+public float2 lrtDdy(float2 v) { return float2(lrtDdy(v.x), lrtDdy(v.y)); }
+
 public void lrtBeginInputs(MaterialInputs inputs, uint blob) {
     gLrtInputs = inputs;
     gLrtBlob = blob;

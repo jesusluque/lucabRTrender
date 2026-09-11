@@ -1,7 +1,8 @@
 <?xml version="1.0"?>
 <!-- Copyright (c) 2026 lucabRTrender contributors.
-     The engine's image nodes for the genslang target: the texture table, and the
-     node's default where a file or its tile is missing. -->
+     The engine's image and screen-space nodes for the genslang target: the
+     texture table, the node's default where a file or its tile is missing, and
+     the derivatives a compute kernel takes from its 2x2 quad. -->
 <materialx version="1.39">
   <implementation name="IM_image_float_genslang" nodedef="ND_image_float" file="lrt/material/mx/lrt_image_float.slang" function="lrt_image_float" target="genslang" />
   <implementation name="IM_image_color3_genslang" nodedef="ND_image_color3" file="lrt/material/mx/lrt_image_color3.slang" function="lrt_image_color3" target="genslang" />
@@ -9,4 +10,5 @@
   <implementation name="IM_image_vector2_genslang" nodedef="ND_image_vector2" file="lrt/material/mx/lrt_image_vector2.slang" function="lrt_image_vector2" target="genslang" />
   <implementation name="IM_image_vector3_genslang" nodedef="ND_image_vector3" file="lrt/material/mx/lrt_image_vector3.slang" function="lrt_image_vector3" target="genslang" />
   <implementation name="IM_image_vector4_genslang" nodedef="ND_image_vector4" file="lrt/material/mx/lrt_image_vector4.slang" function="lrt_image_vector4" target="genslang" />
+  <implementation name="IM_heighttonormal_vector3_genslang" nodedef="ND_heighttonormal_vector3" file="lrt/material/mx/lrt_heighttonormal_vector3.slang" function="lrt_heighttonormal_vector3" target="genslang" />
 </materialx>

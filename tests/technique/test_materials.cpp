@@ -25,11 +25,21 @@ std::shared_ptr<const geom::GpuMesh> square(geom::MeshBuilder& builder, float ha
     points = {-half, -half, 0, half, -half, 0, half, half, 0, -half, half, 0};
     static const std::vector<int32_t> counts{4};
     static const std::vector<int32_t> indices{0, 1, 2, 3};
+    static const std::vector<float> st{0.0F, 0.0F, 1.0F, 0.0F, 1.0F, 1.0F, 0.0F, 1.0F};
+    static std::vector<geom::PrimvarInput> primvars;
+    primvars.clear();
+    geom::PrimvarInput uv;
+    uv.name = "st";
+    uv.interpolation = geom::Interpolation::Vertex;
+    uv.components = 2;
+    uv.values = {std::as_bytes(std::span<const float>(st)), false};
+    primvars.push_back(std::move(uv));
     geom::MeshInput in;
     in.source = "square";
     in.points = {std::as_bytes(std::span<const float>(points)), false};
     in.faceVertexCounts = counts;
     in.faceVertexIndices = indices;
+    in.primvars = primvars;
     in.smoothNormals = false;
     auto mesh = builder.build(in);
     if (!mesh) FAIL(mesh.error().toString());
@@ -146,4 +156,130 @@ TEST_CASE("a square shaded by a MaterialX diffuse material, and by the displayCo
         CHECK(c[1] == 0);
         CHECK(depthError < 1e-4F);
     }
+}
+
+TEST_CASE("bump turns a height into a normal, from the derivatives a kernel takes across its quad",
+          "[technique][materials][bump]") {
+    LRT_REQUIRE_GPU(gpu);
+    if (!gpu->device->caps().rasterization) {
+        SKIP("no rasterisation on this device");
+    }
+    std::vector<std::filesystem::path> shaderPaths;
+    for (const std::string& path : gpu->device->shaderSearchPaths()) {
+        shaderPaths.emplace_back(path);
+    }
+    auto compiler = material::MaterialCompiler::create({LRT_MATERIALX_ROOT}, shaderPaths);
+    auto textures = material::TextureStore::create(*gpu->library);
+    auto builder = geom::MeshBuilder::create(*gpu->library);
+    auto scene = world::GpuScene::create(*gpu->library);
+    auto raster = technique::VisibilityRaster::create(*gpu->library);
+    auto programs = technique::MaterialPrograms::create(*gpu->library);
+    auto shading = technique::MaterialShading::create(*gpu->library);
+    if (!compiler) FAIL(compiler.error().toString());
+    if (!textures) FAIL(textures.error().toString());
+    if (!builder) FAIL(builder.error().toString());
+    if (!scene) FAIL(scene.error().toString());
+    if (!raster) FAIL(raster.error().toString());
+    if (!programs) FAIL(programs.error().toString());
+    if (!shading) FAIL(shading.error().toString());
+    // A height of 8 * st.x over the square, turned into a normal and emitted:
+    // linear in u, so MaterialX's formula gives one normal everywhere,
+    // (-k * scale / 16, 0, 1) normalised, whatever the pixel's footprint.
+    const float k = 8.0F;
+    const float scale = 1.0F;
+    auto bump = (*compiler)->compileXml(
+        "<?xml version=\"1.0\"?>\n<materialx version=\"1.39\">\n"
+        "  <geompropvalue name=\"uv\" type=\"vector2\">\n"
+        "    <input name=\"geomprop\" type=\"string\" value=\"st\" />\n"
+        "  </geompropvalue>\n"
+        "  <extract name=\"u\" type=\"float\">\n"
+        "    <input name=\"in\" type=\"vector2\" nodename=\"uv\" />\n"
+        "    <input name=\"index\" type=\"integer\" value=\"0\" />\n"
+        "  </extract>\n"
+        "  <multiply name=\"height\" type=\"float\">\n"
+        "    <input name=\"in1\" type=\"float\" nodename=\"u\" />\n"
+        "    <input name=\"in2\" type=\"float\" value=\"8\" />\n"
+        "  </multiply>\n"
+        "  <heighttonormal name=\"n\" type=\"vector3\">\n"
+        "    <input name=\"in\" type=\"float\" nodename=\"height\" />\n"
+        "    <input name=\"scale\" type=\"float\" value=\"1\" />\n"
+        "  </heighttonormal>\n"
+        "  <convert name=\"encoded\" type=\"color3\">\n"
+        "    <input name=\"in\" type=\"vector3\" nodename=\"n\" />\n"
+        "  </convert>\n"
+        "  <uniform_edf name=\"edf\" type=\"EDF\">\n"
+        "    <input name=\"color\" type=\"color3\" nodename=\"encoded\" />\n"
+        "  </uniform_edf>\n"
+        "  <surface name=\"shader\" type=\"surfaceshader\">\n"
+        "    <input name=\"edf\" type=\"EDF\" nodename=\"edf\" />\n"
+        "  </surface>\n"
+        "  <surfacematerial name=\"material\" type=\"material\">\n"
+        "    <input name=\"surfaceshader\" type=\"surfaceshader\" nodename=\"shader\" />\n"
+        "  </surfacematerial>\n</materialx>\n");
+    if (!bump) FAIL(bump.error().toString());
+    REQUIRE(programs->setModules(std::span<const material::CompiledMaterial>(&*bump, 1)));
+    REQUIRE(shading->setPrograms(*programs));
+
+    const uint32_t w = 161;
+    const uint32_t h = 121;
+    render::Camera camera = render::Camera::lookingAt({0.0, 0.0, 0.0}, {0.0, 0.0, -1.0});
+    camera.lens.focal = 35.0;
+    const render::Projection projection = render::projectionFor(camera, w, h);
+    world::MeshInstance instance;
+    instance.mesh = square(*builder, 1.0F);
+    instance.objectToWorld = aofx::xform::translation({0.0, 0.0, -5.0});
+    instance.material = 1;
+    REQUIRE(scene->update(std::span<const world::MeshInstance>(&instance, 1), projection));
+    const std::vector<float> blob = material::MaterialCompiler::parameters(
+        *bump, **textures, [&](const std::string& name) { return (*scene).slotOf(name); });
+    REQUIRE((*textures)->commit());
+    const std::vector<technique::MaterialRecord> rows{{0, 0, 0, 0}, {1, 0, 0, 0}};
+    auto records = gpu::Buffer::fromSpan<technique::MaterialRecord>(*gpu->device, rows, "materials.records");
+    auto blobBuffer = gpu::Buffer::fromSpan<float>(*gpu->device, blob, "materials.blob");
+    REQUIRE(records);
+    REQUIRE(blobBuffer);
+    technique::VisibilityTargets visibility;
+    render::RenderTargets out;
+    {
+        gpu::CommandBatch batch(*gpu->device);
+        REQUIRE(raster->render(batch, *scene, projection, w, h, visibility));
+        technique::MaterialFrame frame;
+        frame.programs = &*programs;
+        frame.scene = &*scene;
+        frame.records = &*records;
+        frame.blob = &*blobBuffer;
+        frame.textures = &**textures;
+        REQUIRE(shading->shade(batch, visibility, projection, frame, out));
+        REQUIRE(batch.submit(true));
+    }
+    auto check = gpu::ComputeKernel::create(*gpu->library, "lrt/test/constant_colour", "constantColour");
+    if (!check) FAIL(check.error().toString());
+    const float slope = k * scale / 16.0F;
+    const float length = std::sqrt(1.0F + slope * slope);
+    const std::array<float, 3> expected{0.5F - 0.5F * slope / length, 0.5F, 0.5F + 0.5F / length};
+    gpu::Buffer counts = test::uintBuffer(*gpu->device, 4, "counts");
+    {
+        gpu::CommandBatch batch(*gpu->device);
+        check->dispatch(batch, {1, 1, 1}, [&](rhi::ShaderCursor cursor) {
+            cursor["colour"].setBinding(out.colour.rhi());
+            cursor["depth"].setBinding(out.depth.rhi());
+            cursor["counts"].setBinding(counts.rhi());
+            cursor["constant"]["r"].setData(expected[0]);
+            cursor["constant"]["g"].setData(expected[1]);
+            cursor["constant"]["b"].setData(expected[2]);
+            cursor["constant"]["tolerance"].setData(1.0e-3F);
+            cursor["constant"]["width"].setData(w);
+            cursor["constant"]["height"].setData(h);
+        });
+        REQUIRE(batch.submit(true));
+    }
+    uint32_t c[4] = {0, 0, 0, 0};
+    REQUIRE(counts.read(*gpu->device, 0, sizeof(c), c));
+    std::printf("  bump: %u drawn, %u interior, %u interior and %u edge pixels away from (%.4f, %.4f, %.4f)\n", c[0],
+                c[1], c[2], c[3], double(expected[0]), double(expected[1]), double(expected[2]));
+    // The square covers about 8300 pixels; the interior leaves out the ring
+    // whose quads straddle its silhouette, where a derivative has nothing to
+    // difference against (1 pixel of it was off, of 360).
+    CHECK(c[1] > 7000);
+    CHECK(c[2] == 0);
 }
