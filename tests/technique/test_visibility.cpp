@@ -11,6 +11,10 @@
 #include "lrt/render/ReferenceRenderer.h"
 #include "lrt/technique/Visibility.h"
 #include "lrt/world/GpuScene.h"
+#include "lrt/world/Instancing.h"
+
+#include <bit>
+#include <cmath>
 
 using namespace lrt;
 
@@ -55,14 +59,32 @@ std::shared_ptr<const geom::GpuMesh> square(Renderer& r, float half) {
 }
 
 render::RenderTargets draw(test::Gpu& gpu, Renderer& r, std::span<const world::MeshInstance> instances,
-                           const render::Projection& projection, uint32_t w, uint32_t h) {
-    REQUIRE(r.scene.update(instances, projection));
+                           const render::Projection& projection, uint32_t w, uint32_t h,
+                           std::span<const world::InstanceSet> sets = {}) {
+    REQUIRE(r.scene.update(instances, projection, sets));
     render::RenderTargets out;
     gpu::CommandBatch batch(*gpu.device);
     REQUIRE(r.raster.render(batch, r.scene, projection, w, h, r.visibility));
     REQUIRE(r.shading.shade(batch, r.scene, r.visibility, projection, out));
     REQUIRE(batch.submit(true));
     return out;
+}
+
+/// IEEE half bits of a float in the half's range: how a USD half array
+/// stores its values (authoring input, as a file would).
+uint16_t halfBits(float value) {
+    const uint32_t f = std::bit_cast<uint32_t>(value);
+    const uint32_t sign = (f >> 16) & 0x8000u;
+    const int exponent = static_cast<int>((f >> 23) & 0xFF) - 127 + 15;
+    uint32_t mantissa = f & 0x7FFFFFu;
+    if (exponent <= 0) {
+        return static_cast<uint16_t>(sign);
+    }
+    mantissa = (mantissa + 0x1000u) >> 13;   // 23 bits to 10, rounded
+    if (mantissa == 0x400u) {
+        return static_cast<uint16_t>(sign | static_cast<uint32_t>(exponent + 1) << 10);
+    }
+    return static_cast<uint16_t>(sign | static_cast<uint32_t>(exponent) << 10 | mantissa);
 }
 
 }   // namespace
@@ -153,4 +175,115 @@ TEST_CASE("instances of one mesh draw as the same meshes built apart", "[techniq
                 colour->maxRelative, static_cast<unsigned long long>(*depth));
     CHECK(colour->maxRelative == 0.0);
     CHECK(*depth == 0);
+}
+
+TEST_CASE("instancer levels composed on the device draw as the instances authored one by one",
+          "[technique][visibility][instancing]") {
+    LRT_REQUIRE_GPU(gpu);
+    if (!gpu->device->caps().rasterization) {
+        SKIP("no rasterisation on this device");
+    }
+    auto r = renderer(*gpu);
+    auto instancing = world::Instancing::create(*gpu->library);
+    if (!instancing) FAIL(instancing.error().toString());
+    const uint32_t w = 240;
+    const uint32_t h = 180;
+    const render::Projection projection =
+        render::projectionFor(render::Camera::lookingAt({2.0, 6.0, 14.0}, {0.0, 0.0, 0.0}), w, h);
+    const auto mesh = square(*r, 0.6F);
+
+    // The inner instancer's primvars, as USD would hold them: translations
+    // float, rotations half (GfQuath: ix iy iz real), scales float, transforms
+    // double row-major -- four elements, of which the prototype takes 3, 0, 2.
+    const std::vector<float> translations{-2, 0, 0, 0, 1, 0, 2, 0, 0, 0, -1, 1};
+    const auto quat = [](double degrees, int axis) {
+        const double half = degrees * 3.14159265358979 / 360.0;
+        std::array<double, 4> q{0, 0, 0, std::cos(half)};
+        q[static_cast<size_t>(axis)] = std::sin(half);
+        return q;
+    };
+    const std::array<std::array<double, 4>, 4> quats{quat(90, 1), quat(45, 0), quat(-30, 2), quat(180, 1)};
+    std::vector<uint16_t> rotations;
+    for (const auto& q : quats) {
+        for (const double v : q) {
+            rotations.push_back(halfBits(static_cast<float>(v)));
+        }
+    }
+    const std::vector<float> scales{1, 1, 1, 2, 1, 1, 1, 0.5F, 1, 1, 1, 1.5F};
+    std::vector<double> transforms;
+    for (int e = 0; e < 4; ++e) {
+        // Identity with a translation in the last row (row-major, as GfMatrix4d).
+        std::array<double, 16> m{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0.25 * e, -0.5, 0.1 * e, 1};
+        transforms.insert(transforms.end(), m.begin(), m.end());
+    }
+    const std::vector<int32_t> innerIndices{3, 0, 2};
+    world::InstancerLevel inner;
+    inner.indices = innerIndices;
+    inner.translations = {std::as_bytes(std::span<const float>(translations)), false};
+    inner.rotations = {std::as_bytes(std::span<const uint16_t>(rotations)), true};
+    inner.scales = {std::as_bytes(std::span<const float>(scales)), false};
+    inner.transforms = {std::as_bytes(std::span<const double>(transforms)), false, true};
+    inner.instancerTransform = aofx::xform::translation({0.0, 0.5, 0.0});
+    // The outer instancer places the inner one twice.
+    const std::vector<float> outerTranslations{-3, 0, -2, 3, 1, 1};
+    const std::vector<int32_t> outerIndices{1, 0};
+    world::InstancerLevel outer;
+    outer.indices = outerIndices;
+    outer.translations = {std::as_bytes(std::span<const float>(outerTranslations)), false};
+    outer.instancerTransform = aofx::xform::rotationY(15.0);
+
+    const std::array<world::InstancerLevel, 2> levels{inner, outer};
+    auto chain = instancing->compose(levels);
+    if (!chain) FAIL(chain.error().toString());
+    CHECK(chain->count == 6);
+    world::InstanceSet set;
+    set.mesh = mesh;
+    set.chainRows = chain->rows;
+    set.count = chain->count;
+    set.prototype = aofx::xform::rotationX(-20.0);
+    set.displayColor = {0.7F, 0.6F, 0.3F};
+
+    // The same six, authored one by one: outer * inner * prototype.
+    std::vector<world::MeshInstance> authored;
+    for (const int32_t o : outerIndices) {
+        const render::Mat4 outerM = outer.instancerTransform *
+                                    aofx::xform::translation({outerTranslations[size_t(o) * 3],
+                                                              outerTranslations[size_t(o) * 3 + 1],
+                                                              outerTranslations[size_t(o) * 3 + 2]});
+        for (const int32_t e : innerIndices) {
+            const auto& q = quats[size_t(e)];
+            render::Mat4 rotation = render::Mat4::identity();
+            const double x = q[0], y = q[1], z = q[2], wq = q[3];
+            const double rm[3][3] = {{1 - 2 * (y * y + z * z), 2 * (x * y - z * wq), 2 * (x * z + y * wq)},
+                                     {2 * (x * y + z * wq), 1 - 2 * (x * x + z * z), 2 * (y * z - x * wq)},
+                                     {2 * (x * z - y * wq), 2 * (y * z + x * wq), 1 - 2 * (x * x + y * y)}};
+            for (int a = 0; a < 3; ++a) {
+                for (int b = 0; b < 3; ++b) {
+                    rotation.at(a, b) = rm[a][b];
+                }
+            }
+            const render::Mat4 innerM =
+                inner.instancerTransform *
+                aofx::xform::translation({translations[size_t(e) * 3], translations[size_t(e) * 3 + 1],
+                                          translations[size_t(e) * 3 + 2]}) *
+                rotation *
+                aofx::xform::scaling({scales[size_t(e) * 3], scales[size_t(e) * 3 + 1], scales[size_t(e) * 3 + 2]}) *
+                aofx::xform::translation({0.25 * e, -0.5, 0.1 * e});
+            world::MeshInstance i;
+            i.mesh = mesh;
+            i.objectToWorld = outerM * innerM * set.prototype;
+            i.displayColor = set.displayColor;
+            authored.push_back(i);
+        }
+    }
+    const render::RenderTargets a = draw(*gpu, *r, authored, projection, w, h);
+    const render::RenderTargets b = draw(*gpu, *r, {}, projection, w, h, std::span<const world::InstanceSet>(&set, 1));
+    auto diff = render::compareHdr(*gpu->library, a.colour, b.colour, w, h);
+    REQUIRE(diff);
+    std::printf("  six nested instances against six authored: relMSE %.2e, p99 relative %.2e\n", diff->relMse,
+                diff->p99Relative);
+    // Half-precision rotations and float composition against double: the
+    // same squares to the last few edge pixels (measured relMSE 1.2e-9).
+    CHECK(diff->p99Relative <= 1e-3);
+    CHECK(diff->relMse < 1e-6);
 }

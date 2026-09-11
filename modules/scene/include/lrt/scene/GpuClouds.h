@@ -68,9 +68,12 @@ struct GpuPoints {
 struct FloatStream {
     std::span<const std::byte> bytes;
     bool                       half = false;
+    bool                       isDouble = false;   ///< float64 (matrix4d, point3d); `half` then false
 
     [[nodiscard]] bool   empty() const noexcept { return bytes.empty(); }
-    [[nodiscard]] size_t values() const noexcept { return bytes.size() / (half ? 2 : 4); }
+    [[nodiscard]] size_t values() const noexcept { return bytes.size() / (isDouble ? 8 : half ? 2 : 4); }
+    /// The kind kernels read: 0 none, 1 float, 2 half, 3 double.
+    [[nodiscard]] uint32_t kind() const noexcept { return empty() ? 0 : isDouble ? 3 : half ? 2 : 1; }
 };
 
 /// A splat cloud as separate arrays, the way USD's ParticleField stores one.

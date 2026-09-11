@@ -44,6 +44,9 @@ void rows(const render::Mat4& m, float* into) {
 Result<GpuScene> GpuScene::create(gpu::ShaderLibrary& library) {
     GpuScene scene;
     scene.device_ = &library.device();
+    auto records = gpu::ComputeKernel::create(library, "lrt/world/instancing", "instanceRecords");
+    if (!records) return std::move(records).error();
+    scene.records_ = std::move(*records);
     return scene;
 }
 
@@ -100,7 +103,8 @@ Result<void> GpuScene::repack() {
     return ok();
 }
 
-Result<void> GpuScene::update(std::span<const MeshInstance> instances, const render::Projection& projection) {
+Result<void> GpuScene::update(std::span<const MeshInstance> instances, const render::Projection& projection,
+                              std::span<const InstanceSet> sets) {
     // The meshes, in first-appearance order; instances grouped by mesh.
     std::vector<std::shared_ptr<const geom::GpuMesh>> meshes;
     std::map<const geom::GpuMesh*, uint32_t> indexOf;
@@ -116,6 +120,15 @@ Result<void> GpuScene::update(std::span<const MeshInstance> instances, const ren
             byMesh.emplace_back();
         }
         byMesh[it->second].push_back(i);
+    }
+    for (const InstanceSet& set : sets) {
+        if (set.mesh == nullptr || set.mesh->triangles == 0 || set.count == 0) {
+            continue;
+        }
+        if (indexOf.try_emplace(set.mesh.get(), static_cast<uint32_t>(meshes.size())).second) {
+            meshes.push_back(set.mesh);
+            byMesh.emplace_back();
+        }
     }
     if (meshes != meshes_) {
         meshes_ = std::move(meshes);
@@ -156,9 +169,19 @@ Result<void> GpuScene::update(std::span<const MeshInstance> instances, const ren
         }
         draws_.push_back(draw);
     }
-    instanceCount_ = static_cast<uint32_t>(records.size());
-    if (instanceRecords_.count() < std::max<size_t>(records.size(), 1)) {
-        auto made = deviceBuffer(*device_, std::max<size_t>(records.size(), 1) * 3 / 2 + 1, sizeof(InstanceRecord),
+    // Sets after the single instances, their records written on the device.
+    uint64_t total = records.size();
+    for (const InstanceSet& set : sets) {
+        if (set.mesh != nullptr && set.mesh->triangles > 0) {
+            total += set.count;
+        }
+    }
+    if (total > UINT32_MAX) {
+        return Error(ErrorCode::OutOfMemory, "more than 2^32 instances");
+    }
+    instanceCount_ = static_cast<uint32_t>(total);
+    if (instanceRecords_.count() < std::max<uint64_t>(total, 1)) {
+        auto made = deviceBuffer(*device_, std::max<uint64_t>(total, 1) * 3 / 2 + 1, sizeof(InstanceRecord),
                                  "scene.instances");
         if (!made) return std::move(made).error();
         instanceRecords_ = std::move(*made);
@@ -166,6 +189,39 @@ Result<void> GpuScene::update(std::span<const MeshInstance> instances, const ren
     if (!records.empty()) {
         LRT_TRY(instanceRecords_.write(*device_, 0, records.size() * sizeof(InstanceRecord), records.data()));
     }
+    uint32_t first = static_cast<uint32_t>(records.size());
+    gpu::CommandBatch batch(*device_);
+    for (const InstanceSet& set : sets) {
+        if (set.mesh == nullptr || set.mesh->triangles == 0 || set.count == 0) {
+            continue;
+        }
+        const uint32_t mesh = indexOf.at(set.mesh.get());
+        const std::array<float, 12> prototype = set.prototype.rows3x4();
+        const std::array<float, 12> view = projection.worldToView.rows3x4();
+        records_.dispatch(batch, {set.count, 1, 1}, [&](rhi::ShaderCursor cursor) {
+            cursor["levelRows"].setBinding(set.chainRows.rhi());
+            cursor["records"].setBinding(instanceRecords_.rhi());
+            rhi::ShaderCursor p = cursor["params"];
+            p["count"].setData(set.count);
+            p["mesh"].setData(mesh);
+            p["primId"].setData(set.primId);
+            p["first"].setData(first);
+            p["flags"].setData(uint32_t{set.doubleSided ? 1u : 0u});
+            p["c0r"].setData(set.displayColor[0]);
+            p["c0g"].setData(set.displayColor[1]);
+            p["c0b"].setData(set.displayColor[2]);
+            p["c0a"].setData(set.displayOpacity);
+            static constexpr const char* kSuffix[12] = {"00", "01", "02", "03", "10", "11",
+                                                       "12", "13", "20", "21", "22", "23"};
+            for (size_t k = 0; k < 12; ++k) {
+                p[(std::string("m") + kSuffix[k]).c_str()].setData(prototype[k]);
+                p[(std::string("v") + kSuffix[k]).c_str()].setData(view[k]);
+            }
+        });
+        draws_.push_back({mesh, first, set.count});
+        first += set.count;
+    }
+    LRT_TRY(batch.submit(true));
     return ok();
 }
 

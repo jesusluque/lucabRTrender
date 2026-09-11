@@ -16,6 +16,7 @@
 #include "lrt/core/Result.h"
 #include "lrt/geom/Mesh.h"
 #include "lrt/gpu/Buffer.h"
+#include "lrt/gpu/ComputeKernel.h"
 #include "lrt/render/Camera.h"
 
 namespace lrt::gpu {
@@ -34,6 +35,19 @@ struct MeshInstance {
     bool                                 doubleSided = true;
 };
 
+/// Many instances of one mesh whose transforms are already on the device
+/// (world::Instancing): records are written there too.
+struct InstanceSet {
+    std::shared_ptr<const geom::GpuMesh> mesh;
+    gpu::Buffer                          chainRows;   ///< 3 float4 per instance, before `prototype`
+    uint32_t                             count = 0;
+    render::Mat4                         prototype = render::Mat4::identity();
+    uint32_t                             primId = 0;
+    std::array<float, 3>                 displayColor{0.18F, 0.18F, 0.18F};
+    float                                displayOpacity = 1.0F;
+    bool                                 doubleSided = true;
+};
+
 /// Consecutive instances of one mesh: one draw.
 struct DrawRange {
     uint32_t mesh = 0;
@@ -47,7 +61,8 @@ public:
 
     /// This frame's instances, seen from `projection`. Instances of the same
     /// mesh become consecutive records (one draw each run).
-    [[nodiscard]] Result<void> update(std::span<const MeshInstance> instances, const render::Projection& projection);
+    [[nodiscard]] Result<void> update(std::span<const MeshInstance> instances, const render::Projection& projection,
+                                      std::span<const InstanceSet> sets = {});
 
     [[nodiscard]] uint32_t instanceCount() const noexcept { return instanceCount_; }
     [[nodiscard]] uint32_t meshCount() const noexcept { return static_cast<uint32_t>(meshes_.size()); }
@@ -73,6 +88,7 @@ private:
     [[nodiscard]] Result<void> repack();
 
     gpu::Device*                                       device_ = nullptr;
+    gpu::ComputeKernel                                 records_;
     std::vector<std::shared_ptr<const geom::GpuMesh>>  meshes_;
     std::vector<Range>                                 ranges_;
     std::vector<DrawRange>                             draws_;
