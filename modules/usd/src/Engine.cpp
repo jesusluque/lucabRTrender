@@ -131,6 +131,7 @@ void Engine::setMaterial(const pxr::SdfPath& id, std::shared_ptr<void> mtlxDocum
     const std::lock_guard<std::mutex> held(guard_);
     MaterialEntry& entry = materials_[id];
     entry.document = std::move(mtlxDocument);
+    entry.cutout = material::MaterialCompiler::cutsOut(entry.document);
     entry.pending = true;
 }
 
@@ -375,6 +376,11 @@ Result<void> Engine::prepareMaterials(const std::vector<std::string>& aovPrimvar
         if (!made) return std::move(made).error();
         textures_ = std::move(*made);
     }
+    if (!materialPrograms_.has_value()) {
+        auto made = technique::MaterialPrograms::create(*library_);
+        if (!made) return std::move(made).error();
+        materialPrograms_.emplace(std::move(*made));
+    }
     if (!materialShading_.has_value()) {
         auto made = technique::MaterialShading::create(*library_);
         if (!made) return std::move(made).error();
@@ -405,6 +411,7 @@ Result<void> Engine::prepareMaterials(const std::vector<std::string>& aovPrimvar
     std::vector<technique::MaterialRecord> rows{{0, 0, 0, 0}};
     std::vector<float> blob;
     materialRows_.clear();
+    materialCutouts_ = false;
     for (const auto& [id, entry] : materials_) {
         if (!entry.compiled) {
             continue;
@@ -422,7 +429,9 @@ Result<void> Engine::prepareMaterials(const std::vector<std::string>& aovPrimvar
         const std::vector<float> words = material::MaterialCompiler::parameters(
             *entry.compiled, *textures_, [&](const std::string& name) { return scene_->slotOf(name); });
         materialRows_[id] = static_cast<uint32_t>(rows.size());
-        rows.push_back({function, static_cast<uint32_t>(blob.size()), 0, 0});
+        const uint32_t flags = entry.cutout ? technique::kMaterialCutout : 0u;
+        materialCutouts_ = materialCutouts_ || entry.cutout;
+        rows.push_back({function, static_cast<uint32_t>(blob.size()), flags, 0});
         blob.insert(blob.end(), words.begin(), words.end());
     }
     if (blob.empty()) {
@@ -437,7 +446,8 @@ Result<void> Engine::prepareMaterials(const std::vector<std::string>& aovPrimvar
     if (!words) return std::move(words).error();
     materialRecords_ = std::move(*records);
     materialBlob_ = std::move(*words);
-    LRT_TRY(materialShading_->setModules(modules));
+    LRT_TRY(materialPrograms_->setModules(modules));
+    LRT_TRY(materialShading_->setPrograms(*materialPrograms_));
     materialsChanged_ = false;
     materialSlotNames_ = std::move(names);
     return ok();
@@ -741,6 +751,15 @@ Result<void> Engine::render(const render::Projection& projection, const render::
     if (meshLayer) {
         LRT_TRY(scene_->update(meshInstances, projection, meshSets));
         gpu::CommandBatch batch(*device_);
+        // What a material needs wherever it is evaluated: shading always,
+        // visibility only where a material cuts its samples away.
+        technique::MaterialFrame frame;
+        frame.programs = &*materialPrograms_;
+        frame.scene = &*scene_;
+        frame.records = &materialRecords_;
+        frame.blob = &materialBlob_;
+        frame.textures = textures_.get();
+        const technique::MaterialFrame* cutouts = materialCutouts_ ? &frame : nullptr;
         switch (visibility) {
             case MeshVisibility::Automatic:
             case MeshVisibility::Raster:
@@ -750,7 +769,7 @@ Result<void> Engine::render(const render::Projection& projection, const render::
                     visibilityRaster_.emplace(std::move(*made));
                 }
                 LRT_TRY(visibilityRaster_->render(batch, *scene_, projection, settings.width, settings.height,
-                                                  visibility_));
+                                                  visibility_, cutouts));
                 break;
             case MeshVisibility::Rays:
                 if (!visibilityTrace_.has_value()) {
@@ -763,7 +782,7 @@ Result<void> Engine::render(const render::Projection& projection, const render::
                 }
                 LRT_TRY(rayTracingScene_->build(*scene_));
                 LRT_TRY(visibilityTrace_->render(batch, *rayTracingScene_, projection, settings.width,
-                                                 settings.height, visibility_));
+                                                 settings.height, visibility_, cutouts));
                 break;
             case MeshVisibility::Bvh:
                 if (!visibilityBvh_.has_value()) {
@@ -776,11 +795,10 @@ Result<void> Engine::render(const render::Projection& projection, const render::
                 }
                 LRT_TRY(bvhScene_->build(*scene_));
                 LRT_TRY(visibilityBvh_->render(batch, *scene_, *bvhScene_, projection, settings.width,
-                                               settings.height, visibility_));
+                                               settings.height, visibility_, cutouts));
                 break;
         }
-        LRT_TRY(materialShading_->shade(batch, *scene_, visibility_, projection, materialRecords_, materialBlob_,
-                                        *textures_, 0.0F, meshLayer_));
+        LRT_TRY(materialShading_->shade(batch, visibility_, projection, frame, meshLayer_));
         if (aovRequest.ids || aovRequest.normals || !aovRequest.primvars.empty()) {
             if (!aovShading_.has_value()) {
                 auto made = technique::AovShading::create(*library_);

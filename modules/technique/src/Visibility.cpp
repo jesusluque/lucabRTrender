@@ -9,6 +9,97 @@
 
 namespace lrt::technique {
 
+namespace {
+
+/// The pipeline the visibility raster draws with, whichever fragment shader
+/// it ends in: one RGBA32Uint target of (instance + 1, triangle), reversed
+/// depth, and no culling of its own (the fragment applies Hydra's rule).
+gpu::RasterDesc visibilityDesc(const std::string& module, const char* vertexEntry, const char* fragmentEntry) {
+    gpu::RasterDesc desc;
+    desc.module = module;
+    desc.vertexEntry = vertexEntry;
+    desc.fragmentEntry = fragmentEntry;
+    rhi::ColorTargetDesc ids;
+    ids.format = rhi::Format::RGBA32Uint;
+    desc.targets = {ids};
+    desc.depthFormat = rhi::Format::D32Float;
+    desc.depthFunc = rhi::ComparisonFunc::Greater;   // reversed: nearer is larger
+    return desc;
+}
+
+/// How many samples one pixel's ray may have removed from it before it gives
+/// up and shows what it last found: enough for the layers of leaves a cutout
+/// texture is usually drawn for.
+const char* kCutoutSteps = "static const uint kCutoutSteps = 16;\n";
+
+/// Past the sample a cutout removed, in the ray's own units.
+const char* kCutoutAdvance = "max(1.0e-4, t * 1.0e-5)";
+
+std::string cutoutRasterSource(const std::string& materials) {
+    return "import lrt.technique.visibility_geometry;\n"
+           "import " + materials + ";\n"
+           "\nConstantBuffer<CameraParams> camera;\n"
+           "\n[shader(\"vertex\")]\n"
+           "VertexOut cutoutVertex(uint vertex : SV_VertexID, uint instanceIndex : SV_InstanceID,\n"
+           "                       uint startVertex : SV_StartVertexLocation,\n"
+           "                       uint startInstance : SV_StartInstanceLocation) {\n"
+           "    return visibilityVertexOf(camera, vertex, instanceIndex, startVertex, startInstance);\n"
+           "}\n"
+           "\n[shader(\"fragment\")]\n"
+           "uint4 cutoutFragment(VertexOut input, bool front : SV_IsFrontFace) : SV_Target0 {\n"
+           "    if (visibilityCulled(input, front)) {\n        discard;\n    }\n"
+           "    const uint4 seen = uint4(input.instance + 1, input.triangle, 0, 0);\n"
+           "    if (materialCuts(camera, visibilityPixel(camera, input.position), seen)) {\n        discard;\n    }\n"
+           "    return seen;\n"
+           "}\n";
+}
+
+std::string cutoutTraceSource(const std::string& materials) {
+    return "import lrt.technique.visibility_trace;\n"
+           "import " + materials + ";\n\n" + kCutoutSteps +
+           "\n[shader(\"compute\")]\n[numthreads(16, 16, 1)]\n"
+           "void traceCutout(uint3 tid: SV_DispatchThreadID) {\n"
+           "    if (tid.x >= camera.width || tid.y >= camera.height) {\n        return;\n    }\n"
+           "    float3 origin;\n    float3 direction;\n"
+           "    traceRay(tid.xy, origin, direction);\n"
+           "    float tMin = traceTMin();\n"
+           "    uint4 seen = uint4(0);\n"
+           "    for (uint step = 0; step < kCutoutSteps; ++step) {\n"
+           "        const TraceHit hit = traceNearest(origin, direction, tMin);\n"
+           "        seen = hit.seen;\n"
+           "        if (seen.x == 0 || !materialCuts(camera, tid.xy, seen)) {\n            break;\n        }\n"
+           "        seen = uint4(0);\n"
+           "        const float t = hit.t;\n"
+           "        tMin = t + " + kCutoutAdvance + ";\n"
+           "    }\n"
+           "    ids[int2(int(tid.x), int(camera.height - 1 - tid.y))] = seen;\n"
+           "}\n";
+}
+
+std::string cutoutBvhSource(const std::string& materials) {
+    return "import lrt.technique.visibility_bvh;\n"
+           "import " + materials + ";\n\n" + kCutoutSteps +
+           "\n[shader(\"compute\")]\n[numthreads(16, 16, 1)]\n"
+           "void bvhCutout(uint3 tid: SV_DispatchThreadID) {\n"
+           "    if (tid.x >= camera.width || tid.y >= camera.height) {\n        return;\n    }\n"
+           "    float3 origin;\n    float3 direction;\n"
+           "    viewRay(camera, float2(tid.xy) + 0.5, origin, direction);\n"
+           "    float tMin = bvhTMin();\n"
+           "    uint4 seen = uint4(0);\n"
+           "    for (uint step = 0; step < kCutoutSteps; ++step) {\n"
+           "        const Best best = traverseNearest(origin, direction, tMin);\n"
+           "        seen = best.seen();\n"
+           "        if (seen.x == 0 || !materialCuts(camera, tid.xy, seen)) {\n            break;\n        }\n"
+           "        seen = uint4(0);\n"
+           "        const float t = best.t;\n"
+           "        tMin = t + " + kCutoutAdvance + ";\n"
+           "    }\n"
+           "    ids[int2(int(tid.x), int(camera.height - 1 - tid.y))] = seen;\n"
+           "}\n";
+}
+
+}   // namespace
+
 void setCamera(rhi::ShaderCursor p, const render::Projection& projection, uint32_t width, uint32_t height) {
     p["width"].setData(width);
     p["height"].setData(height);
@@ -22,26 +113,40 @@ void setCamera(rhi::ShaderCursor p, const render::Projection& projection, uint32
 }
 
 Result<VisibilityRaster> VisibilityRaster::create(gpu::ShaderLibrary& library) {
-    gpu::RasterDesc desc;
-    desc.module = "lrt/technique/visibility_raster";
-    desc.vertexEntry = "visibilityVertex";
-    desc.fragmentEntry = "visibilityFragment";
-    rhi::ColorTargetDesc ids;
-    ids.format = rhi::Format::RGBA32Uint;
-    desc.targets = {ids};
-    desc.depthFormat = rhi::Format::D32Float;
-    desc.depthFunc = rhi::ComparisonFunc::Greater;   // reversed: nearer is larger
-    auto pass = gpu::RasterKernel::create(library, desc);
+    auto pass = gpu::RasterKernel::create(
+        library, visibilityDesc("lrt/technique/visibility_raster", "visibilityVertex", "visibilityFragment"));
     if (!pass) return std::move(pass).error();
     VisibilityRaster raster;
+    raster.library_ = &library;
     raster.device_ = &library.device();
     raster.pass_ = std::move(*pass);
     return raster;
 }
 
+Result<void> VisibilityRaster::ensureCutout(const MaterialPrograms& programs) {
+    if (cutoutModule_ == programs.module()) {
+        return ok();
+    }
+    const std::string name = programs.module() + "_raster";
+    auto loaded = library_->loadSource(name, cutoutRasterSource(programs.module()),
+                                       {"cutoutVertex", "cutoutFragment"});
+    if (!loaded) return std::move(loaded).error();
+    auto pass = gpu::RasterKernel::create(*library_, visibilityDesc(name, "cutoutVertex", "cutoutFragment"));
+    if (!pass) return std::move(pass).error();
+    cutout_ = std::move(*pass);
+    cutoutModule_ = programs.module();
+    return ok();
+}
+
 Result<void> VisibilityRaster::render(gpu::CommandBatch& batch, const world::GpuScene& scene,
                                       const render::Projection& projection, uint32_t width, uint32_t height,
-                                      VisibilityTargets& targets) {
+                                      VisibilityTargets& targets, const MaterialFrame* cutouts) {
+    if (cutouts != nullptr && !cutouts->valid()) {
+        return Error(ErrorCode::InvalidArgument, "visibility raster: incomplete cutout materials");
+    }
+    if (cutouts != nullptr) {
+        LRT_TRY(ensureCutout(*cutouts->programs));
+    }
     // Rays leave no depth texture: the rasteriser remakes both.
     if (targets.width != width || targets.height != height || !targets.ids.valid() || !targets.depth.valid()) {
         gpu::TextureDesc ids;
@@ -75,10 +180,10 @@ Result<void> VisibilityRaster::render(gpu::CommandBatch& batch, const world::Gpu
     pass.depth = (*depthView).get();
     pass.depthClear = 0.0F;
     pass.bind = [&](rhi::ShaderCursor cursor) {
-        cursor["positions"].setBinding(scene.positions().rhi());
-        cursor["indices"].setBinding(scene.indices().rhi());
-        cursor["meshes"].setBinding(scene.meshRecords().rhi());
-        cursor["instances"].setBinding(scene.instanceRecords().rhi());
+        bindScene(cursor, scene);
+        if (cutouts != nullptr) {
+            bindMaterialFrame(cursor, *cutouts, projection);
+        }
         setCamera(cursor["camera"], projection, width, height);
         cursor["pass"]["idsIncludeStart"].setData(uint32_t{device_->caps().drawIdsIncludeStart ? 1u : 0u});
     };
@@ -92,7 +197,7 @@ Result<void> VisibilityRaster::render(gpu::CommandBatch& batch, const world::Gpu
         draw.firstInstance = range.firstInstance;
         draws.push_back(draw);
     }
-    pass_.run(batch, pass, draws);
+    (cutouts != nullptr ? cutout_ : pass_).run(batch, pass, draws);
     return ok();
 }
 
@@ -103,14 +208,35 @@ Result<VisibilityTrace> VisibilityTrace::create(gpu::ShaderLibrary& library) {
     auto kernel = gpu::ComputeKernel::create(library, "lrt/technique/visibility_trace", "visibilityTrace");
     if (!kernel) return std::move(kernel).error();
     VisibilityTrace trace;
+    trace.library_ = &library;
     trace.device_ = &library.device();
     trace.trace_ = std::move(*kernel);
     return trace;
 }
 
+Result<void> VisibilityTrace::ensureCutout(const MaterialPrograms& programs) {
+    if (cutoutModule_ == programs.module() && cutout_.has_value()) {
+        return ok();
+    }
+    const std::string name = programs.module() + "_trace";
+    auto loaded = library_->loadSource(name, cutoutTraceSource(programs.module()), {"traceCutout"});
+    if (!loaded) return std::move(loaded).error();
+    auto kernel = gpu::ComputeKernel::create(*library_, name, "traceCutout");
+    if (!kernel) return std::move(kernel).error();
+    cutout_.emplace(std::move(*kernel));
+    cutoutModule_ = programs.module();
+    return ok();
+}
+
 Result<void> VisibilityTrace::render(gpu::CommandBatch& batch, const world::RayTracingScene& scene,
                                      const render::Projection& projection, uint32_t width, uint32_t height,
-                                     VisibilityTargets& targets) {
+                                     VisibilityTargets& targets, const MaterialFrame* cutouts) {
+    if (cutouts != nullptr && !cutouts->valid()) {
+        return Error(ErrorCode::InvalidArgument, "visibility rays: incomplete cutout materials");
+    }
+    if (cutouts != nullptr) {
+        LRT_TRY(ensureCutout(*cutouts->programs));
+    }
     if (targets.width != width || targets.height != height || !targets.ids.valid() ||
         (targets.ids.desc().usage & rhi::TextureUsage::UnorderedAccess) == rhi::TextureUsage::None) {
         gpu::TextureDesc ids;
@@ -130,7 +256,11 @@ Result<void> VisibilityTrace::render(gpu::CommandBatch& batch, const world::RayT
     auto view = targets.ids.view(0);
     if (!view) return std::move(view).error();
     const std::array<float, 12> toWorld = aofx::xform::inverseAffine(projection.worldToView).rows3x4();
-    trace_.dispatch(batch, {width, height, 1}, [&](rhi::ShaderCursor cursor) {
+    const gpu::ComputeKernel& kernel = cutouts != nullptr ? *cutout_ : trace_;
+    kernel.dispatch(batch, {width, height, 1}, [&](rhi::ShaderCursor cursor) {
+        if (cutouts != nullptr) {
+            bindMaterialFrame(cursor, *cutouts, projection);
+        }
         cursor["scene"].setBinding(scene.topLevel());
         cursor["ids"].setBinding((*view).get());
         setCamera(cursor["camera"], projection, width, height);
@@ -173,22 +303,44 @@ Result<VisibilityBvh> VisibilityBvh::create(gpu::ShaderLibrary& library) {
     auto kernel = gpu::ComputeKernel::create(library, "lrt/technique/visibility_bvh", "visibilityBvh");
     if (!kernel) return std::move(kernel).error();
     VisibilityBvh v;
+    v.library_ = &library;
     v.device_ = &library.device();
     v.traverse_ = std::move(*kernel);
     return v;
 }
 
+Result<void> VisibilityBvh::ensureCutout(const MaterialPrograms& programs) {
+    if (cutoutModule_ == programs.module() && cutout_.has_value()) {
+        return ok();
+    }
+    const std::string name = programs.module() + "_bvh";
+    auto loaded = library_->loadSource(name, cutoutBvhSource(programs.module()), {"bvhCutout"});
+    if (!loaded) return std::move(loaded).error();
+    auto kernel = gpu::ComputeKernel::create(*library_, name, "bvhCutout");
+    if (!kernel) return std::move(kernel).error();
+    cutout_.emplace(std::move(*kernel));
+    cutoutModule_ = programs.module();
+    return ok();
+}
+
 Result<void> VisibilityBvh::render(gpu::CommandBatch& batch, const world::GpuScene& scene,
                                    const world::BvhScene& bvh, const render::Projection& projection, uint32_t width,
-                                   uint32_t height, VisibilityTargets& targets) {
+                                   uint32_t height, VisibilityTargets& targets, const MaterialFrame* cutouts) {
+    if (cutouts != nullptr && !cutouts->valid()) {
+        return Error(ErrorCode::InvalidArgument, "visibility bvh: incomplete cutout materials");
+    }
+    if (cutouts != nullptr) {
+        LRT_TRY(ensureCutout(*cutouts->programs));
+    }
     LRT_TRY(writableIds(*device_, width, height, targets));
     auto view = targets.ids.view(0);
     if (!view) return std::move(view).error();
-    traverse_.dispatch(batch, {width, height, 1}, [&](rhi::ShaderCursor cursor) {
-        cursor["positions"].setBinding(scene.positions().rhi());
-        cursor["indices"].setBinding(scene.indices().rhi());
-        cursor["meshes"].setBinding(scene.meshRecords().rhi());
-        cursor["instanceRecords"].setBinding(scene.instanceRecords().rhi());
+    const gpu::ComputeKernel& kernel = cutouts != nullptr ? *cutout_ : traverse_;
+    kernel.dispatch(batch, {width, height, 1}, [&](rhi::ShaderCursor cursor) {
+        bindScene(cursor, scene);
+        if (cutouts != nullptr) {
+            bindMaterialFrame(cursor, *cutouts, projection);
+        }
         cursor["topBoxes"].setBinding(bvh.topBoxes().rhi());
         cursor["topChildren"].setBinding(bvh.topChildren().rhi());
         cursor["topLeaves"].setBinding(bvh.topLeaves().rhi());

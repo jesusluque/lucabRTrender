@@ -53,12 +53,14 @@ TEST_CASE("a square shaded by a MaterialX diffuse material, and by the displayCo
     auto builder = geom::MeshBuilder::create(*gpu->library);
     auto scene = world::GpuScene::create(*gpu->library);
     auto raster = technique::VisibilityRaster::create(*gpu->library);
+    auto programs = technique::MaterialPrograms::create(*gpu->library);
     auto shading = technique::MaterialShading::create(*gpu->library);
     if (!compiler) FAIL(compiler.error().toString());
     if (!textures) FAIL(textures.error().toString());
     if (!builder) FAIL(builder.error().toString());
     if (!scene) FAIL(scene.error().toString());
     if (!raster) FAIL(raster.error().toString());
+    if (!programs) FAIL(programs.error().toString());
     if (!shading) FAIL(shading.error().toString());
     auto diffuse = (*compiler)->compileXml(
         "<?xml version=\"1.0\"?>\n<materialx version=\"1.39\">\n"
@@ -70,7 +72,8 @@ TEST_CASE("a square shaded by a MaterialX diffuse material, and by the displayCo
         "    <input name=\"surfaceshader\" type=\"surfaceshader\" nodename=\"shader\" />\n"
         "  </surfacematerial>\n</materialx>\n");
     if (!diffuse) FAIL(diffuse.error().toString());
-    REQUIRE(shading->setModules(std::span<const material::CompiledMaterial>(&*diffuse, 1)));
+    REQUIRE(programs->setModules(std::span<const material::CompiledMaterial>(&*diffuse, 1)));
+    REQUIRE(shading->setPrograms(*programs));
     // Rows: 0 the fallback, 1 the diffuse material (function 1, blob from 0).
     const std::vector<float> blob =
         material::MaterialCompiler::parameters(*diffuse, **textures, [](const std::string&) { return 0xFFFFFFFFu; });
@@ -100,7 +103,13 @@ TEST_CASE("a square shaded by a MaterialX diffuse material, and by the displayCo
         {
             gpu::CommandBatch batch(*gpu->device);
             REQUIRE(raster->render(batch, *scene, projection, w, h, visibility));
-            REQUIRE(shading->shade(batch, *scene, visibility, projection, *records, *blobBuffer, **textures, 0.0F, out));
+            technique::MaterialFrame frame;
+            frame.programs = &*programs;
+            frame.scene = &*scene;
+            frame.records = &*records;
+            frame.blob = &*blobBuffer;
+            frame.textures = &**textures;
+            REQUIRE(shading->shade(batch, visibility, projection, frame, out));
             REQUIRE(batch.submit(true));
         }
         gpu::Buffer counts = test::uintBuffer(*gpu->device, 3, "counts");

@@ -91,6 +91,7 @@ struct MeshEntry {
 struct MaterialEntry {
     std::shared_ptr<void>                   document;   ///< MaterialX::DocumentPtr; null: nothing MaterialX reads
     bool                                    pending = true;
+    bool                                    cutout = false;   ///< its opacity cuts samples away: visibility evaluates it
     std::optional<material::CompiledMaterial> compiled;
 };
 
@@ -236,9 +237,11 @@ private:
     std::optional<technique::VisibilityTrace>  visibilityTrace_;
     std::optional<world::BvhScene>             bvhScene_;
     std::optional<technique::VisibilityBvh>    visibilityBvh_;
+    std::optional<technique::MaterialPrograms> materialPrograms_;
     std::optional<technique::MaterialShading> materialShading_;
     std::map<pxr::SdfPath, MaterialEntry>     materials_;
     bool                                      materialsChanged_ = true;
+    bool                                      materialCutouts_ = false;   ///< a material in the frame cuts samples away
     std::unique_ptr<material::MaterialCompiler> compiler_;
     bool                                      compilerFailed_ = false;
     std::unique_ptr<material::TextureStore>   textures_;

@@ -539,6 +539,32 @@ Result<std::unique_ptr<MaterialCompiler>> MaterialCompiler::create(
     return compiler;
 }
 
+bool MaterialCompiler::cutsOut(const std::shared_ptr<void>& document) {
+    const auto doc = std::static_pointer_cast<mx::Document>(document);
+    if (!doc) {
+        return false;
+    }
+    for (const mx::ElementPtr& element : doc->traverseTree()) {
+        const mx::NodePtr node = element->asA<mx::Node>();
+        if (!node) {
+            continue;
+        }
+        const mx::InputPtr input = node->getInput("opacityThreshold");
+        if (!input) {
+            continue;
+        }
+        if (!input->getNodeName().empty() || !input->getNodeGraphString().empty() ||
+            !input->getInterfaceName().empty()) {
+            return true;   // driven by a graph: assume it cuts
+        }
+        const mx::ValuePtr value = input->getValue();
+        if (value && value->isA<float>() && value->asA<float>() > 0.0F) {
+            return true;
+        }
+    }
+    return false;
+}
+
 std::shared_ptr<void> MaterialCompiler::libraries() const {
     return impl_->libraries;
 }

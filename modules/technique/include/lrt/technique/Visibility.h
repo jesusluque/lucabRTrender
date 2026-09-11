@@ -8,12 +8,15 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 #include <span>
+#include <string>
 
 #include "lrt/core/Result.h"
 #include "lrt/gpu/ComputeKernel.h"
 #include "lrt/gpu/RasterKernel.h"
 #include "lrt/gpu/Texture.h"
+#include "lrt/technique/MaterialPrograms.h"
 #include "lrt/render/Camera.h"
 #include "lrt/render/TileRasterizer.h"
 #include "lrt/world/GpuScene.h"
@@ -42,13 +45,21 @@ public:
     [[nodiscard]] static Result<VisibilityRaster> create(gpu::ShaderLibrary& library);
 
     /// Every instance of `scene` into `targets` (sized to width x height).
+    /// With `cutouts`, a generated pass draws instead: every fragment asks its
+    /// material whether it is there, and the one behind a hole is drawn as
+    /// the depth test always drew it.
     [[nodiscard]] Result<void> render(gpu::CommandBatch& batch, const world::GpuScene& scene,
                                       const render::Projection& projection, uint32_t width, uint32_t height,
-                                      VisibilityTargets& targets);
+                                      VisibilityTargets& targets, const MaterialFrame* cutouts = nullptr);
 
 private:
+    [[nodiscard]] Result<void> ensureCutout(const MaterialPrograms& programs);
+
+    gpu::ShaderLibrary* library_ = nullptr;
     gpu::Device*      device_ = nullptr;
     gpu::RasterKernel pass_;
+    gpu::RasterKernel cutout_;
+    std::string       cutoutModule_;
 };
 
 /// Visibility by rays against a scene's hardware acceleration structures:
@@ -58,13 +69,20 @@ class VisibilityTrace {
 public:
     [[nodiscard]] static Result<VisibilityTrace> create(gpu::ShaderLibrary& library);
 
+    /// With `cutouts`, the ray carries on past every sample its material
+    /// removes, so what shows through a hole is what the rasteriser shows.
     [[nodiscard]] Result<void> render(gpu::CommandBatch& batch, const world::RayTracingScene& scene,
                                       const render::Projection& projection, uint32_t width, uint32_t height,
-                                      VisibilityTargets& targets);
+                                      VisibilityTargets& targets, const MaterialFrame* cutouts = nullptr);
 
 private:
+    [[nodiscard]] Result<void> ensureCutout(const MaterialPrograms& programs);
+
+    gpu::ShaderLibrary* library_ = nullptr;
     gpu::Device*       device_ = nullptr;
     gpu::ComputeKernel trace_;
+    std::optional<gpu::ComputeKernel> cutout_;
+    std::string        cutoutModule_;
 };
 
 /// Visibility by rays through a scene's compute BVHs: for a device with no ray
@@ -75,11 +93,17 @@ public:
 
     [[nodiscard]] Result<void> render(gpu::CommandBatch& batch, const world::GpuScene& scene,
                                       const world::BvhScene& bvh, const render::Projection& projection,
-                                      uint32_t width, uint32_t height, VisibilityTargets& targets);
+                                      uint32_t width, uint32_t height, VisibilityTargets& targets,
+                                      const MaterialFrame* cutouts = nullptr);
 
 private:
+    [[nodiscard]] Result<void> ensureCutout(const MaterialPrograms& programs);
+
+    gpu::ShaderLibrary* library_ = nullptr;
     gpu::Device*       device_ = nullptr;
     gpu::ComputeKernel traverse_;
+    std::optional<gpu::ComputeKernel> cutout_;
+    std::string        cutoutModule_;
 };
 
 /// Lit from the eye: displayColor times the cosine to the eye, the smooth

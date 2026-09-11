@@ -86,6 +86,13 @@ public:
     /// The standard libraries' document (MaterialX::DocumentPtr), for building documents against.
     [[nodiscard]] std::shared_ptr<void> libraries() const;
 
+    /// Whether a document's surface cuts samples away rather than blending
+    /// them: a node with a non-zero `opacityThreshold`, or one a graph drives.
+    /// MaterialX resolves the threshold itself -- such a surface's opacity is
+    /// 0 or 1 -- so what this decides is who has to evaluate it: with a
+    /// cutout, visibility does.
+    [[nodiscard]] static bool cutsOut(const std::shared_ptr<void>& document);
+
 private:
     MaterialCompiler() = default;
     struct Impl;

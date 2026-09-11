@@ -4,6 +4,7 @@ lrt_add_module(technique
     SOURCES
         src/Denoiser.cpp
         src/DisplayTransform.cpp
+        src/MaterialPrograms.cpp
         src/MaterialShading.cpp
         src/Visibility.cpp
     PUBLIC_LIBS
