@@ -2,6 +2,7 @@
 #include "lrt/world/RayTracingScene.h"
 
 #include <algorithm>
+#include <cstring>   // slang-rhi's acceleration-structure-utils.h calls memcpy without it
 
 #include <slang-rhi/acceleration-structure-utils.h>
 
