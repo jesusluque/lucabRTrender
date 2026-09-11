@@ -124,6 +124,11 @@ endif()
 # --- the engine -----------------------------------------------------------------
 
 add_subdirectory(third_party/spz)
+# zlib: the SOG bundle reads through it, and the tests write their fixtures
+# with it. Found here, since an imported target belongs to the directory that
+# found it and both modules/ and tests/ name it.
+find_package(ZLIB REQUIRED)
+
 # OpenUSD and MaterialX, seen by the modules that read them, the apps and tests.
 include(Usd)
 add_subdirectory(modules)
