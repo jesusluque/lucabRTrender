@@ -1111,7 +1111,7 @@ working inside slang-rhi and collide with nothing outside it. After it,
 exits 0 and reports `denoiser OIDN 2.5.1 on CUDA` and `tbb libraries 1`, the
 aofx tests are green and `single_tbb` passes.
 
-### The radix sort is wrong on CUDA, and what it is not
+### The radix sort on CUDA: a cursor re-read after it was advanced
 
 For as little as two pairs, one chunk and one pass: the generator writes
 `(1766601275, v0) (3252568193, v1)` and the sort leaves
@@ -1135,7 +1135,10 @@ What that rules out, each measured rather than argued:
   own marker on CUDA as on Metal.
 - **A scatter-shaped kernel reads what it was given.** The same seven
   bindings, one invocation, two elements, no sorting arithmetic: both elements
-  read their own key and value on CUDA as on Metal.
+  read their own key and value on CUDA as on Metal. Its writes were another
+  matter, and they are what gave the answer away: with the cursors zeroed, the
+  probe reported taking slots 1 and 2 where Metal took 0 and 1, and the key of
+  a pair landed one slot past the value written beside it from the same local.
 - **Two wrong turns, recorded so they are not taken again.** Changing which
   buffer the scatter's unused high-word names point at appeared to change a
   low word the sort placed, and the slots the probe reported appeared to be
@@ -1146,11 +1149,50 @@ What that rules out, each measured rather than argued:
   stand-ins made CUDA worse (four of the sort's cases passing fell to one), so
   it binds dummy_ and the histogram as it always did.
 
-What is left is the scatter kernel itself on this backend: its counts are
-right, its totals are right, its cursors are right, its bindings land where
-they are named, and the words it places are not. This one bug cascades -- the
-tile rasteriser, the ray tracer, the LOD, geom's smooth normals and most USD
-tests sort, and all of them fail here.
+What was left was the generated code, and reading it ended the hunt. Slang's
+CUDA emitter does not materialise `const uint at = chunkStarts[slot]`; it
+keeps the cursor's address and re-reads through it, after the store that
+advanced it:
+
+```cuda
+uint * _S14 = &chunkStarts_0[slot_0];
+*(&chunkStarts_0[slot_0]) = *_S14 + 1U;   // the cursor now holds at + 1
+*(&dstKeysLo_0[*_S14]) = _S9;             // re-read: one slot past
+uint * _S16 = &dstValues_0[at_0];         // materialised: the right slot
+```
+
+One `at` in the source, two indices in the object code -- which is why a key
+landed one slot past the value written beside it, and why every stage feeding
+the scatter measured correct. The Metal emitter materialises the load, so the
+suite here never saw it:
+
+```metal
+*((&kernelContext_0)->dstKeysLo_0+at_0) = lo_1;
+```
+
+Reduced to the smallest thing that shows it, for whoever takes this upstream
+-- a load, a store that advances it, and a second use of the load:
+
+```slang
+RWStructuredBuffer<uint> cursor;   // cursor[0] starts at 0
+RWStructuredBuffer<uint> out;
+
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void repro(uint3 tid: SV_DispatchThreadID) {
+    const uint at = cursor[0];
+    cursor[0] = at + 1;
+    out[at] = 7;   // CUDA writes out[1]; Metal writes out[0]
+}
+```
+
+**The fix is to place the pair and then advance the cursor.** With no store to
+the cursor between its load and the uses, there is nothing for an emitter to
+re-read, and the walk is one invocation's own, so the order costs nothing and
+the sort stays stable. `slangc -target cuda` confirms it on the generated code
+before any device runs it, which is the cheapest way to check this class of
+bug and worth reaching for earlier next time: four stages were measured right
+one at a time when one look at the emitted kernel would have said why.
 
 ### What else the port found
 
@@ -1158,15 +1200,43 @@ tests sort, and all of them fail here.
   target** (Slang `E36107`). The material system answers that in the shader,
   with a `__target_switch` choosing gradients or an explicit level at the
   footprint's wider side, so the kernels build here now. What is left is not a
-  capability error but wrong pixels: a decoded PNG differs from the file in
-  3386 of its 3404 components and every mip mean collapses to zero at 1x1 --
-  the same shape of damage as the sort's, in a kernel that writes a texture.
-- **gpu_host**: a 4 KB buffer fails to allocate (`OutOfMemory`) in the second
-  test, once gpe has adopted the context and allocated in it; plain
-  allocations and the first shared-buffer test are fine.
-- **The free-running clock test** wants each frame waited for within a
-  millisecond and measured 2.18 ms on a box with eight cores and other work on
-  them. It is the machine, not the code.
+  capability error but wrong pixels, and reading the emitted CUDA says why.
+  A decoded 8-bit image is an `RGBA8Unorm` texture written through an
+  `RWTexture2D<float4>`, which on this target becomes
+  `surf2Dwrite<float4>(texel, surf, x * 16, y)`: sixteen raw bytes of float at
+  a sixteen-byte stride, into a surface holding four bytes a texel. CUDA
+  surface writes do not convert formats; Metal's texture write does. So every
+  component is wrong and each row runs four times past its end, which is the
+  3386-of-3404 mismatch and the mip means collapsing to zero. No intrinsic is
+  missing, so no `__target_switch` reaches it -- it is the store itself that
+  means something different on the two targets. The float and half formats go
+  through the same kernel untouched, which is why the gpu texture tests, which
+  build `RGBA32Float`, pass here while the material ones do not.
+- **gpu_host's `OutOfMemory` was never about memory.** A CUDA context is
+  current per *thread*, and `CudaDevice::open` makes it current on the thread
+  that creates the Context -- not on the worker `Context::run` spawns after
+  it. gpe guards its own entry points (`ensureCurrent` before each), so gpe's
+  work was fine; the work queued on the GPU thread reaches the same context
+  through slang-rhi, so a buffer allocated there was the first driver call on
+  a thread holding no context at all. 16 GB free, 4 KB refused, and the
+  identical allocation off the thread succeeding. gpe grew a `bindThread()`
+  for exactly this -- a caller about to reach the shared context another way
+  -- and the GPU thread binds once before it takes work. Metal keeps no such
+  per-thread state and takes the default, which does nothing.
+- **A buffer nobody wrote is not a buffer of zeros, in the engine too.**
+  `meshHoles` marks a hole face with a 1 and leaves every other face alone,
+  and nothing else wrote `holeFlags`, so each face was judged by whatever the
+  device last left there. Metal returned zeros; CUDA did not, and a stale word
+  reads as "this face is a hole", dropping its triangles. The mixed-face mesh
+  triangulated to 4 of its 10 triangles, and to none with the handedness
+  flipped. The flags are cleared on the device before the topology dispatches.
+- **Two failures that look like load, and are not.** The test presets already
+  set `execution: { jobs: 1 }`, so the suite is serial as it stands. Run
+  entirely alone on an idle box, the free-running clock test (#93) still fails
+  in 0.4 seconds, twice running, and the lobe test (#52) still fails in 7.4
+  seconds. Neither is contention and neither should be written off as the
+  machine: #93 is a timing bound this box does not meet and #52 is a Monte
+  Carlo tolerance, and both want measuring on their own terms.
 - **Tests skip rather than fail where CUDA cannot answer**: no rasterisation,
   so the raster visibility, mesh and Storm-oracle tests skip with a reason, as
   does `lrt view` with no display.
@@ -1174,21 +1244,24 @@ tests sort, and all of them fail here.
 ### Measured (NVIDIA L4, Ubuntu 24.04, debug)
 
 `ctest --preset linux-x86_64-debug`, with engine's materials merged in:
-**63 of 97 pass, 34 fail, 24 skip**. Two of those failures are the machine and
-not the port: the free-running clock test and the PTP loopback test both pass
-when run on their own and fail under a suite that keeps eight cores busy.
+**84 of 97 pass, 13 fail, 24 skip** -- from 47 of 83 when the port first ran,
+and from 63 of 97 before the sort was fixed. That reading predates the hole
+flags fix, so #43 is still counted as failing in it.
 Passing outright: the prefix sum, textures, mips, the texture table and its
 sRGB views, the shader cache and link constants, every loader (PLY, .splat,
 SPZ, SOG, points), the lobe library, the display transform, the codeless
 schemas, the hdLrt plugin, timecode and PTP, the aofx host and its SDK
-manifest hash. The 32 failures are the radix cascade, the CUDA `SampleGrad`
-gap, the one gpu_host allocation and the clock's tolerance.
+manifest hash, the whole sort, and gpe sharing the device. What is left is the
+texture surface write (#46, #48, and the ray tracer and USD tests that shade
+through it), the hole flags (#43, fixed after this reading), and the two
+measured above.
 
 ### Not done
 
-- The radix kernel itself, which is where the cascade ends.
-- A release build and any timing: nothing is worth timing until the sort is
-  right.
+- The texture surface write: an 8-bit texture written as float4 needs either a
+  target the backend converts into or a store that converts itself. Until then
+  every test that shades through a decoded 8-bit image is wrong here.
+- A release build and any timing beyond the sort's own.
 - Vulkan: the backend is compiled in and untried, since CUDA is what gpe
   shares.
 - OptiX: absent on this box, so slang-rhi warns and falls back to CUDA
