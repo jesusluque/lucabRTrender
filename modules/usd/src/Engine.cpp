@@ -80,15 +80,67 @@ void Engine::setPoints(const pxr::SdfPath& id, std::optional<PointsArrays> raw,
     }
 }
 
+void Engine::setMesh(const pxr::SdfPath& id, int32_t primId, const pxr::TfToken& renderTag,
+                     std::optional<MeshArrays> arrays, const render::Mat4* transform, std::optional<bool> visible,
+                     std::optional<MeshLook> look) {
+    const std::lock_guard<std::mutex> held(guard_);
+    MeshEntry& entry = meshes_[id];
+    entry.primId = static_cast<uint32_t>(primId);
+    entry.renderTag = renderTag;
+    if (arrays.has_value()) {
+        entry.pending = std::move(arrays);
+    }
+    if (transform != nullptr) {
+        entry.objectToWorld = *transform;
+    }
+    if (visible.has_value()) {
+        entry.visible = *visible;
+    }
+    if (look.has_value()) {
+        entry.look = *look;
+    }
+}
+
 void Engine::remove(const pxr::SdfPath& id) {
     const std::lock_guard<std::mutex> held(guard_);
     splats_.erase(id);
     points_.erase(id);
+    meshes_.erase(id);
 }
 
 Result<size_t> Engine::commit() {
     const std::lock_guard<std::mutex> held(guard_);
     size_t uploaded = 0;
+    for (auto& [id, entry] : meshes_) {
+        if (!entry.pending.has_value()) {
+            continue;
+        }
+        const MeshArrays& a = *entry.pending;
+        geom::MeshInput input;
+        input.source = id.GetString();
+        input.points = streamOf(a.points);
+        input.faceVertexCounts = std::span<const int32_t>(a.faceVertexCounts.cdata(), a.faceVertexCounts.size());
+        input.faceVertexIndices = std::span<const int32_t>(a.faceVertexIndices.cdata(), a.faceVertexIndices.size());
+        input.holeIndices = std::span<const int32_t>(a.holeIndices.cdata(), a.holeIndices.size());
+        input.leftHanded = a.leftHanded;
+        input.smoothNormals = a.smoothNormals;
+        entry.gpu.reset();
+        if (input.points.values() >= 3 && !a.faceVertexCounts.empty()) {
+            if (!meshBuilder_.has_value()) {
+                auto made = geom::MeshBuilder::create(*library_);
+                if (!made) return std::move(made).error();
+                meshBuilder_.emplace(std::move(*made));
+            }
+            auto mesh = meshBuilder_->build(input);
+            if (mesh) {
+                entry.gpu = std::make_shared<const geom::GpuMesh>(std::move(*mesh));
+            } else {
+                log::warn("hdLrt: {}: {}", id.GetString(), mesh.error().toString());
+            }
+        }
+        entry.pending.reset();
+        ++uploaded;
+    }
     for (auto& [id, entry] : splats_) {
         if (entry.assetPending.has_value()) {
             StreamedAsset asset = std::move(*entry.assetPending);
@@ -217,8 +269,10 @@ Result<void> Engine::writeAov(const render::RenderTargets& targets, bool depth, 
 }
 
 Result<void> Engine::render(const render::Projection& projection, const render::RenderSettings& settings,
-                            render::RenderTargets& targets, Technique technique, bool settleStreams) {
+                            render::RenderTargets& targets, Technique technique, bool settleStreams,
+                            const pxr::TfTokenVector* renderTags) {
     lastTargets_ = &targets;
+    std::vector<world::MeshInstance> meshInstances;
     std::vector<render::SplatInstance> splats;
     std::vector<render::PointInstance> points;
     std::vector<lod::LodInstance> cuts;
@@ -248,6 +302,23 @@ Result<void> Engine::render(const render::Projection& projection, const render::
             }
             cuts.push_back({cloud, entry.objectToWorld, entry.edit, entry.asset.threshold});
             poolOf.push_back(entry.pool.get());
+        }
+        for (const auto& [id, entry] : meshes_) {
+            if (!entry.visible || entry.gpu == nullptr) {
+                continue;
+            }
+            if (renderTags != nullptr && !renderTags->empty() &&
+                std::find(renderTags->begin(), renderTags->end(), entry.renderTag) == renderTags->end()) {
+                continue;
+            }
+            world::MeshInstance instance;
+            instance.mesh = entry.gpu;
+            instance.objectToWorld = entry.objectToWorld;
+            instance.primId = entry.primId;
+            instance.displayColor = entry.look.displayColor;
+            instance.displayOpacity = entry.look.displayOpacity;
+            instance.doubleSided = entry.look.doubleSided;
+            meshInstances.push_back(std::move(instance));
         }
         for (const auto& [id, entry] : points_) {
             if (entry.visible && entry.gpu != nullptr) {
@@ -307,9 +378,81 @@ Result<void> Engine::render(const render::Projection& projection, const render::
         LRT_TRY(rayTracer_->render(projection, splats, settings, targets));
         return ok();
     }
-    if (!points.empty() && pointRasterizer_.has_value()) {
+    // Opaque layers first -- meshes, points -- then splats blended over them.
+    const bool drawMeshes = !meshInstances.empty();
+    if (drawMeshes && !device_->caps().rasterization) {
+        static bool warned = false;
+        if (!warned) {
+            warned = true;
+            log::warn("hdLrt: meshes need a rasterising device until ray traced visibility lands");
+        }
+    }
+    const bool meshLayer = drawMeshes && device_->caps().rasterization;
+    if (meshLayer) {
+        if (!scene_.has_value()) {
+            auto scene = world::GpuScene::create(*library_);
+            if (!scene) return std::move(scene).error();
+            scene_.emplace(std::move(*scene));
+            auto raster = technique::VisibilityRaster::create(*library_);
+            if (!raster) return std::move(raster).error();
+            visibilityRaster_.emplace(std::move(*raster));
+            auto shading = technique::HeadlightShading::create(*library_);
+            if (!shading) return std::move(shading).error();
+            headlight_.emplace(std::move(*shading));
+        }
+        LRT_TRY(scene_->update(meshInstances, projection));
+        gpu::CommandBatch batch(*device_);
+        LRT_TRY(visibilityRaster_->render(batch, *scene_, projection, settings.width, settings.height, visibility_));
+        LRT_TRY(headlight_->shade(batch, *scene_, visibility_, projection, meshLayer_));
+        LRT_TRY(batch.submit(true));
+    }
+    const bool pointLayer = !points.empty() && pointRasterizer_.has_value();
+    if (pointLayer) {
         LRT_TRY(pointRasterizer_->render(projection, points, settings, pointLayer_));
-        LRT_TRY(rasterizer_->render(projection, splats, settings, targets, {}, &pointLayer_));
+    }
+    const render::RenderTargets* under = nullptr;
+    if (meshLayer && pointLayer) {
+        const uint64_t pixels = uint64_t{settings.width} * settings.height;
+        if (opaqueLayer_.width != settings.width || opaqueLayer_.height != settings.height ||
+            !opaqueLayer_.colour.valid()) {
+            gpu::BufferDesc colour;
+            colour.bytes = pixels * 16;
+            colour.elementBytes = 16;
+            colour.label = "engine.opaque.colour";
+            auto madeColour = gpu::Buffer::create(*device_, colour);
+            if (!madeColour) return std::move(madeColour).error();
+            gpu::BufferDesc depth;
+            depth.bytes = pixels * 4;
+            depth.elementBytes = 4;
+            depth.label = "engine.opaque.depth";
+            auto madeDepth = gpu::Buffer::create(*device_, depth);
+            if (!madeDepth) return std::move(madeDepth).error();
+            opaqueLayer_ = {settings.width, settings.height, std::move(*madeColour), std::move(*madeDepth)};
+        }
+        if (!nearest_.has_value()) {
+            auto made = gpu::ComputeKernel::create(*library_, "lrt/technique/layers_nearest", "layersNearest");
+            if (!made) return std::move(made).error();
+            nearest_.emplace(std::move(*made));
+        }
+        gpu::CommandBatch batch(*device_);
+        nearest_->dispatch(batch, {static_cast<uint32_t>(pixels), 1, 1}, [&](rhi::ShaderCursor cursor) {
+            cursor["colourA"].setBinding(meshLayer_.colour.rhi());
+            cursor["depthA"].setBinding(meshLayer_.depth.rhi());
+            cursor["colourB"].setBinding(pointLayer_.colour.rhi());
+            cursor["depthB"].setBinding(pointLayer_.depth.rhi());
+            cursor["colour"].setBinding(opaqueLayer_.colour.rhi());
+            cursor["depth"].setBinding(opaqueLayer_.depth.rhi());
+            cursor["params"]["pixels"].setData(static_cast<uint32_t>(pixels));
+        });
+        LRT_TRY(batch.submit(true));
+        under = &opaqueLayer_;
+    } else if (meshLayer) {
+        under = &meshLayer_;
+    } else if (pointLayer) {
+        under = &pointLayer_;
+    }
+    if (under != nullptr) {
+        LRT_TRY(rasterizer_->render(projection, splats, settings, targets, {}, under));
         return ok();
     }
     LRT_TRY(rasterizer_->render(projection, splats, settings, targets, points));

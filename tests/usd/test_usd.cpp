@@ -234,6 +234,99 @@ TEST_CASE("a UsdGeomPoints prim draws through Hydra", "[usd][gpu][points]") {
     CHECK(floatAt(*depth, 2 * 128 + 2) == 1.0F);   // nothing: the far plane
 }
 
+TEST_CASE("a UsdGeomMesh draws through Hydra where, how deep and how lit it analytically is", "[usd][gpu][mesh]") {
+    LRT_REQUIRE_GPU(gpu);
+    if (!gpu->device->caps().rasterization) {
+        SKIP("no rasterisation on this device");
+    }
+    const fs::path path = scratch("mesh.usda");
+    {
+        std::ofstream out(path);
+        out << "#usda 1.0\n(\n    upAxis = \"Y\"\n)\n"
+               "def Mesh \"Square\"\n{\n"
+               "    int[] faceVertexCounts = [4]\n"
+               "    int[] faceVertexIndices = [0, 1, 2, 3]\n"
+               "    point3f[] points = [(-1, -1, -5), (1, -1, -5), (1, 1, -5), (-1, 1, -5)]\n"
+               "    uniform token subdivisionScheme = \"none\"\n"
+               "    color3f[] primvars:displayColor = [(0.8, 0.4, 0.2)] ( interpolation = \"constant\" )\n"
+               "}\n"
+               "def Mesh \"Guide\"\n{\n"
+               "    uniform token purpose = \"guide\"\n"
+               "    int[] faceVertexCounts = [4]\n"
+               "    int[] faceVertexIndices = [0, 1, 2, 3]\n"
+               "    point3f[] points = [(-3, -3, -2), (3, -3, -2), (3, 3, -2), (-3, 3, -2)]\n"
+               "}\n"
+               "def Camera \"Camera\"\n{\n"
+               "    float focalLength = 35\n"
+               "    float horizontalAperture = 24.576\n    float verticalAperture = 18.432\n"
+               "    float2 clippingRange = (0.1, 1000)\n}\n";
+    }
+    auto renderer = usd::StageRenderer::open(path);
+    if (!renderer) FAIL(renderer.error().toString());
+    const uint32_t w = 160;
+    const uint32_t h = 120;
+    auto image = (*renderer)->render("/Camera", 0.0, w, h);
+    if (!image) FAIL(image.error().toString());
+
+    render::Camera camera;
+    camera.lens.focal = 35.0;
+    camera.lens.haperture = 24.576;
+    camera.lens.nearZ = 0.1;
+    camera.lens.farZ = 1000.0;
+    const render::Projection projection = render::projectionFor(camera, w, h);
+    gpu::BufferDesc colourDesc;
+    colourDesc.bytes = image->rgba.size() * sizeof(float);
+    colourDesc.elementBytes = 16;
+    auto colour = gpu::Buffer::create(*gpu->device, colourDesc, image->rgba.data());
+    auto depth = gpu::Buffer::fromSpan<float>(*gpu->device, image->depth, "depth");
+    REQUIRE(colour);
+    REQUIRE(depth);
+    auto check = gpu::ComputeKernel::create(*gpu->library, "lrt/test/visibility_check", "planeCheck");
+    if (!check) FAIL(check.error().toString());
+    gpu::BufferDesc wordsDesc;
+    wordsDesc.bytes = 12;
+    wordsDesc.elementBytes = 4;
+    auto counts = gpu::Buffer::create(*gpu->device, wordsDesc);
+    wordsDesc.bytes = 4;
+    auto worst = gpu::Buffer::create(*gpu->device, wordsDesc);
+    REQUIRE(counts);
+    REQUIRE(worst);
+    gpu::CommandBatch batch(*gpu->device);
+    check->dispatch(batch, {1, 1, 1}, [&](rhi::ShaderCursor cursor) {
+        cursor["colour"].setBinding(colour->rhi());
+        cursor["depth"].setBinding(depth->rhi());
+        cursor["counts"].setBinding(counts->rhi());
+        cursor["worst"].setBinding(worst->rhi());
+        rhi::ShaderCursor c = cursor["camera"];
+        c["width"].setData(w);
+        c["height"].setData(h);
+        c["focalX"].setData(static_cast<float>(projection.focalX));
+        c["focalY"].setData(static_cast<float>(projection.focalY));
+        c["centreX"].setData(static_cast<float>(projection.centreX));
+        c["centreY"].setData(static_cast<float>(projection.centreY));
+        c["nearZ"].setData(0.1F);
+        c["farZ"].setData(1000.0F);
+        c["orthographic"].setData(uint32_t{0});
+        cursor["plane"]["z"].setData(5.0F);
+        cursor["plane"]["half"].setData(1.0F);
+        cursor["plane"]["colourR"].setData(0.8F);
+        cursor["plane"]["colourG"].setData(0.4F);
+        cursor["plane"]["colourB"].setData(0.2F);
+    });
+    REQUIRE(batch.submit(true));
+    uint32_t c[3] = {0, 0, 0};
+    float depthError = 0.0F;
+    REQUIRE(counts->read(*gpu->device, 0, sizeof(c), c));
+    REQUIRE(worst->read(*gpu->device, 0, sizeof(depthError), &depthError));
+    std::printf("  Hydra mesh: %u pixels covered, %u coverage and %u colour mismatches, depth off by %.2e\n", c[2],
+                c[0], c[1], static_cast<double>(depthError));
+    // The guide-purpose mesh in front is not in the geometry collection's render tags.
+    CHECK(c[2] > 800);
+    CHECK(c[0] == 0);
+    CHECK(c[1] == 0);
+    CHECK(depthError < 1e-3F);
+}
+
 TEST_CASE("the hdLrt plugin loads through USD's renderer plugin registry", "[usd][plugin]") {
     const fs::path plugins = LRT_HYDRA_PLUGIN_DIR;
     PlugRegistry::GetInstance().RegisterPlugins(plugins.string());

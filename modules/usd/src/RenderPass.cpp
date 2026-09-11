@@ -11,7 +11,7 @@
 
 PXR_NAMESPACE_OPEN_SCOPE
 
-void HdLrtRenderPass::_Execute(HdRenderPassStateSharedPtr const& state, TfTokenVector const&) {
+void HdLrtRenderPass::_Execute(HdRenderPassStateSharedPtr const& state, TfTokenVector const& renderTags) {
     if (_engine == nullptr) {
         return;
     }
@@ -57,7 +57,7 @@ void HdLrtRenderPass::_Execute(HdRenderPassStateSharedPtr const& state, TfTokenV
 
     const auto technique = _delegate != nullptr ? _delegate->GetTechnique() : lrt::usd::Technique::Raster;
     const bool settle = _delegate != nullptr && _delegate->GetSettleStreams();
-    if (auto drawn = _engine->render(projection, settings, _targets, technique, settle); !drawn) {
+    if (auto drawn = _engine->render(projection, settings, _targets, technique, settle, &renderTags); !drawn) {
         lrt::log::error("hdLrt: {}", drawn.error().toString());
         return;
     }

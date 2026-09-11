@@ -6,7 +6,10 @@
 // GPU like any file's records. Nothing here loops over elements.
 #pragma once
 
+#include <array>
 #include <string>
+
+#include <pxr/base/vt/array.h>
 
 #include <pxr/base/vt/value.h>
 
@@ -26,6 +29,23 @@ struct ParticleFieldArrays {
 struct PointsArrays {
     pxr::VtValue positions;   ///< VtVec3fArray or VtVec3hArray
     pxr::VtValue colours;     ///< displayColor: VtVec3fArray (one or per point) or GfVec3f; linear
+};
+
+/// A mesh's topology and points as Hydra holds them (all reference counted).
+struct MeshArrays {
+    pxr::VtValue           points;              ///< VtVec3fArray or VtVec3hArray
+    pxr::VtArray<int>      faceVertexCounts;
+    pxr::VtArray<int>      faceVertexIndices;
+    pxr::VtArray<int>      holeIndices;
+    bool                   leftHanded = false;
+    bool                   smoothNormals = true;
+};
+
+/// What a mesh looks like before materials: displayColor, displayOpacity.
+struct MeshLook {
+    std::array<float, 3> displayColor{0.18F, 0.18F, 0.18F};
+    float                displayOpacity = 1.0F;
+    bool                 doubleSided = false;
 };
 
 /// The bytes of a float array a VtValue holds (float or half, any tuple

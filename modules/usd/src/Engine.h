@@ -24,12 +24,16 @@
 #include <string>
 #include <vector>
 
+#include <pxr/base/tf/token.h>
 #include <pxr/usd/sdf/path.h>
 
 #include "lrt/gpu/Device.h"
 #include "lrt/gpu/ShaderLibrary.h"
 #include "lrt/usd/PrimData.h"
+#include "lrt/geom/Mesh.h"
 #include "lrt/lod/Lod.h"
+#include "lrt/technique/Visibility.h"
+#include "lrt/world/GpuScene.h"
 #include "lrt/lod/Lrtc.h"
 #include "lrt/render/GaussianRayTracer.h"
 #include "lrt/render/PointRasterizer.h"
@@ -57,6 +61,16 @@ struct SplatEntry {
     StreamedAsset                       asset;
     std::unique_ptr<lod::LodCloud>      lodCloud;   ///< the asset read whole
     std::unique_ptr<lod::StreamingPool> pool;       ///< or streamed
+};
+
+struct MeshEntry {
+    std::optional<MeshArrays>              pending;
+    std::shared_ptr<const geom::GpuMesh>   gpu;
+    render::Mat4                           objectToWorld = render::Mat4::identity();
+    MeshLook                               look;
+    uint32_t                               primId = 0;
+    pxr::TfToken                           renderTag;
+    bool                                   visible = true;
 };
 
 struct PointsEntry {
@@ -93,6 +107,9 @@ public:
     void setPoints(const pxr::SdfPath& id, std::optional<PointsArrays> raw,
                    const render::Mat4* transform, std::optional<bool> visible,
                    std::optional<render::PointStyle> style);
+    void setMesh(const pxr::SdfPath& id, int32_t primId, const pxr::TfToken& renderTag,
+                 std::optional<MeshArrays> arrays, const render::Mat4* transform, std::optional<bool> visible,
+                 std::optional<MeshLook> look);
     void remove(const pxr::SdfPath& id);
 
     // --- from the render pass (one thread) ---
@@ -104,7 +121,7 @@ public:
     /// the frames that follow.
     Result<void> render(const render::Projection& projection, const render::RenderSettings& settings,
                         render::RenderTargets& targets, Technique technique = Technique::Raster,
-                        bool settleStreams = false);
+                        bool settleStreams = false, const pxr::TfTokenVector* renderTags = nullptr);
 
     [[nodiscard]] gpu::Device& device() noexcept { return *device_; }
 
@@ -135,6 +152,15 @@ private:
     std::mutex                                guard_;
     std::map<pxr::SdfPath, SplatEntry>        splats_;
     std::map<pxr::SdfPath, PointsEntry>       points_;
+    std::map<pxr::SdfPath, MeshEntry>         meshes_;
+    std::optional<geom::MeshBuilder>          meshBuilder_;   ///< made on first use
+    std::optional<world::GpuScene>            scene_;
+    std::optional<technique::VisibilityRaster> visibilityRaster_;
+    std::optional<technique::HeadlightShading> headlight_;
+    std::optional<gpu::ComputeKernel>          nearest_;
+    technique::VisibilityTargets              visibility_;
+    render::RenderTargets                     meshLayer_;
+    render::RenderTargets                     opaqueLayer_;
 };
 
 }   // namespace lrt::usd

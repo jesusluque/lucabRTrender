@@ -33,6 +33,7 @@ set(LRT_USD_SOURCES
     src/Engine.cpp
     src/RenderBuffer.cpp
     src/ParticleField.cpp
+    src/Mesh.cpp
     src/Points.cpp
     src/RenderPass.cpp
     src/RenderDelegate.cpp)
@@ -42,7 +43,7 @@ set(LRT_USD_LIBS usd usdGeom usdVol usdShade usdLux usdRender usdSkel usdImaging
 # The engine side of Hydra, linked into the CLI and tests.
 lrt_add_module(usd
     SOURCES ${LRT_USD_SOURCES} src/StageRenderer.cpp src/Export.cpp
-    PUBLIC_LIBS lrt::render lrt::io lrt::scene lrt::lod ${LRT_USD_LIBS})
+    PUBLIC_LIBS lrt::render lrt::io lrt::scene lrt::lod lrt::geom lrt::world lrt::technique ${LRT_USD_LIBS})
 # USD's headers predate the warnings this engine asks for.
 target_compile_options(lrt_usd PRIVATE -Wno-old-style-cast -Wno-shadow -Wno-cast-align
                        -Wno-deprecated-declarations -Wno-double-promotion)
@@ -61,7 +62,8 @@ set(LRT_HYDRA_PLUGIN_DIR "${CMAKE_BINARY_DIR}/plugin/usd" CACHE INTERNAL "Where 
 # both the static library and the loaded plugin must not register it twice.
 add_library(hdLrt MODULE ${LRT_USD_SOURCES} src/RendererPlugin.cpp)
 target_include_directories(hdLrt PRIVATE include src)
-target_link_libraries(hdLrt PRIVATE lrt::render lrt::io lrt::scene lrt::lod ${LRT_USD_LIBS})
+target_link_libraries(hdLrt PRIVATE lrt::render lrt::io lrt::scene lrt::lod lrt::geom lrt::world lrt::technique
+                      ${LRT_USD_LIBS})
 target_compile_options(hdLrt PRIVATE -Wno-deprecated-declarations)
 set_target_properties(hdLrt PROPERTIES
     PREFIX "" OUTPUT_NAME "hdLrt"

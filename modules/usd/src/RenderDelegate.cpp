@@ -6,6 +6,7 @@
 #include <pxr/imaging/hd/resourceRegistry.h>
 #include <pxr/imaging/hd/tokens.h>
 
+#include "Mesh.h"
 #include "ParticleField.h"
 #include "Points.h"
 #include "RenderBuffer.h"
@@ -37,7 +38,8 @@ void HdLrtRenderDelegate::_Setup() {
 }
 
 TfTokenVector const& HdLrtRenderDelegate::GetSupportedRprimTypes() const {
-    static const TfTokenVector types{HdPrimTypeTokens->particleField, HdPrimTypeTokens->points};
+    static const TfTokenVector types{HdPrimTypeTokens->mesh, HdPrimTypeTokens->particleField,
+                                     HdPrimTypeTokens->points};
     return types;
 }
 
@@ -93,6 +95,9 @@ HdRprim* HdLrtRenderDelegate::CreateRprim(TfToken const& typeId, SdfPath const& 
     }
     if (typeId == HdPrimTypeTokens->points) {
         return new HdLrtPoints(id);
+    }
+    if (typeId == HdPrimTypeTokens->mesh) {
+        return new HdLrtMesh(id);
     }
     return nullptr;
 }
