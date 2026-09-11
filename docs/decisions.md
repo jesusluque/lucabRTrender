@@ -1047,6 +1047,33 @@ identifier at all), so the difference comes from the thread's quad.
   square; and the quad derivatives of a field linear in the pixel are its
   gradient for every thread of a 161 x 99 dispatch.
 
+### Measured (M5 Pro, release)
+
+- **Method.** `lrt view --frames 200 --size 1600x900`, draw median, as M3
+  measured its frames: Hydra sync and drawing, no readback.
+
+| Scene | Route | Draw | With the headlight (M3) |
+|---|---|---|---|
+| Kitchen_set | rays | 9.27 ms | 7.08 ms |
+| Kitchen_set_instanced | rays | 9.36 ms | 7.15 ms |
+| Kitchen_set | raster | 21.29 ms | -- |
+
+  Raster's distance from rays is the one M2 measured: recording 1788 draws
+  costs the host about 8 ms, which materials do not change.
+
+- **What a material costs.** One UsdPreviewSurface (metallic 0.2, clearcoat
+  0.5) over a quad filling 1600x900 draws in 29.9 ms. That is the lobe
+  stack, not the textures: four lobes built and evaluated per pixel, in
+  registers sized for sixteen.
+- **What a cutout costs.** The same quad with an `opacityThreshold` that
+  cuts nothing draws in 60.7 ms: the material is evaluated twice, once by
+  visibility to decide the sample is there and once by shading. Nothing is
+  carried between them.
+- **First frame** (`lrt stage`, which compiles when the render thread
+  commits): 0.33 s for that one material, and 1.74 s when a cutout pass has
+  to be generated as well. Compiling is synchronous, and this is what that
+  costs.
+
 ### Not done, not verified
 
 - **Storm as an oracle for materials is not possible on this Mac.** Storm's
@@ -1066,4 +1093,8 @@ identifier at all), so the difference comes from the thread's quad.
 - **Displacement and volume terminals** are read and ignored.
 - **Layering** uses the top's throughput at the view direction; directional
   albedo tables are not computed.
-- **No timings.** Materials have no `lrt bench` numbers yet.
+- **The lobe stack is not optimised.** Every material carries sixteen build
+  lobes through registers whatever it uses, and a cutout evaluates its
+  material a second time rather than keeping what visibility already found.
+  Both are measured above and both are worth revisiting once lights (M5)
+  settle what shading needs to keep.
