@@ -108,6 +108,49 @@ TEST_CASE("the prefix sum of every size is right, checked element by element on 
     }
 }
 
+/// The pairs themselves, before and after, for the smallest sort there is.
+/// When a backend gets the sort wrong, this says which stage wrote what: the
+/// generator's two pairs, then what the sort left in their place.
+TEST_CASE("two pairs sort into one order, and are the pairs that went in", "[gpu][algo][probe]") {
+    LRT_REQUIRE_GPU(gpu);
+    auto sort = gpu::RadixSort::create(*gpu->library);
+    if (!sort) FAIL(sort.error().toString());
+    static gpu::ComputeKernel kDump = test::kernel(*gpu, "lrt/test/sort_dump");
+    constexpr uint32_t kPairs = 2;
+    gpu::SortBuffers buffers = sortBuffers(*gpu->device, kPairs);
+    generate(*gpu, buffers, kPairs, 0, 32);
+    const auto dump = [&](const char* when) {
+        gpu::Buffer out = test::uintBuffer(*gpu->device, kPairs * 3, "sort.dump");
+        gpu::CommandBatch batch(*gpu->device);
+        kDump.dispatch(batch, {kPairs, 1, 1}, [&](rhi::ShaderCursor cursor) {
+            cursor["keysLo"].setBinding(buffers.keysLo.rhi());
+            cursor["keysHi"].setBinding(buffers.keysHi.rhi());
+            cursor["values"].setBinding(buffers.values.rhi());
+            cursor["dump"].setBinding(out.rhi());
+            cursor["params"]["count"].setData(kPairs);
+        });
+        REQUIRE(batch.submit(true));
+        std::array<uint32_t, kPairs * 3> words{};
+        REQUIRE(out.read(*gpu->device, 0, sizeof(words), words.data()));
+        std::printf("  %s: (key %u, value %u) (key %u, value %u)\n", when, words[0], words[2], words[3], words[5]);
+        return words;
+    };
+    const auto before = dump("generated");
+    {
+        gpu::CommandBatch batch(*gpu->device);
+        REQUIRE(sort->sort(batch, buffers, kPairs, 32));
+        REQUIRE(batch.submit(true));
+    }
+    const auto after = dump("sorted   ");
+    CHECK(after[0] <= after[3]);   // ordered
+    const uint64_t inKeys = uint64_t{before[0]} + before[3];
+    const uint64_t outKeys = uint64_t{after[0]} + after[3];
+    const uint64_t inValues = uint64_t{before[2]} + before[5];
+    const uint64_t outValues = uint64_t{after[2]} + after[5];
+    CHECK(outKeys == inKeys);       // the same two keys
+    CHECK(outValues == inValues);   // carrying the same two values
+}
+
 TEST_CASE("the radix sort orders, keeps ties stable and loses nothing, for every pattern",
           "[gpu][algo]") {
     LRT_REQUIRE_GPU(gpu);
@@ -145,7 +188,7 @@ TEST_CASE("the radix sort orders, keeps ties stable and loses nothing, for every
 TEST_CASE("sorting ten million pairs, timed", "[gpu][algo][bench]") {
     LRT_REQUIRE_GPU(gpu);
     auto sort = gpu::RadixSort::create(*gpu->library);
-    REQUIRE(sort);
+    if (!sort) FAIL(sort.error().toString());
     constexpr uint32_t kCount = 10'000'000;
     gpu::SortBuffers buffers = sortBuffers(*gpu->device, kCount);
     generate(*gpu, buffers, kCount, 0, 32);

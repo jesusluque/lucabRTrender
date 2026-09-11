@@ -66,7 +66,7 @@ Outcome run(test::Gpu& gpu, const LobeCase& c) {
         desc.elementBytes = element;
         desc.label = label;
         auto made = gpu::Buffer::create(*gpu.device, desc);
-        REQUIRE(made);
+        if (!made) FAIL(made.error().toString());
         return *made;
     };
     gpu::Buffer bins = test::uintBuffer(*gpu.device, kSamples, "lobe.bins");

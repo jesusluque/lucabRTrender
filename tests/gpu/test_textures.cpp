@@ -266,10 +266,10 @@ TEST_CASE("compiled shaders come back from the disk cache on a second device", "
         gpu::DeviceDesc desc;
         desc.shaderCache = cache;
         auto device = gpu::Device::create(desc);
-        REQUIRE(device);
+        if (!device) FAIL(device.error().toString());
         gpu::ShaderLibrary library(*device);
         auto kernel = gpu::ComputeKernel::create(library, "lrt/test/textures", "textureMean");
-        REQUIRE(kernel);
+        if (!kernel) FAIL(kernel.error().toString());
         return (*device)->shaderCacheStats();
     };
     const gpu::ShaderCacheStats first = compile();
