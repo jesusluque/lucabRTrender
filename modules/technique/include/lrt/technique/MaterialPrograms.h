@@ -17,6 +17,7 @@
 
 #include "lrt/core/Result.h"
 #include "lrt/gpu/Buffer.h"
+#include "lrt/light/LightTable.h"
 #include "lrt/material/MaterialCompiler.h"
 #include "lrt/material/TextureStore.h"
 #include "lrt/render/Camera.h"
@@ -73,6 +74,14 @@ struct MaterialFrame {
     const gpu::Buffer*            blob = nullptr;
     const material::TextureStore* textures = nullptr;
     float                         time = 0.0F;
+    /// The frame's lights. None: the headlight, as meshes were lit before
+    /// there were any.
+    const light::LightTable*      lights = nullptr;
+    /// What a shadow ray traces against, when the device traces at all.
+    rhi::IAccelerationStructure*  shadows = nullptr;
+    /// Samples per light. One is the interactive choice; a test that wants
+    /// an area light's irradiance without noise asks for more.
+    uint32_t                      samples = 1;
 
     [[nodiscard]] bool valid() const noexcept {
         return programs != nullptr && scene != nullptr && records != nullptr && records->valid() && blob != nullptr &&
@@ -83,7 +92,8 @@ struct MaterialFrame {
 /// The scene buffers shaders/lrt/technique/surface.slang reads, by name.
 void bindScene(rhi::ShaderCursor cursor, const world::GpuScene& scene);
 
-/// Those, and material_lookup.slang's tables, textures and view to world.
+/// Those, and material_lookup.slang's tables, textures, view to world and
+/// the frame's lights.
 void bindMaterialFrame(rhi::ShaderCursor cursor, const MaterialFrame& frame, const render::Projection& projection);
 
 }   // namespace lrt::technique

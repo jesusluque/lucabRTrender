@@ -12,6 +12,7 @@ lrt_add_module(technique
         lrt::gpu
         lrt::world
         lrt::material
+        lrt::light
         lrt::render)
 
 # OIDN, GPU devices only (scripts/build-oidn.sh). Without it the engine has no

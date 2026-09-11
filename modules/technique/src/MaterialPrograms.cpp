@@ -97,6 +97,13 @@ void bindMaterialFrame(rhi::ShaderCursor cursor, const MaterialFrame& frame, con
     cursor["toWorld"]["row1"].setData(toWorld.data() + 4, sizeof(float) * 4);
     cursor["toWorld"]["row2"].setData(toWorld.data() + 8, sizeof(float) * 4);
     cursor["lookup"]["time"].setData(frame.time);
+    if (frame.lights != nullptr) {
+        frame.lights->bind(cursor);
+        cursor["lighting"]["samples"].setData(frame.samples);
+    }
+    if (frame.shadows != nullptr) {
+        cursor["shadowScene"].setBinding(frame.shadows);
+    }
 }
 
 }   // namespace lrt::technique
