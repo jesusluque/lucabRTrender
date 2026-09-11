@@ -5,6 +5,10 @@
 // checked by kernels, with only counters read back.
 #include "GpuTest.h"
 
+#include <catch2/catch_approx.hpp>
+
+#include <array>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -384,4 +388,60 @@ TEST_CASE("a draw's start vertex and instance reach the vertex stage as this bac
     const bool included = gpu->device->caps().drawIdsIncludeStart;
     CHECK((included ? v[0] : v[0] + v[2]) == 12);
     CHECK((included ? v[1] : v[1] + v[3]) == 5);
+}
+
+TEST_CASE("a texture table binds textures by slot, and an sRGB view decodes what it samples", "[gpu][texture]") {
+    LRT_REQUIRE_GPU(gpu);
+    auto kernel = gpu::ComputeKernel::create(*gpu->library, "lrt/test/texture_table", "textureTableProbe");
+    if (!kernel) FAIL(kernel.error().toString());
+    std::vector<gpu::Texture> textures;
+    for (int k = 0; k < 3; ++k) {
+        gpu::TextureDesc desc;
+        desc.width = 2;
+        desc.height = 2;
+        desc.format = rhi::Format::RGBA8Unorm;
+        desc.usage = rhi::TextureUsage::ShaderResource | rhi::TextureUsage::CopyDestination;
+        auto t = gpu::Texture::create(*gpu->device, desc);
+        REQUIRE(t);
+        std::array<uint8_t, 16> texels{};
+        for (size_t i = 0; i < 16; i += 4) {
+            texels[i] = static_cast<uint8_t>(60 * (k + 1));
+            texels[i + 1] = 128;
+            texels[i + 3] = 255;
+        }
+        REQUIRE(t->upload(*gpu->device, 0, 0, std::as_bytes(std::span(texels))));
+        textures.push_back(std::move(*t));
+    }
+    rhi::TextureViewDesc srgbDesc;
+    srgbDesc.format = rhi::Format::RGBA8UnormSrgb;
+    rhi::ComPtr<rhi::ITextureView> srgb;
+    REQUIRE(SLANG_SUCCEEDED(gpu->device->rhi()->createTextureView(textures[2].rhi(), srgbDesc, srgb.writeRef())));
+    auto sampler = gpu::Sampler::create(*gpu->device, {});
+    REQUIRE(sampler);
+    gpu::BufferDesc out;
+    out.bytes = 16 * 3;
+    out.elementBytes = 16;
+    auto result = gpu::Buffer::create(*gpu->device, out);
+    REQUIRE(result);
+    gpu::CommandBatch batch(*gpu->device);
+    kernel->dispatch(batch, {1, 1, 1}, [&](rhi::ShaderCursor cursor) {
+        cursor["table"]["textures"][0].setBinding(textures[0].rhi());
+        cursor["table"]["textures"][500].setBinding(textures[1].rhi());
+        cursor["table"]["textures"][1000].setBinding(srgb.get());
+        cursor["table"]["samplers"][0].setBinding(sampler->rhi());
+        cursor["table"]["samplers"][1].setBinding(sampler->rhi());
+        cursor["result"].setBinding(result->rhi());
+        cursor["params"]["count"].setData(uint32_t{3});
+        cursor["params"]["stride"].setData(uint32_t{500});
+    });
+    REQUIRE(batch.submit(true));
+    float v[12] = {};
+    REQUIRE(result->read(*gpu->device, 0, sizeof(v), v));
+    std::printf("  slots 0, 500, 1000: r %.4f %.4f %.4f (the last through sRGB), g %.4f %.4f\n", double(v[0]),
+                double(v[4]), double(v[8]), double(v[1]), double(v[9]));
+    CHECK(v[0] == Catch::Approx(60.0F / 255.0F).margin(1e-6F));
+    CHECK(v[4] == Catch::Approx(120.0F / 255.0F).margin(1e-6F));
+    const float encoded = 180.0F / 255.0F;
+    const float decoded = std::pow((encoded + 0.055F) / 1.055F, 2.4F);
+    CHECK(v[8] == Catch::Approx(decoded).margin(2e-3F));
 }

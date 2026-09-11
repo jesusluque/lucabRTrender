@@ -54,6 +54,9 @@ endif()
 # worth sending upstream; the list should shrink when the pin moves.
 #   - slang-rhi-metal-render-target-array-length.patch: every Metal render
 #     pass with more than one colour target was invalid.
+#   - slang-rhi-metal-texture-view-format.patch: a view of a whole texture in
+#     another format (sRGB over linear) came back as the texture itself, in
+#     the texture's format.
 #   - slang-rhi-metal-acceleration-structures.patch: once any
 #     acceleration structure had been freed, the next build threw inside
 #     Metal (a nil in the device's structure array) and aborted the process;
@@ -65,7 +68,7 @@ FetchContent_Declare(slang_rhi
     GIT_SHALLOW    FALSE
     GIT_SUBMODULES ""
     PATCH_COMMAND  ${CMAKE_COMMAND}
-                   "-DPATCHES=${CMAKE_CURRENT_LIST_DIR}/patches/slang-rhi-metal-render-target-array-length.patch$<SEMICOLON>${CMAKE_CURRENT_LIST_DIR}/patches/slang-rhi-metal-acceleration-structures.patch"
+                   "-DPATCHES=${CMAKE_CURRENT_LIST_DIR}/patches/slang-rhi-metal-render-target-array-length.patch$<SEMICOLON>${CMAKE_CURRENT_LIST_DIR}/patches/slang-rhi-metal-acceleration-structures.patch$<SEMICOLON>${CMAKE_CURRENT_LIST_DIR}/patches/slang-rhi-metal-texture-view-format.patch"
                    -P "${CMAKE_CURRENT_LIST_DIR}/patches/apply.cmake"
     UPDATE_DISCONNECTED TRUE
     SYSTEM)

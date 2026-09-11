@@ -1,0 +1,17 @@
+diff --git a/src/metal/metal-texture.cpp b/src/metal/metal-texture.cpp
+index 4f12645..c9f6938 100644
+--- a/src/metal/metal-texture.cpp
++++ b/src/metal/metal-texture.cpp
+@@ -276,7 +276,11 @@ Result DeviceImpl::createTextureView(ITexture* texture, const TextureViewDesc& d
+     const TextureDesc& textureDesc = textureImpl->m_desc;
+     uint32_t layerCount = textureDesc.arrayLength * (textureDesc.type == TextureType::TextureCube ? 6 : 1);
+     SubresourceRange sr = viewImpl->m_desc.subresourceRange;
+-    if (sr.layer == 0 && sr.layerCount == layerCount && sr.mip == 0 && sr.mipCount == textureDesc.mipCount)
++    // The texture itself serves only a view of all of it in its own format:
++    // an sRGB view of a linear texture (or the reverse) is a Metal view.
++    const bool sameFormat = desc.format == Format::Undefined || desc.format == textureDesc.format;
++    if (sameFormat && sr.layer == 0 && sr.layerCount == layerCount && sr.mip == 0 &&
++        sr.mipCount == textureDesc.mipCount)
+     {
+         viewImpl->m_textureView = textureImpl->m_texture;
+         returnComPtr(outView, viewImpl);
