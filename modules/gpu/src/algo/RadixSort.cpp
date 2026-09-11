@@ -1,6 +1,7 @@
 // Copyright (c) 2026 lucabRTrender contributors.
 #include "lrt/gpu/algo/RadixSort.h"
 
+#include <cstdlib>
 #include <utility>
 
 #include "lrt/gpu/CommandBatch.h"
@@ -137,6 +138,9 @@ Result<void> RadixSort::sort(CommandBatch& batch, SortBuffers& buffers, uint32_t
             cursor["chunkStarts"].setBinding(chunkStarts_.rhi());
             setParams(cursor, count, chunks, shift, wide);
         });
+        if (std::getenv("LRT_RADIX_SUBMIT_EACH_PASS") != nullptr) {
+            LRT_TRY(batch.submit(true));
+        }
         std::swap(srcLo, dstLo);
         std::swap(srcHi, dstHi);
         std::swap(srcVal, dstVal);
