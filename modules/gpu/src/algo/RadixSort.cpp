@@ -126,8 +126,12 @@ Result<void> RadixSort::sort(CommandBatch& batch, SortBuffers& buffers, uint32_t
         });
         // Distinct placeholders for the unused hi bindings: a buffer bound as
         // both read-only and read-write in one dispatch is refused by D3D and
-        // Vulkan validation even when the kernel never touches it.
-        Buffer* scatterSrcHi = wide ? srcHi : &dummy_;
+        // Vulkan validation even when the kernel never touches it. The
+        // placeholders are the sort's own buffers, big enough for any index
+        // the kernel could form before it decides it has no high words: a
+        // one-element stand-in is read out of bounds on a target that
+        // evaluates both arms of the choice.
+        Buffer* scatterSrcHi = wide ? srcHi : &chunkStarts_;
         Buffer* scatterDstHi = wide ? dstHi : &histogramBuffer_;
         scatter_.dispatch(batch, {chunks, 1, 1}, [&](rhi::ShaderCursor cursor) {
             cursor["srcKeysLo"].setBinding(srcLo->rhi());
