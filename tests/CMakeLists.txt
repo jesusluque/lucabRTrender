@@ -49,10 +49,11 @@ lrt_test(lrt_geom_tests
     LIBS lrt::geom)
 
 lrt_test(lrt_material_tests
-    SOURCES material/test_texture_store.cpp material/test_lobes.cpp
+    SOURCES material/test_texture_store.cpp material/test_lobes.cpp material/test_material_compiler.cpp
     LIBS lrt::material hio)
 target_compile_options(lrt_material_tests PRIVATE -Wno-old-style-cast -Wno-shadow -Wno-deprecated-declarations
                        -Wno-double-promotion -Wno-cast-align)
+target_compile_definitions(lrt_material_tests PRIVATE LRT_MATERIALX_ROOT="${LRT_USD_ROOT}")
 set_target_properties(lrt_material_tests PROPERTIES CXX_VISIBILITY_PRESET default VISIBILITY_INLINES_HIDDEN OFF
                       BUILD_RPATH "${SLANG_ROOT}/lib;${LRT_USD_ROOT}/lib")
 
