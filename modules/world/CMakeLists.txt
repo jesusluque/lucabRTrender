@@ -4,6 +4,7 @@ lrt_add_module(world
     SOURCES
         src/GpuScene.cpp
         src/Instancing.cpp
+        src/RayTracingScene.cpp
     PUBLIC_LIBS
         lrt::core
         lrt::gpu

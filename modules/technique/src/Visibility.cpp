@@ -97,6 +97,53 @@ Result<void> VisibilityRaster::render(gpu::CommandBatch& batch, const world::Gpu
     return ok();
 }
 
+Result<VisibilityTrace> VisibilityTrace::create(gpu::ShaderLibrary& library) {
+    if (!library.device().caps().rayQuery) {
+        return Error(ErrorCode::Unsupported, "no ray queries on this device");
+    }
+    auto kernel = gpu::ComputeKernel::create(library, "lrt/technique/visibility_trace", "visibilityTrace");
+    if (!kernel) return std::move(kernel).error();
+    VisibilityTrace trace;
+    trace.device_ = &library.device();
+    trace.trace_ = std::move(*kernel);
+    return trace;
+}
+
+Result<void> VisibilityTrace::render(gpu::CommandBatch& batch, const world::RayTracingScene& scene,
+                                     const render::Projection& projection, uint32_t width, uint32_t height,
+                                     VisibilityTargets& targets) {
+    if (targets.width != width || targets.height != height || !targets.ids.valid() ||
+        (targets.ids.desc().usage & rhi::TextureUsage::UnorderedAccess) == rhi::TextureUsage::None) {
+        gpu::TextureDesc ids;
+        ids.width = width;
+        ids.height = height;
+        ids.format = rhi::Format::RGBA32Uint;
+        ids.usage = rhi::TextureUsage::UnorderedAccess | rhi::TextureUsage::ShaderResource |
+                    rhi::TextureUsage::RenderTarget;
+        ids.label = "visibility.ids";
+        auto made = gpu::Texture::create(*device_, ids);
+        if (!made) return std::move(made).error();
+        targets.ids = std::move(*made);
+        targets.depth = {};
+        targets.width = width;
+        targets.height = height;
+    }
+    auto view = targets.ids.view(0);
+    if (!view) return std::move(view).error();
+    const std::array<float, 12> toWorld = aofx::xform::inverseAffine(projection.worldToView).rows3x4();
+    trace_.dispatch(batch, {width, height, 1}, [&](rhi::ShaderCursor cursor) {
+        cursor["scene"].setBinding(scene.topLevel());
+        cursor["ids"].setBinding((*view).get());
+        setCamera(cursor["camera"], projection, width, height);
+        static constexpr const char* kNames[12] = {"v00", "v01", "v02", "v03", "v10", "v11",
+                                                  "v12", "v13", "v20", "v21", "v22", "v23"};
+        for (size_t k = 0; k < 12; ++k) {
+            cursor["trace"][kNames[k]].setData(toWorld[k]);
+        }
+    });
+    return ok();
+}
+
 Result<HeadlightShading> HeadlightShading::create(gpu::ShaderLibrary& library) {
     auto kernel = gpu::ComputeKernel::create(library, "lrt/technique/shade_headlight", "shadeHeadlight");
     if (!kernel) return std::move(kernel).error();

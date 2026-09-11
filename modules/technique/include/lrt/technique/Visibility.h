@@ -16,6 +16,7 @@
 #include "lrt/render/Camera.h"
 #include "lrt/render/TileRasterizer.h"
 #include "lrt/world/GpuScene.h"
+#include "lrt/world/RayTracingScene.h"
 
 namespace lrt::gpu {
 class CommandBatch;
@@ -46,6 +47,22 @@ public:
 private:
     gpu::Device*      device_ = nullptr;
     gpu::RasterKernel pass_;
+};
+
+/// Visibility by rays against a scene's hardware acceleration structures:
+/// the same targets VisibilityRaster fills, for a device with no raster (and
+/// as the rasteriser's check).
+class VisibilityTrace {
+public:
+    [[nodiscard]] static Result<VisibilityTrace> create(gpu::ShaderLibrary& library);
+
+    [[nodiscard]] Result<void> render(gpu::CommandBatch& batch, const world::RayTracingScene& scene,
+                                      const render::Projection& projection, uint32_t width, uint32_t height,
+                                      VisibilityTargets& targets);
+
+private:
+    gpu::Device*       device_ = nullptr;
+    gpu::ComputeKernel trace_;
 };
 
 /// Lit from the eye: displayColor times the cosine to the eye, the smooth

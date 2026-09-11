@@ -287,3 +287,93 @@ TEST_CASE("instancer levels composed on the device draw as the instances authore
     CHECK(diff->p99Relative <= 1e-3);
     CHECK(diff->relMse < 1e-6);
 }
+
+TEST_CASE("rays see the triangles the rasteriser sees", "[technique][visibility][raytracing]") {
+    LRT_REQUIRE_GPU(gpu);
+    if (!gpu->device->caps().rasterization || !gpu->device->caps().rayQuery) {
+        SKIP("needs both rasterisation and ray queries");
+    }
+    auto r = renderer(*gpu);
+    auto rt = world::RayTracingScene::create(*gpu->library);
+    auto trace = technique::VisibilityTrace::create(*gpu->library);
+    if (!rt) FAIL(rt.error().toString());
+    if (!trace) FAIL(trace.error().toString());
+    const uint32_t w = 241;
+    const uint32_t h = 181;
+    const render::Projection projection =
+        render::projectionFor(render::Camera::lookingAt({3.0, 4.0, 11.0}, {0.0, 0.0, 0.0}), w, h);
+    // A bumpy grid and a scatter of squares, overlapping in depth.
+    static std::vector<float> points;
+    static std::vector<int32_t> counts;
+    static std::vector<int32_t> indices;
+    const int n = 32;
+    for (int y = 0; y <= n; ++y) {
+        for (int x = 0; x <= n; ++x) {
+            const float fx = static_cast<float>(x) / n * 6.0F - 3.0F;
+            const float fy = static_cast<float>(y) / n * 6.0F - 3.0F;
+            points.insert(points.end(), {fx, 0.4F * std::sin(fx * 1.7F) * std::cos(fy * 1.3F), fy});
+        }
+    }
+    for (int y = 0; y < n; ++y) {
+        for (int x = 0; x < n; ++x) {
+            const int p = y * (n + 1) + x;
+            counts.push_back(4);
+            indices.insert(indices.end(), {p, p + n + 1, p + n + 2, p + 1});
+        }
+    }
+    geom::MeshInput in;
+    in.source = "grid";
+    in.points = {std::as_bytes(std::span<const float>(points)), false};
+    in.faceVertexCounts = counts;
+    in.faceVertexIndices = indices;
+    auto grid = r->builder.build(in);
+    if (!grid) FAIL(grid.error().toString());
+    std::vector<world::MeshInstance> instances;
+    world::MeshInstance ground;
+    ground.mesh = std::make_shared<const geom::GpuMesh>(std::move(*grid));
+    instances.push_back(ground);
+    const auto squareMesh = square(*r, 0.5F);
+    for (int k = 0; k < 12; ++k) {
+        world::MeshInstance i;
+        i.mesh = squareMesh;
+        i.objectToWorld = aofx::xform::translation({-2.5 + 0.45 * k, 0.8 + 0.1 * (k % 3), -2.0 + 0.35 * k}) *
+                          aofx::xform::rotationY(37.0 * k) * aofx::xform::rotationX(25.0 * k);
+        instances.push_back(i);
+    }
+    REQUIRE(r->scene.update(instances, projection));
+    technique::VisibilityTargets rastered;
+    technique::VisibilityTargets traced;
+    {
+        gpu::CommandBatch batch(*gpu->device);
+        REQUIRE(r->raster.render(batch, r->scene, projection, w, h, rastered));
+        REQUIRE(batch.submit(true));
+    }
+    REQUIRE(rt->build(r->scene));
+    {
+        gpu::CommandBatch batch(*gpu->device);
+        REQUIRE(trace->render(batch, *rt, projection, w, h, traced));
+        REQUIRE(batch.submit(true));
+    }
+    auto compare = gpu::ComputeKernel::create(*gpu->library, "lrt/test/ids_compare", "idsCompare");
+    if (!compare) FAIL(compare.error().toString());
+    gpu::Buffer out = test::uintBuffer(*gpu->device, 4, "ids.counts");
+    auto viewA = rastered.ids.view(0);
+    auto viewB = traced.ids.view(0);
+    REQUIRE(viewA);
+    REQUIRE(viewB);
+    gpu::CommandBatch batch(*gpu->device);
+    compare->dispatch(batch, {1, 1, 1}, [&](rhi::ShaderCursor cursor) {
+        cursor["a"].setBinding((*viewA).get());
+        cursor["b"].setBinding((*viewB).get());
+        cursor["counts"].setBinding(out.rhi());
+        cursor["params"]["width"].setData(w);
+        cursor["params"]["height"].setData(h);
+    });
+    REQUIRE(batch.submit(true));
+    uint32_t c[4] = {0, 0, 0, 0};
+    REQUIRE(out.read(*gpu->device, 0, sizeof(c), c));
+    std::printf("  raster against rays: %u of %u interior pixels differ; covered %u / %u\n", c[0], c[1], c[2], c[3]);
+    CHECK(c[1] > 1000);
+    CHECK(c[0] == 0);
+    CHECK(std::abs(static_cast<int>(c[2]) - static_cast<int>(c[3])) <= static_cast<int>(c[2] / 50));
+}

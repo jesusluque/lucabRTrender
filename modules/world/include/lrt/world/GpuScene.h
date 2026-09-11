@@ -70,6 +70,8 @@ public:
     [[nodiscard]] const geom::GpuMesh& mesh(uint32_t index) const { return *meshes_[index]; }
     [[nodiscard]] uint32_t firstPoint(uint32_t mesh) const { return ranges_[mesh].firstPoint; }
     [[nodiscard]] uint32_t firstTriangle(uint32_t mesh) const { return ranges_[mesh].firstTriangle; }
+    /// Changes whenever the pools are repacked (the mesh set changed).
+    [[nodiscard]] uint64_t generation() const noexcept { return generation_; }
 
     // Pools and records (shaders/lrt/world/scene_types.slang).
     [[nodiscard]] const gpu::Buffer& positions() const noexcept { return positions_; }
@@ -93,6 +95,7 @@ private:
     std::vector<Range>                                 ranges_;
     std::vector<DrawRange>                             draws_;
     uint32_t                                           instanceCount_ = 0;
+    uint64_t                                           generation_ = 0;
     gpu::Buffer positions_, normals_, indices_, triangleCorners_, triangleFaces_, meshRecords_, instanceRecords_;
 };
 

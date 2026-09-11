@@ -31,6 +31,10 @@ Result<gpu::Buffer> deviceBuffer(gpu::Device& device, uint64_t count, uint32_t e
     desc.bytes = std::max<uint64_t>(count, 1) * element;
     desc.elementBytes = element;
     desc.label = label;
+    // Positions and indices also feed acceleration structures.
+    if (device.caps().accelerationStructure) {
+        desc.extraUsage = rhi::BufferUsage::AccelerationStructureBuildInput;
+    }
     return gpu::Buffer::create(device, desc, count > 0 ? data : nullptr);
 }
 
@@ -100,6 +104,7 @@ Result<void> GpuScene::repack() {
     auto made = deviceBuffer(device, records.size(), sizeof(MeshRecord), "scene.meshes", records.data());
     if (!made) return std::move(made).error();
     meshRecords_ = std::move(*made);
+    ++generation_;
     return ok();
 }
 
