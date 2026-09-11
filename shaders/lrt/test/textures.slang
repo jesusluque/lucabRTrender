@@ -178,3 +178,21 @@ void formatRead(uint3 tid: SV_DispatchThreadID) {
     counts[2] = asuint(v.b);
     counts[3] = asuint(v.a);
 }
+
+/// The same colour, packed into the texture's own bytes and stored through a
+/// uint view of it. Four bytes, written as four bytes, asking neither backend
+/// to convert anything -- which is what an eight-bit texture written from a
+/// compute kernel needs if the two targets disagree about what a float4 store
+/// means. Read back through the ordinary view, it should be the colour again.
+RWTexture2D<uint> packed;
+
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void packedWrite(uint3 tid: SV_DispatchThreadID) {
+    if (tid.x != 0) {
+        return;
+    }
+    const float4 colour = float4(1.0, 0.0, 64.0 / 255.0, 1.0);
+    const uint4 byte = uint4(round(saturate(colour) * 255.0));
+    packed[uint2(0, 0)] = byte.x | (byte.y << 8) | (byte.z << 16) | (byte.w << 24);
+}

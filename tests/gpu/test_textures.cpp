@@ -496,3 +496,49 @@ TEST_CASE("a float4 written to an 8-bit texture comes back as the colour it wrot
         CHECK(std::abs(read[k] - wrote[k]) <= 1.0F / 255.0F);
     }
 }
+
+/// The same eight-bit texture written as its own bytes, through a uint view of
+/// it: four bytes stored as four bytes, which asks neither backend to convert
+/// anything. If this holds on both, it is what the texture store's decode
+/// should do.
+TEST_CASE("an eight-bit texture written through a uint view holds the colour packed into it",
+          "[gpu][texture][probe]") {
+    LRT_REQUIRE_GPU(gpu);
+    static gpu::ComputeKernel kPacked = kernelOf(*gpu, "packedWrite");
+    static gpu::ComputeKernel kRead = kernelOf(*gpu, "formatRead");
+    gpu::Texture eight = texture(*gpu, 4, 4, 1, "eight-bit packed", rhi::Format::RGBA8Unorm);
+    rhi::TextureViewDesc desc;
+    desc.format = rhi::Format::R32Uint;
+    rhi::ComPtr<rhi::ITextureView> uintView;
+    if (SLANG_FAILED(gpu->device->rhi()->createTextureView(eight.rhi(), desc, uintView.writeRef()))) {
+        SKIP("this backend will not make a uint view of an eight-bit texture");
+    }
+    auto colourView = eight.view(0);
+    REQUIRE(colourView);
+    gpu::Buffer got = test::uintBuffer(*gpu->device, 4, "got");
+    {
+        gpu::CommandBatch batch(*gpu->device);
+        kPacked.dispatch(batch, {1, 1, 1},
+                         [&](rhi::ShaderCursor cursor) { cursor["packed"].setBinding(uintView.get()); });
+        REQUIRE(batch.submit(true));
+    }
+    {
+        gpu::CommandBatch batch(*gpu->device);
+        kRead.dispatch(batch, {1, 1, 1}, [&](rhi::ShaderCursor cursor) {
+            cursor["texture"].setBinding((*colourView).get());
+            cursor["counts"].setBinding(got.rhi());
+        });
+        REQUIRE(batch.submit(true));
+    }
+    std::array<uint32_t, 4> bits{};
+    REQUIRE(got.read(*gpu->device, 0, sizeof(bits), bits.data()));
+    std::array<float, 4> read{};
+    std::memcpy(read.data(), bits.data(), sizeof(read));
+    const std::array<float, 4> wrote = {1.0F, 0.0F, 64.0F / 255.0F, 1.0F};
+    std::printf("  packed through a uint view: %.4f %.4f %.4f %.4f (wrote %.4f %.4f %.4f %.4f)\n", double(read[0]),
+                double(read[1]), double(read[2]), double(read[3]), double(wrote[0]), double(wrote[1]),
+                double(wrote[2]), double(wrote[3]));
+    for (uint32_t k = 0; k < 4; ++k) {
+        CHECK(std::abs(read[k] - wrote[k]) <= 1.0F / 255.0F);
+    }
+}

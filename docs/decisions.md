@@ -1281,12 +1281,31 @@ one at a time when one look at the emitted kernel would have said why.
   so the raster visibility, mesh and Storm-oracle tests skip with a reason, as
   does `lrt view` with no display.
 
+### Open on this backend
+
+**A float4 stored through an `RWTexture2D` does not arrive as the texture's
+format on CUDA.** `lrt_gpu_tests` "a float4 written to an 8-bit texture comes
+back as the colour it wrote" fails here, deliberately: it is the smallest
+statement of the defect, one texel with no decoding, sampling or mips in the
+way, and it names what it means when it fails. It is not skipped, because CUDA
+can run it -- it answers wrongly, and a skip would hide that behind a green
+suite. Skipping is for what a backend cannot do.
+
+Everything the texture store decodes from an 8-bit image is wrong here until
+it is fixed, which is most of what still fails: the PNG and UDIM tests
+directly, and the ray tracer and USD tests that shade through a decoded image.
+The fix is ours rather than Slang's -- the lowering is faithful, and the two
+targets simply mean different things by the store -- so the texel wants
+packing in the shader and storing through a uint view of the same texture,
+which writes four bytes on either backend and asks neither to convert.
+
 ### Measured (NVIDIA L4, Ubuntu 24.04, debug)
 
 `ctest --preset linux-x86_64-debug`, with engine's materials merged in:
-**84 of 97 pass, 13 fail, 24 skip** -- from 47 of 83 when the port first ran,
-and from 63 of 97 before the sort was fixed. That reading predates the hole
-flags fix, so #43 is still counted as failing in it.
+**86 of 99 pass, 13 fail, 25 of those passes skips** -- from 47 of 83 when the
+port first ran, and from 63 of 97 before the sort was fixed. One of the
+thirteen is the eight-bit texture probe above, which fails here deliberately
+and says why when it does.
 Passing outright: the prefix sum, textures, mips, the texture table and its
 sRGB views, the shader cache and link constants, every loader (PLY, .splat,
 SPZ, SOG, points), the lobe library, the display transform, the codeless
