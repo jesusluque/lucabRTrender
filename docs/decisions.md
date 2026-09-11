@@ -293,3 +293,59 @@ No `LrtCameraWindowAPI`: a UsdGeomCamera already expresses openFXplayer's
 window. Translate is the aperture offsets, scale is the apertures, and roll
 is the camera's own rotation. The SceneText bridge maps to those.
 `LrtStreamedAssetAPI` waits for the LOD work.
+
+## Levels of detail
+
+`modules/lod`, `shaders/lrt/lod`. The method is written out in
+`lod_common.slang`.
+
+### Built and cut on the device
+
+- **Build.** Splats are sorted by 30-bit Morton code. An octree cell at
+  level r is a run of equal top-3r-bit prefixes, found with a boundary pass
+  and a prefix sum. Moments add (after Kerbl et al. 2024): the finest merged
+  level is summed from the splats, and each coarser level from its children.
+  Each group then becomes one Gaussian, with its covariance diagonalised by
+  Jacobi sweeps in the shader.
+- **Which levels are stored.** Levels from `coarsestLevel` down to the
+  deepest level whose cell count is at most half the splat count.
+- **Cut, per group, fully parallel.** A group is drawn when its cell projects
+  to at most the threshold and its parent's cell does not. A splat is drawn
+  when the finest merged level's cell does not. Projected size is edge over
+  nearest distance, and a child cell lies inside its parent, so the test is
+  monotone down the tree and every place is drawn at exactly one level.
+- **What comes back to the CPU.** Only counts: one per level while building,
+  and one per level per instance per frame.
+
+### Measured (M5 Pro)
+
+**train_7k (742k splats).** Building took 47 ms and made 146k merged
+Gaussians over levels 1 to 10. On a far view at 1080p:
+
+| Threshold | Drawn | Cut | Render | Image |
+|---|---|---|---|---|
+| 0 (off) | 742k | | 12.6 ms | reference |
+| 4 px | 727k | 3.9 ms | 12.1 ms | mean abs 1e-4 |
+| 8 px | 83k (11%) | 2.9 ms | 3.2 ms | mean abs 3e-3 |
+
+**Random-colour test clouds**, the worst case for merging:
+
+| Threshold | Drawn | p99 |
+|---|---|---|
+| 2 px | 64% | 9 |
+| 4 px | 19.5% | 29 |
+
+**Exactness at threshold 0.** p99 is at most 1. The residue comes from depth
+keys that tie and keep index order, which the Morton sort has changed.
+
+**A cell with one splat.** It merges back into that splat, with covariance
+equal to 1e-4.
+
+### Not done yet
+
+- **The `.lrtc` file, streaming with a residency budget, and
+  `LrtStreamedAssetAPI`.** The cut runs over clouds held whole in memory.
+- **The cut's per-level counts are read one by one.** Up to about 3.9 ms of
+  the cut on train_7k; they should come back in one read.
+- **LOD with the ray tracer.** A cut that changes every frame would rebuild
+  the structures every frame.

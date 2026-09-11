@@ -6,6 +6,7 @@ module bvh_leaves;
 import lrt.common.packing;
 import rt_common;
 import bvh_common;
+import lrt.common.morton;
 
 StructuredBuffer<float4>    positions;
 StructuredBuffer<uint>      shape;
@@ -14,14 +15,6 @@ RWStructuredBuffer<uint>    mortonKeys;
 RWStructuredBuffer<uint>    mortonValues;
 ConstantBuffer<BvhParams>   params;
 
-uint spread(uint v) {
-    v &= 0x3FFu;
-    v = (v | (v << 16)) & 0x030000FFu;
-    v = (v | (v << 8)) & 0x0300F00Fu;
-    v = (v | (v << 4)) & 0x030C30C3u;
-    v = (v | (v << 2)) & 0x09249249u;
-    return v;
-}
 
 [shader("compute")]
 [numthreads(256, 1, 1)]
@@ -43,8 +36,6 @@ void bvhLeaves(uint3 tid: SV_DispatchThreadID) {
 
     const float3 lo = float3(params.boundsLoX, params.boundsLoY, params.boundsLoZ);
     const float3 hi = float3(params.boundsHiX, params.boundsHiY, params.boundsHiZ);
-    const float3 unit = saturate((p.xyz - lo) / max(hi - lo, float3(1e-20)));
-    const uint3 q = min(uint3(unit * 1024.0), uint3(1023u));
-    mortonKeys[i] = (spread(q.x) << 2) | (spread(q.y) << 1) | spread(q.z);
+    mortonKeys[i] = morton30((p.xyz - lo) / max(hi - lo, float3(1e-20)));
     mortonValues[i] = i;
 }

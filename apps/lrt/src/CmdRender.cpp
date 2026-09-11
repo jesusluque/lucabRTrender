@@ -17,6 +17,7 @@
 #include "lrt/gpu/ShaderLibrary.h"
 #include "lrt/io/Exr.h"
 #include "lrt/io/Readers.h"
+#include "lrt/lod/Lod.h"
 #include "lrt/render/GaussianRayTracer.h"
 #include "lrt/render/PointRasterizer.h"
 #include "lrt/render/ReferenceRenderer.h"
@@ -29,6 +30,7 @@ namespace {
 struct RenderOptions {
     std::vector<std::string> splats;
     std::vector<std::string> points;
+    float                    lod = 0.0F;   ///< px a merged cell may span; 0 draws the splats
     std::string              technique = "raster";    ///< raster | rt | rt-hw | rt-bvh | reference | reference-rt
     std::string              pointRoute = "raster";   ///< raster | discs
     float                    pointSize = 0.01F;
@@ -242,9 +244,56 @@ int run(const RenderOptions& options, bool bench) {
         }
         std::printf("%s, %ux%u: best %.2f ms\n", options.technique.c_str(), width, height, bestMs);
     }
+    // Levels of detail: built once, cut every frame.
+    std::optional<lod::CutSelector> cutter;
+    std::vector<lod::LodCloud> lodClouds;
+    std::vector<lod::LodInstance> lodInstances;
+    if (options.lod > 0.0F) {
+        if (options.technique != "raster" || !pointInstances.empty()) {
+            std::fprintf(stderr, "--lod draws splats through the rasteriser\n");
+            return 1;
+        }
+        auto builder = lod::LodBuilder::create(library);
+        auto made = lod::CutSelector::create(library);
+        if (!builder || !made) {
+            std::fprintf(stderr, "%s\n", (!builder ? builder.error() : made.error()).toString().c_str());
+            return 1;
+        }
+        cutter.emplace(std::move(*made));
+        const auto start = std::chrono::steady_clock::now();
+        for (const auto& cloud : clouds) {
+            auto built = builder->build(*cloud);
+            if (!built) {
+                std::fprintf(stderr, "%s\n", built.error().toString().c_str());
+                return 1;
+            }
+            lodClouds.push_back(std::move(*built));
+        }
+        std::printf("levels of detail built in %.1f ms\n",
+                    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count());
+        for (size_t k = 0; k < lodClouds.size(); ++k) {
+            lodInstances.push_back({&lodClouds[k], model});
+        }
+    }
     render::FrameStats best;
     best.totalMs = 1e30;
+    double bestCutMs = 0.0;
+    lod::CutStats bestCut;
     for (int round = 0; round < rounds && options.technique == "raster"; ++round) {
+        std::vector<render::SplatInstance> drawn = instances;
+        double cutMs = 0.0;
+        std::vector<lod::CutStats> cutStats;
+        if (cutter) {
+            const auto start = std::chrono::steady_clock::now();
+            auto selected = cutter->select(render::projectionFor(camera, width, height), lodInstances, options.lod,
+                                           &cutStats);
+            if (!selected) {
+                std::fprintf(stderr, "%s\n", selected.error().toString().c_str());
+                return 1;
+            }
+            drawn = std::move(*selected);
+            cutMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+        }
         if (rasterPoints) {
             if (auto drawn = pointRaster->render(camera, pointInstances, settings, pointLayer); !drawn) {
                 std::fprintf(stderr, "%s\n", drawn.error().toString().c_str());
@@ -252,20 +301,33 @@ int run(const RenderOptions& options, bool bench) {
             }
         }
         auto stats = rasterPoints
-                         ? rasterizer->render(camera, instances, settings, targets, {}, &pointLayer)
-                         : rasterizer->render(camera, instances, settings, targets, pointInstances);
+                         ? rasterizer->render(camera, drawn, settings, targets, {}, &pointLayer)
+                         : rasterizer->render(camera, drawn, settings, targets, pointInstances);
         if (!stats) {
             std::fprintf(stderr, "%s\n", stats.error().toString().c_str());
             return 1;
         }
-        if (stats->totalMs < best.totalMs) {
+        if (stats->totalMs + cutMs < best.totalMs + bestCutMs) {
             best = *stats;
+            bestCutMs = cutMs;
+            if (!cutStats.empty()) {
+                bestCut = cutStats.front();
+            }
         }
         if (bench) {
-            std::printf("frame %d: %.2f ms\n", round, stats->totalMs);
+            if (cutter) {
+                std::printf("frame %d: %.2f ms (cut %.2f + render %.2f)\n", round, stats->totalMs + cutMs, cutMs,
+                            stats->totalMs);
+            } else {
+                std::printf("frame %d: %.2f ms\n", round, stats->totalMs);
+            }
         }
     }
     if (options.technique == "raster") {
+        if (cutter) {
+            std::printf("cut: %u splats + %u merged of %u, %.2f ms; ", bestCut.splats, bestCut.merged,
+                        bestCut.available, bestCutMs);
+        }
         std::printf("%u splats (%u visible), %u pairs, %ux%u: best %.2f ms", best.splats,
                     best.visible, best.pairs, width, height, best.totalMs);
         if (options.stages) {
@@ -313,6 +375,7 @@ void addOptions(CLI::App* cmd, RenderOptions& o) {
     cmd->add_option("--size", o.size, "WIDTHxHEIGHT");
     cmd->add_option("--near", o.nearZ, "near clipping distance");
     cmd->add_option("--degree", o.degree, "harmonic degree cap 0..3");
+    cmd->add_option("--lod", o.lod, "levels of detail: pixels a merged cell may span (0: off)");
     cmd->add_flag("--no-antialias", o.noAntialias, "no Mip-Splatting 2D filter compensation");
 }
 

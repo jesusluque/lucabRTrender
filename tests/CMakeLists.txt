@@ -40,6 +40,10 @@ if(LRT_HAVE_SPZ)
     target_link_libraries(lrt_render_tests PRIVATE lrt_spz)
 endif()
 
+lrt_test(lrt_lod_tests
+    SOURCES lod/test_lod.cpp
+    LIBS lrt::lod)
+
 lrt_test(lrt_usd_tests
     SOURCES usd/test_usd.cpp
     LIBS lrt::usd)
