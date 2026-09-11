@@ -29,7 +29,7 @@ public struct InstanceRecord {
     public uint   mesh;
     public uint   primId;
     public uint   instanceId;
-    public uint   flags;        // bit 0: double sided
+    public uint   flags;        // bit 0: double sided; bits 8 and up: the material row (0: none)
 };
 
 public float3 rowsApply(float4 r0, float4 r1, float4 r2, float3 x, float w) {

@@ -132,3 +132,15 @@ public void lrtBeginMaterial(MaterialInputs inputs, uint blob) {
     gLrtLobeCount = 0;
     gLrtResult = emptyStack();
 }
+
+/// What a mesh with no material shows: its displayColor, diffusely, with its
+/// displayOpacity -- as Storm draws it.
+public void lrtFallbackMaterial(MaterialInputs inputs) {
+    lrtBeginMaterial(inputs, 0);
+    const float3 colour = lrtPrimvar(kSlotDisplayColor, inputs.displayColor).rgb;
+    const float opacity = saturate(lrtPrimvar(kSlotDisplayOpacity, float4(inputs.displayColor.w)).x);
+    Lobe lobe = lrtLobe(kLobeOrenNayar);
+    lobe.colour0 = colour;
+    const uint index = lrtPushLobe(lobe, inputs.normalWorld, inputs.tangentWorld);
+    gLrtResult = lrtFinishStack(lrtBsdfOf(index, float3(1.0), float3(0.0)), float3(0.0), opacity);
+}

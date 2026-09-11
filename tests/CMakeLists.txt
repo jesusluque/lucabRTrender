@@ -58,8 +58,9 @@ set_target_properties(lrt_material_tests PROPERTIES CXX_VISIBILITY_PRESET defaul
                       BUILD_RPATH "${SLANG_ROOT}/lib;${LRT_USD_ROOT}/lib")
 
 lrt_test(lrt_technique_tests
-    SOURCES technique/test_visibility.cpp technique/test_display.cpp
+    SOURCES technique/test_visibility.cpp technique/test_display.cpp technique/test_materials.cpp
     LIBS lrt::technique)
+target_compile_definitions(lrt_technique_tests PRIVATE LRT_MATERIALX_ROOT="${LRT_USD_ROOT}")
 
 lrt_test(lrt_lod_tests
     SOURCES lod/test_lod.cpp

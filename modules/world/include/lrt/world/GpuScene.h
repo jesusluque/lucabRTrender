@@ -36,6 +36,7 @@ struct MeshInstance {
     std::array<float, 3>                 displayColor{0.18F, 0.18F, 0.18F};
     float                                displayOpacity = 1.0F;
     bool                                 doubleSided = true;
+    uint32_t                             material = 0;     ///< its row in the frame's material records; 0 none
 };
 
 /// Many instances of one mesh whose transforms are already on the device
@@ -49,6 +50,7 @@ struct InstanceSet {
     std::array<float, 3>                 displayColor{0.18F, 0.18F, 0.18F};
     float                                displayOpacity = 1.0F;
     bool                                 doubleSided = true;
+    uint32_t                             material = 0;
 };
 
 /// Consecutive instances of one mesh: one draw.

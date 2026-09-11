@@ -280,7 +280,8 @@ Result<void> GpuScene::update(std::span<const MeshInstance> instances, const ren
             record.mesh = m;
             record.primId = instance.primId;
             record.instanceId = instance.instanceId;
-            record.flags = instance.doubleSided ? 1u : 0u;
+            // Bit 0: double sided; above bit 8, the material row.
+            record.flags = (instance.doubleSided ? 1u : 0u) | (instance.material << 8);
             records.push_back(record);
             ++draw.instances;
         }
@@ -328,7 +329,7 @@ Result<void> GpuScene::update(std::span<const MeshInstance> instances, const ren
         record.count = set.count;
         record.mesh = mesh;
         record.primId = set.primId;
-        record.flags = set.doubleSided ? 1u : 0u;
+        record.flags = (set.doubleSided ? 1u : 0u) | (set.material << 8);
         setRecords.push_back(record);
         layout.emplace_back(set.chainRows, set.count);
         draws_.push_back({mesh, singles + setInstances, set.count});
