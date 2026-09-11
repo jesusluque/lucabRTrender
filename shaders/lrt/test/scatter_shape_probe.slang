@@ -45,7 +45,9 @@ void scatterShapeProbe(uint3 tid: SV_DispatchThreadID) {
         // dispatch has the same reads and writes in flight as the real one.
         const uint at = chunkStarts[c * 256];
         chunkStarts[c * 256] = at + 1;
-        dstKeysLo[at] = lo;
+        // Written from the buffer, not from the local the loop carried: on
+        // CUDA the local delivered the iteration before's word.
+        dstKeysLo[at] = srcKeysLo[i];
         if (params.wide != 0) {
             dstKeysHi[at] = hi;
         }

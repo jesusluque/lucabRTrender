@@ -1111,7 +1111,7 @@ working inside slang-rhi and collide with nothing outside it. After it,
 exits 0 and reports `denoiser OIDN 2.5.1 on CUDA` and `tbb libraries 1`, the
 aofx tests are green and `single_tbb` passes.
 
-### The radix sort is wrong on CUDA, and it is not ordering
+### The radix sort is wrong on CUDA, and what it is not
 
 For as little as two pairs, one chunk and one pass: the generator writes
 `(1766601275, v0) (3252568193, v1)` and the sort leaves
@@ -1126,18 +1126,33 @@ What that rules out, each measured rather than argued:
   with four different parameter blocks each read back their own `count`,
   `chunkCount` and `shift`.
 
-What is left is one of the four kernels miscompiled or misbehaving on this
-backend, most likely the scatter's read-modify-write of its chunk's cursors.
-This one bug cascades: the tile rasteriser, the ray tracer, the LOD, geom's
-smooth normals and most USD tests sort, and all of them fail here.
+- **The counting, totalling and cursor stages are right.** One pass over two
+  pairs (eight key bits is one pass) leaves a histogram counting both pairs,
+  totals that agree, and 197 cursors past zero -- the same 197 as Metal.
+  `RadixSort::working` names those buffers so a test can say so.
+- **The bindings land where they are named.** Seven buffers, each holding its
+  own marker, bound by the names the kernel declares: every name reads its
+  own marker on CUDA as on Metal.
+- **An unused binding still changes the answer.** The scatter binds stand-ins
+  for its high-word inputs when keys are 32 bits, and changing which buffer
+  one of those points at changed a *low* word the sort placed. The stand-ins
+  are now the sort's own buffers, big enough for any index the kernel can
+  form, which is right whatever the cause.
+
+What is left is the scatter kernel itself on this backend: its counts are
+right, its cursors are right, its buffers are its own, and the words it places
+are not. This one bug cascades -- the tile rasteriser, the ray tracer, the
+LOD, geom's smooth normals and most USD tests sort, and all of them fail here.
 
 ### What else the port found
 
-- **`SampleGrad` is not available in a compute entry point on the CUDA
-  target** (Slang `E36107`), so `lrt/material/texture_table`'s `sampleTexture`
-  does not compile there and the texture tests fail to build their kernel.
-  The material system is being written now; whether this becomes an explicit
-  LOD path on CUDA or a documented skip is that work's call.
+- **`SampleGrad` was not available in a compute entry point on the CUDA
+  target** (Slang `E36107`). The material system answers that in the shader,
+  with a `__target_switch` choosing gradients or an explicit level at the
+  footprint's wider side, so the kernels build here now. What is left is not a
+  capability error but wrong pixels: a decoded PNG differs from the file in
+  3386 of its 3404 components and every mip mean collapses to zero at 1x1 --
+  the same shape of damage as the sort's, in a kernel that writes a texture.
 - **gpu_host**: a 4 KB buffer fails to allocate (`OutOfMemory`) in the second
   test, once gpe has adopted the context and allocated in it; plain
   allocations and the first shared-buffer test are fine.
@@ -1150,7 +1165,8 @@ smooth normals and most USD tests sort, and all of them fail here.
 
 ### Measured (NVIDIA L4, Ubuntu 24.04, debug)
 
-`ctest --preset linux-x86_64-debug`: **52 of 84 pass, 32 fail, 19 skip**.
+`ctest --preset linux-x86_64-debug`, with engine's materials merged in:
+**63 of 96 pass, 33 fail, 24 skip**.
 Passing outright: the prefix sum, textures, mips, the texture table and its
 sRGB views, the shader cache and link constants, every loader (PLY, .splat,
 SPZ, SOG, points), the lobe library, the display transform, the codeless
