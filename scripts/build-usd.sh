@@ -36,6 +36,13 @@ fi
 # c-blosc (an OpenVDB dependency) still does.
 export CMAKE_POLICY_VERSION_MINIMUM=3.5
 
+# Homebrew's libraries must not leak into the build; the flag exists only in
+# build_usd.py's macOS options.
+PLATFORM_ARGS=()
+if [[ "$(uname)" == "Darwin" ]]; then
+    PLATFORM_ARGS+=(--ignore-homebrew)
+fi
+
 PYTHON="$(command -v python3)"
 "$PYTHON" "$SRC/build_scripts/build_usd.py" \
     --build-variant release \
@@ -52,7 +59,7 @@ PYTHON="$(command -v python3)"
     --no-opencolorio \
     --onetbb \
     --usd-imaging \
-    --ignore-homebrew \
+    "${PLATFORM_ARGS[@]}" \
     --tools \
     --examples \
     -j "$JOBS" \
