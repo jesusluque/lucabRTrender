@@ -41,6 +41,16 @@ cmake --build build/macos-arm64-debug --target lrt_render_tests   # one test bin
   and what is not done. Update it with the change.
 - **Submodules.** `third_party/gpe` is on branch `lrt-fixes` and genlock on
   `main`. gpe changes are committed in the submodule.
+- **aofx compatibility is mandatory.** Its SDK and host change only
+  additively and only following openFXplayer's ABI. `aofx_sdk_manifest` fails
+  on any header change, and `lrt_aofx_tests` must stay green.
+- **One Slang, one slang-rhi, one TBB** in the process. `single_tbb` checks
+  the TBB count.
+- **Toolchain.** OpenUSD with MaterialX/OpenVDB is built by
+  `scripts/build-usd.sh` into `~/tools/usd-26.08-mx`, and OIDN (GPU devices
+  only) by `scripts/build-oidn.sh`.
+- **Roadmap.** The plan for complete USD (milestones M0–M11) is summarised in
+  `docs/decisions.md`, one section per milestone.
 
 ## Architecture
 
@@ -57,6 +67,7 @@ the ones above it.
 | gpu_host | gpe adopting slang-rhi's device: one `MTLDevice` or CUDA context, buffers shared without copies |
 | scene | `CloudLoader`: raw records uploaded, decoded on the GPU into `GpuSplats` / `GpuPoints` |
 | render | `TileRasterizer`, `GaussianRayTracer`, `PointRasterizer`, `ReferenceRenderer`, `Camera`/`Projection`, `SplatEdit` |
+| technique | how a frame is drawn from the scene; today `Denoiser` (OIDN on the engine's own Metal queue / CUDA stream) |
 | lod | `LodBuilder`, `CutSelector`; `Lrtc.h` for the `.lrtc` reader/writer and `StreamingPool` |
 | usd | `Engine`, `StageRenderer`, `Export`; the `hdLrt` plugin; codeless schemas in `modules/usd/schemas` |
 | aofx | openFXplayer's plugin SDK (ABI 22) and host |

@@ -6,6 +6,26 @@ list(APPEND CMAKE_PREFIX_PATH "${LRT_USD_ROOT}")
 find_package(OpenGL REQUIRED)
 find_package(pxr CONFIG REQUIRED HINTS "${LRT_USD_ROOT}")
 message(STATUS "OpenUSD: ${pxr_DIR}")
+# MaterialX, which this OpenUSD is built with (scripts/build-usd.sh): the
+# engine's materials are generated from MaterialX documents by its Slang
+# generator.
+if(NOT TARGET MaterialXCore)
+    find_package(MaterialX 1.39.5 CONFIG REQUIRED HINTS "${LRT_USD_ROOT}")
+endif()
+if(NOT TARGET MaterialXGenSlang)
+    message(FATAL_ERROR "OpenUSD at ${LRT_USD_ROOT} carries MaterialX without its Slang generator; "
+                        "rebuild with scripts/build-usd.sh")
+endif()
+# Imported targets are directory-scoped; the engine's other modules and apps
+# link MaterialX too.
+foreach(_mx MaterialXCore MaterialXFormat MaterialXGenShader MaterialXGenHw MaterialXGenSlang)
+    if(TARGET ${_mx})
+        get_target_property(_global ${_mx} IMPORTED_GLOBAL)
+        if(NOT _global)
+            set_target_properties(${_mx} PROPERTIES IMPORTED_GLOBAL TRUE)
+        endif()
+    endif()
+endforeach()
 
 set(LRT_USD_SOURCES
     src/HydraCamera.cpp
@@ -16,7 +36,8 @@ set(LRT_USD_SOURCES
     src/Points.cpp
     src/RenderPass.cpp
     src/RenderDelegate.cpp)
-set(LRT_USD_LIBS usd usdGeom usdVol usdImaging hd hdx cameraUtil gf tf vt sdf plug lrt::gpu)
+set(LRT_USD_LIBS usd usdGeom usdVol usdShade usdLux usdRender usdSkel usdImaging usdSkelImaging
+    hd hdx hdsi hdMtlx hio cameraUtil gf tf vt sdf plug lrt::gpu)
 
 # The engine side of Hydra, linked into the CLI and tests.
 lrt_add_module(usd

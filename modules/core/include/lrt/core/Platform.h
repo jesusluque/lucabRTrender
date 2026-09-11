@@ -12,6 +12,7 @@
 #include <memory>
 #include <span>
 #include <string>
+#include <vector>
 
 #include "lrt/core/Result.h"
 
@@ -55,6 +56,9 @@ private:
 /// budget is demoted -- and wakes 36 µs late at worst. On Linux the thread's
 /// timer slack goes to 1 ns.
 void sleepPrecisely(std::chrono::nanoseconds duration);
+
+/// Every shared library the process has loaded, by path.
+[[nodiscard]] std::vector<std::string> loadedLibraries();
 
 /// The directory holding the running executable.
 [[nodiscard]] std::filesystem::path executableDir();

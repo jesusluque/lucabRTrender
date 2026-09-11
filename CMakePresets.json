@@ -9,7 +9,8 @@
       "binaryDir": "${sourceDir}/build/${presetName}",
       "cacheVariables": {
         "SLANG_ROOT": "$env{HOME}/tools/slang",
-        "LRT_USD_ROOT": "$env{HOME}/tools/usd-26.08"
+        "LRT_USD_ROOT": "$env{HOME}/tools/usd-26.08-mx",
+        "LRT_OIDN_ROOT": "$env{HOME}/tools/oidn-2.5.1"
       }
     },
     {

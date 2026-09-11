@@ -517,3 +517,58 @@ worst, measured, whatever the thread's QoS.
   why); an SDI card is what would.
 - **Linux PTP.** Untested here. Its kernel software timestamps should narrow
   the error.
+
+## Complete USD: toolchain (M0)
+
+This is the first milestone of the plan to render all of USD: geometry,
+materials, lights, cameras, animation, curves, volumes and render settings.
+The work proceeds in two techniques, an interactive raster and a path tracer,
+with MaterialX feeding a Slang generator and `lrt view` as the viewer.
+
+### What changed and why
+
+- **OpenUSD 26.08 with MaterialX 1.39.5 and OpenVDB 10.1 (with NanoVDB)**,
+  in `~/tools/usd-26.08-mx` via `scripts/build-usd.sh`.
+  - **MaterialX:** 1.39.5 is the first release with a Slang shader generator
+    (`MaterialXGenSlang`, on by default). `MATERIALX_SLANG_RHI_SOURCE_DIR`
+    stays unset, since MaterialX's own Slang renderer would bring a second
+    slang-rhi into the process.
+  - **Build fix:** CMake 4 refuses c-blosc's `cmake_minimum_required`, so the
+    script exports `CMAKE_POLICY_VERSION_MINIMUM=3.5`.
+  - **Switching over:** the new prefix sat beside the old one until the engine
+    passed 54/54 against it. Only then did the presets move.
+- **Open Image Denoise 2.5.1, built from source by `scripts/build-oidn.sh`.**
+  - **Why not the release binaries:** they ship their own `libtbb.12`, a
+    second TBB beside USD's under the same soname.
+  - **GPU devices only:** Metal here, CUDA on Linux. A denoiser that could
+    fall back to the CPU is a CPU fallback.
+  - **Sharing the queue:** `technique::Denoiser` opens OIDN on the engine's
+    own Metal command queue.
+  - **Result:** `lrt info` reports `denoiser OIDN 2.5.1 on Metal` and
+    `tbb libraries 1`. The `single_tbb` test holds that count.
+- **The aofx SDK is pinned.**
+  - `aofx_sdk_manifest` hashes every header in
+    `modules/aofx/sdk/include/aofx` against `tests/aofx/sdk_manifest.txt`.
+  - The headers differ from openFXplayer's only in the doc comments corrected
+    here; `kAbiVersion` is 22 in both.
+  - Re-recording the manifest is allowed only when openFXplayer's SDK moved
+    the same way.
+- **Four places where the CPU did arithmetic on data, now on the device.**
+  - **ParticleField and Points arrays:** Sync keeps the `VtValue`s Hydra hands
+    it, float or half, with no copy. The commit uploads their bytes, and
+    `scene/streams.slang` interleaves them into records. The per-element
+    interleave loops and the half-to-float conversions on the host are gone.
+    Half attributes draw as their float twins at p99 1.
+  - **Hydra render buffers:** `usd/aov_convert.slang` fills them. It converts
+    to the buffer's format, flips rows, and turns view z into the host
+    projection's [0, 1], one thread per output word. The per-pixel loops in
+    `RenderBuffer::WriteColour` and the render pass are gone.
+  - **StageRenderer:** it reads the engine's targets directly, so
+    `StageImage.depth` is now view z, as `lrt render` writes it.
+- **A latent configure bug.**
+  - **Symptom:** in a fresh build directory, Catch2 was never fetched.
+  - **Cause:** `include(Dependencies)` ran before `include(CTest)` defined
+    `BUILD_TESTING`.
+  - **Fix:** CTest is now included first.
+- **Deferred to M3:** GLFW and Dear ImGui arrive with `lrt view`, their only
+  user, rather than as unused dependencies now.

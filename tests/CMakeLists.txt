@@ -76,3 +76,10 @@ add_test(NAME aofx_sdk_manifest
 lrt_test(lrt_sched_tests
     SOURCES sched/test_clock.cpp
     LIBS lrt::sched lrt::io)
+
+# One TBB in the process: OpenUSD's oneTBB, which OIDN (built without its CPU
+# device) and everything else share.
+add_test(NAME single_tbb COMMAND lrt info)
+set_tests_properties(single_tbb PROPERTIES
+    ENVIRONMENT "LRT_SHADER_DIR=${LRT_SHADER_OUTPUT_DIR}"
+    PASS_REGULAR_EXPRESSION "tbb libraries  1 ")

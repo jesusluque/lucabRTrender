@@ -20,6 +20,7 @@
 #include <mach/thread_policy.h>
 #include <pthread.h>
 #elif defined(__linux__)
+#include <link.h>
 #include <sys/prctl.h>
 #endif
 
@@ -109,6 +110,28 @@ void sleepPrecisely(std::chrono::nanoseconds duration) {
 #else
     std::this_thread::sleep_for(duration);
 #endif
+}
+
+std::vector<std::string> loadedLibraries() {
+    std::vector<std::string> out;
+#if defined(__APPLE__)
+    const uint32_t count = _dyld_image_count();
+    for (uint32_t i = 0; i < count; ++i) {
+        if (const char* name = _dyld_get_image_name(i); name != nullptr) {
+            out.emplace_back(name);
+        }
+    }
+#elif defined(__linux__)
+    dl_iterate_phdr(
+        [](dl_phdr_info* info, size_t, void* data) {
+            if (info->dlpi_name != nullptr && info->dlpi_name[0] != '\0') {
+                static_cast<std::vector<std::string>*>(data)->emplace_back(info->dlpi_name);
+            }
+            return 0;
+        },
+        &out);
+#endif
+    return out;
 }
 
 std::filesystem::path executableDir() {

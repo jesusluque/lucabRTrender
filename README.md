@@ -49,8 +49,10 @@ Needs CMake ≥ 3.24, Ninja and a C++20 compiler, plus:
 
 - **Slang 2026.14.1** in `~/tools/slang`: one Slang for gpe's blobs and for
   slang-rhi.
-- **OpenUSD 26.08** in `~/tools/usd-26.08`: `scripts/build-usd.sh` builds it
-  once per machine.
+- **OpenUSD 26.08 with MaterialX 1.39.5 and OpenVDB** in
+  `~/tools/usd-26.08-mx`: `scripts/build-usd.sh` builds it once per machine.
+- **Open Image Denoise 2.5.1**, GPU devices only, in `~/tools/oidn-2.5.1`:
+  `scripts/build-oidn.sh`. Without it the engine has no denoiser.
 - **libwebp** (Homebrew `webp`) for SOG; without it, `.sog` is refused.
 - **The submodules**: `git submodule update --init --recursive` (gpe,
   genlock).

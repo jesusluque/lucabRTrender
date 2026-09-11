@@ -45,11 +45,12 @@ set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
 include(Warnings)
+# Before Dependencies: it fetches Catch2 only when BUILD_TESTING is on, and in a
+# fresh build directory nothing defines BUILD_TESTING until CTest does.
+include(CTest)
 include(Dependencies)
 include(Shaders)
 lrt_shader_copy_target()
-
-include(CTest)
 
 # --- submodules -----------------------------------------------------------------
 #

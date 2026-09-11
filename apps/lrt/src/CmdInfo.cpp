@@ -1,11 +1,18 @@
 // Copyright (c) 2026 lucabRTrender contributors.
 #include <cstdio>
+#include <filesystem>
 #include <string>
 
 #include <slang.h>
 
 #include "Commands.h"
+#include "lrt/core/Platform.h"
 #include "lrt/gpu/Device.h"
+#include "lrt/technique/Denoiser.h"
+
+#if LRT_HAVE_MATERIALX
+#include <MaterialXCore/Util.h>
+#endif
 
 namespace lrt::cli {
 
@@ -40,6 +47,28 @@ void addInfo(CLI::App& app) {
         }
         std::printf("slang          %s\n", spGetBuildTagString());
         std::printf("shaders        %s\n", gpu::shaderDirectory().string().c_str());
+#if LRT_HAVE_MATERIALX
+        std::printf("materialx      %s\n", MaterialX::getVersionString().c_str());
+#else
+        std::printf("materialx      not built\n");
+#endif
+        if (auto denoiser = technique::Denoiser::create(**device)) {
+            std::printf("denoiser       %s\n", denoiser->description().c_str());
+        } else {
+            std::printf("denoiser       none: %s\n", denoiser.error().toString().c_str());
+        }
+        // One TBB in the process, or two schedulers fight over the cores and
+        // two sets of thread-local state disagree.
+        int tbb = 0;
+        std::string tbbPaths;
+        for (const std::string& library : platform::loadedLibraries()) {
+            const std::string name = std::filesystem::path(library).filename().string();
+            if (name.rfind("libtbb.", 0) == 0 || name.rfind("libtbb-", 0) == 0) {
+                ++tbb;
+                tbbPaths += " " + library;
+            }
+        }
+        std::printf("tbb libraries  %d%s\n", tbb, tbbPaths.c_str());
     });
 }
 
