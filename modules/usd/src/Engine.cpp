@@ -135,6 +135,18 @@ void Engine::setMaterial(const pxr::SdfPath& id, std::shared_ptr<void> mtlxDocum
     entry.pending = true;
 }
 
+void Engine::setLight(const pxr::SdfPath& id, const light::Light& lamp) {
+    const std::lock_guard<std::mutex> held(guard_);
+    lights_[id] = lamp;
+}
+
+void Engine::setLightSamples(uint32_t samples) { lightSamples_.store(std::max(samples, 1u)); }
+
+void Engine::removeLight(const pxr::SdfPath& id) {
+    const std::lock_guard<std::mutex> held(guard_);
+    lights_.erase(id);
+}
+
 void Engine::removeMaterial(const pxr::SdfPath& id) {
     const std::lock_guard<std::mutex> held(guard_);
     materials_.erase(id);
@@ -569,6 +581,7 @@ Result<void> Engine::render(const render::Projection& projection, const render::
         }
         return rows;
     };
+    std::vector<light::Light> lamps;
     std::vector<world::MeshInstance> meshInstances;
     std::vector<world::InstanceSet> meshSets;
     std::vector<render::SplatInstance> splats;
@@ -577,6 +590,10 @@ Result<void> Engine::render(const render::Projection& projection, const render::
     std::vector<lod::StreamingPool*> poolOf;   // per cut: its pool, if streamed
     {
         const std::lock_guard<std::mutex> held(guard_);
+        lamps.reserve(lights_.size());
+        for (const auto& [id, lamp] : lights_) {
+            lamps.push_back(lamp);
+        }
         for (const auto& [id, entry] : splats_) {
             if (!entry.visible) {
                 continue;
@@ -751,6 +768,27 @@ Result<void> Engine::render(const render::Projection& projection, const render::
     if (meshLayer) {
         LRT_TRY(scene_->update(meshInstances, projection, meshSets));
         gpu::CommandBatch batch(*device_);
+        // The frame's lights, and what a shadow ray traces against: rays
+        // shadow whatever route found the visibility, so the structure is
+        // built even where the rasteriser drew.
+        if (!lightTable_.has_value()) {
+            auto made = light::LightTable::create(*device_);
+            if (!made) return std::move(made).error();
+            lightTable_.emplace(std::move(*made));
+        }
+        LRT_TRY(lightTable_->set(lamps));
+        rhi::IAccelerationStructure* shadows = nullptr;
+        if (lightTable_->anyShadow() && caps.rayQuery && caps.accelerationStructure) {
+            if (!rayTracingScene_.has_value()) {
+                auto accel = world::RayTracingScene::create(*library_);
+                if (!accel) return std::move(accel).error();
+                rayTracingScene_.emplace(std::move(*accel));
+            }
+            if (visibility != MeshVisibility::Rays) {
+                LRT_TRY(rayTracingScene_->build(*scene_));   // the rays route has built it already
+            }
+            shadows = rayTracingScene_->topLevel();
+        }
         // What a material needs wherever it is evaluated: shading always,
         // visibility only where a material cuts its samples away.
         technique::MaterialFrame frame;
@@ -759,6 +797,9 @@ Result<void> Engine::render(const render::Projection& projection, const render::
         frame.records = &materialRecords_;
         frame.blob = &materialBlob_;
         frame.textures = textures_.get();
+        frame.lights = &*lightTable_;
+        frame.samples = lightSamples_.load();
+        frame.shadows = shadows;
         const technique::MaterialFrame* cutouts = materialCutouts_ ? &frame : nullptr;
         switch (visibility) {
             case MeshVisibility::Automatic:

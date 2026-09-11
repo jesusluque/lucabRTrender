@@ -31,6 +31,7 @@
 #include <pxr/base/gf/vec3h.h>
 #include <cstdio>
 
+#include "lrt/technique/Visibility.h"
 #include "lrt/io/Readers.h"
 #include "lrt/lod/Lod.h"
 #include "lrt/lod/Lrtc.h"
@@ -341,8 +342,8 @@ TEST_CASE("a UsdGeomMesh draws through Hydra where, how deep and how lit it anal
     }
     auto renderer = usd::StageRenderer::open(path);
     if (!renderer) FAIL(renderer.error().toString());
-    const uint32_t w = 160;
-    const uint32_t h = 120;
+    const uint32_t w = 161;
+    const uint32_t h = 121;
     auto image = (*renderer)->render("/Camera", 0.0, w, h);
     if (!image) FAIL(image.error().toString());
 
@@ -1504,4 +1505,137 @@ TEST_CASE("the codeless lrt schemas register, with their defaults", "[usd][schem
     CHECK(mode == TfToken("grade"));
     VtValue allowed;
     CHECK(group.GetAttribute(TfToken("primvars:lrt:edit:shape")).GetMetadata(TfToken("allowedTokens"), &allowed));
+}
+
+TEST_CASE("a UsdLux light through Hydra lights a Lambert plane as the closed form says",
+          "[usd][gpu][mesh][lights]") {
+    LRT_REQUIRE_GPU(gpu);
+    if (!gpu->device->caps().rasterization) {
+        SKIP("no rasterisation on this device");
+    }
+    const fs::path path = scratch("light_sphere.usda");
+    {
+        std::ofstream out(path);
+        out << kSquareStage
+            << "def SphereLight \"Key\" (\n    prepend apiSchemas = [\"ShadowAPI\"]\n)\n{\n"
+               "    bool inputs:shadow:enable = 0\n"
+               "    float inputs:radius = 0.4\n"
+               "    float inputs:intensity = 1\n"
+               "    bool inputs:normalize = 0\n"
+               "    color3f inputs:color = (1, 1, 1)\n"
+               "    double3 xformOp:translate = (0, 0, -3)\n"
+               "    uniform token[] xformOpOrder = [\"xformOp:translate\"]\n}\n"
+               "def Scope \"Materials\"\n{\n"
+               "    def Material \"Mat\"\n    {\n"
+               "        token outputs:mtlx:surface.connect = </Materials/Mat/Surface.outputs:out>\n"
+               "        def Shader \"Surface\"\n        {\n"
+               "            uniform token info:id = \"ND_surface\"\n"
+               "            token inputs:bsdf.connect = </Materials/Mat/Diffuse.outputs:out>\n"
+               "            token outputs:out\n        }\n"
+               "        def Shader \"Diffuse\"\n        {\n"
+               "            uniform token info:id = \"ND_oren_nayar_diffuse_bsdf\"\n"
+               "            color3f inputs:color = (0.8, 0.8, 0.8)\n"
+               "            float inputs:roughness = 0\n"
+               "            token outputs:out\n        }\n    }\n}\n";
+    }
+    const uint32_t w = 161;
+    const uint32_t h = 121;
+    // The same stage with no light at all: the headlight, which the analytic
+    // square checks exactly. If this is 0 and 0, the material is Lambert of
+    // albedo 0.8 and whatever the lit image does is the light's doing.
+    {
+        const fs::path dark = scratch("light_none.usda");
+        {
+            std::ifstream in(path);
+            std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+            const size_t at = text.find("def SphereLight");
+            const size_t end = text.find("def Scope \"Materials\"");
+            REQUIRE(at != std::string::npos);
+            REQUIRE(end != std::string::npos);
+            text.erase(at, end - at);
+            std::ofstream out(dark);
+            out << text;
+        }
+        auto plain = usd::StageRenderer::open(dark);
+        if (!plain) FAIL(plain.error().toString());
+        auto lit = (*plain)->render("/Camera", 0.0, w, h);
+        if (!lit) FAIL(lit.error().toString());
+        const auto c = squareMismatches(*gpu, *lit, {0.8F, 0.8F, 0.8F});
+        std::printf("  the same plane by the headlight: %u covered, %u coverage and %u colour mismatches\n", c[2],
+                    c[0], c[1]);
+        CHECK(c[0] == 0);
+        CHECK(c[1] == 0);
+    }
+    auto renderer = usd::StageRenderer::open(path);
+    if (!renderer) FAIL(renderer.error().toString());
+    // The closed form is what the estimator converges to: ask for enough
+    // samples that what is left is the light, not the noise.
+    (*renderer)->setLightSamples(4096);
+    auto image = (*renderer)->render("/Camera", 0.0, w, h);
+    if (!image) FAIL(image.error().toString());
+
+    render::Camera camera;
+    camera.lens.focal = 35.0;
+    camera.lens.haperture = 24.576;
+    camera.lens.nearZ = 0.1;
+    camera.lens.farZ = 1000.0;
+    const render::Projection projection = render::projectionFor(camera, w, h);
+    gpu::BufferDesc colourDesc;
+    colourDesc.bytes = image->rgba.size() * sizeof(float);
+    colourDesc.elementBytes = 16;
+    auto colours = gpu::Buffer::create(*gpu->device, colourDesc, image->rgba.data());
+    auto depth = gpu::Buffer::fromSpan<float>(*gpu->device, image->depth, "depth");
+    REQUIRE(colours);
+    REQUIRE(depth);
+    auto check = gpu::ComputeKernel::create(*gpu->library, "lrt/test/lambert_irradiance", "lambertIrradiance");
+    if (!check) FAIL(check.error().toString());
+    gpu::Buffer counts = test::uintBuffer(*gpu->device, 2, "counts");
+    gpu::Buffer worst = test::uintBuffer(*gpu->device, 5, "worst");
+    const std::array<float, 12> toWorld = aofx::xform::inverseAffine(projection.worldToView).rows3x4();
+    {
+        gpu::CommandBatch batch(*gpu->device);
+        check->dispatch(batch, {1, 1, 1}, [&](rhi::ShaderCursor cursor) {
+            cursor["colour"].setBinding(colours->rhi());
+            cursor["depth"].setBinding(depth->rhi());
+            cursor["counts"].setBinding(counts.rhi());
+            cursor["worst"].setBinding(worst.rhi());
+            technique::setCamera(cursor["camera"], projection, w, h);
+            rhi::ShaderCursor p = cursor["plane"];
+            p["kind"].setData(uint32_t{0});   // a sphere
+            p["vertices"].setData(uint32_t{512});
+            p["row0"].setData(toWorld.data(), sizeof(float) * 4);
+            p["row1"].setData(toWorld.data() + 4, sizeof(float) * 4);
+            p["row2"].setData(toWorld.data() + 8, sizeof(float) * 4);
+            const float centre[4] = {0.0F, 0.0F, -3.0F, 0.0F};
+            const float axisX[4] = {1.0F, 0.0F, 0.0F, 0.4F};
+            const float axisY[4] = {0.0F, 1.0F, 0.0F, 0.0F};
+            const float normal[4] = {0.0F, 0.0F, 1.0F, 0.8F};
+            const float radiance[4] = {1.0F, 1.0F, 1.0F, 0.02F};
+            const float none[4] = {0.0F, 0.0F, 0.0F, 0.0F};
+            p["centre"].setData(centre, sizeof(centre));
+            p["axisX"].setData(axisX, sizeof(axisX));
+            p["axisY"].setData(axisY, sizeof(axisY));
+            p["normal"].setData(normal, sizeof(normal));
+            p["radiance"].setData(radiance, sizeof(radiance));
+            p["occluder"].setData(none, sizeof(none));
+            p["occluderAxes"].setData(none, sizeof(none));
+        });
+        REQUIRE(batch.submit(true));
+    }
+    uint32_t c[2] = {0, 0};
+    float probe[5] = {0.0F, 0.0F, 0.0F, 0.0F, 0.0F};
+    REQUIRE(counts.read(*gpu->device, 0, sizeof(c), c));
+    REQUIRE(worst.read(*gpu->device, 0, sizeof(probe), probe));
+    const float relative = probe[0];
+    // The centre of the plane sees the sphere on its axis: d = 2, r = 0.4,
+    // so E = pi r^2 / d^2 and a Lambert surface returns albedo E / pi.
+    const float* centre = image->rgba.data() + (size_t{h} / 2 * w + w / 2) * 4;
+    const float* offAxis = image->rgba.data() + (size_t{h} / 2 * w + w / 2 + 40) * 4;
+    const float expected = 0.8F * 0.4F * 0.4F / (2.0F * 2.0F);
+    std::printf("  UsdLuxSphereLight: %u pixels, %u beyond 2%%, worst %.4f; centre %.5f (closed form %.5f), "
+                "40 px off axis %.5f against %.5f at (%.3f, %.3f, %.3f)\n",
+                c[0], c[1], double(relative), double(centre[0]), double(expected), double(offAxis[0]),
+                double(probe[1]), double(probe[2]), double(probe[3]), double(probe[4]));
+    CHECK(c[0] > 800);
+    CHECK(c[1] == 0);
 }

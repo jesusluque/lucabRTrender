@@ -185,6 +185,14 @@ Result<void> MaterialShading::shade(gpu::CommandBatch& batch, const VisibilityTa
     if (!ids) return std::move(ids).error();
     kernel_->dispatch(batch, {targets.width, targets.height, 1}, [&](rhi::ShaderCursor cursor) {
         bindMaterialFrame(cursor, frame, projection);
+        // The lights are this kernel's alone.
+        if (frame.lights != nullptr) {
+            frame.lights->bind(cursor);
+            cursor["lighting"]["samples"].setData(frame.samples);
+        }
+        if (frame.shadows != nullptr) {
+            cursor["shadowScene"].setBinding(frame.shadows);
+        }
         cursor["visibility"].setBinding((*ids).get());
         cursor["colour"].setBinding(out.colour.rhi());
         cursor["depth"].setBinding(out.depth.rhi());

@@ -50,6 +50,9 @@ public:
     /// `lrt:settleStreams`: false (default) for a viewport, which lets streamed
     /// assets fill in over frames; true for an image that must be complete.
     [[nodiscard]] bool GetSettleStreams() const;
+
+    /// Samples per light per pixel ("lrt:lightSamples"), at least one.
+    [[nodiscard]] uint32_t GetLightSamples() const;
     /// `lrt:visibility`: "automatic" (default), "raster", "rays" or "bvh".
     [[nodiscard]] lrt::usd::MeshVisibility GetMeshVisibility() const;
 

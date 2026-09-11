@@ -92,8 +92,9 @@ struct MaterialFrame {
 /// The scene buffers shaders/lrt/technique/surface.slang reads, by name.
 void bindScene(rhi::ShaderCursor cursor, const world::GpuScene& scene);
 
-/// Those, and material_lookup.slang's tables, textures, view to world and
-/// the frame's lights.
+/// Those, and material_lookup.slang's tables, textures and view to world.
+/// Not the lights: only the shading kernel declares them, since the cutout
+/// visibility passes evaluate a material for its opacity alone.
 void bindMaterialFrame(rhi::ShaderCursor cursor, const MaterialFrame& frame, const render::Projection& projection);
 
 }   // namespace lrt::technique

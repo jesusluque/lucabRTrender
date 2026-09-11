@@ -6,6 +6,7 @@ set(LRT_USD_SOURCES
     src/ParticleField.cpp
     src/Mesh.cpp
     src/Instancer.cpp
+    src/Light.cpp
     src/Material.cpp
     src/Points.cpp
     src/RenderPass.cpp

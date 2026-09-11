@@ -121,6 +121,11 @@ Result<void> StageRenderer::setMeshVisibility(const std::string& route) {
     return ok();
 }
 
+void StageRenderer::setLightSamples(uint32_t samples) {
+    impl_->delegate->SetRenderSetting(TfToken("lrt:lightSamples"),
+                                      VtValue(static_cast<int>(std::max(samples, 1u))));
+}
+
 double StageRenderer::timeCodesPerSecond() const {
     return impl_->stage->GetTimeCodesPerSecond();
 }
