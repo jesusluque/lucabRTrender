@@ -24,9 +24,10 @@ struct InstancingParams {
     uint  transforms;
     uint  mesh;           // records
     uint  primId;
-    uint  first;          // records: first output slot
+    uint  first;          // records: the sets' first record
     uint  flags;
-    uint  pad0; uint pad1;
+    uint  sets;           // records: how many sets
+    uint  pad0;
     float c0r; float c0g; float c0b; float c0a;   // records: displayColor, opacity
     // a 3x4 in rows: the level's instancer transform, or (records) the prototype's own
     float m00; float m01; float m02; float m03;
@@ -47,6 +48,21 @@ StructuredBuffer<float4>            parentRows;       // compose: 3 per parent i
 StructuredBuffer<float4>            levelRows;        // compose: 3 per level instance
 RWStructuredBuffer<float4>          rows;             // level, compose: 3 per output
 RWStructuredBuffer<InstanceRecord>  records;
+
+/// An instanced mesh: its instances' chain rows are a run of `setRows`, and
+/// its records a run after the scene's single instances (GpuScene.cpp).
+struct SetRecord {
+    float4 prototype0; float4 prototype1; float4 prototype2;   // the prototype's own transform, 3x4 rows
+    float4 colour;       // displayColor rgb, displayOpacity
+    uint   first;        // its first instance among the sets
+    uint   count;
+    uint   mesh;
+    uint   primId;
+    uint   flags;        // bit 0: double sided
+    uint   pad0; uint pad1; uint pad2;
+};
+StructuredBuffer<SetRecord>         sets;             // records: in order of `first`
+StructuredBuffer<float4>            setRows;          // records: 3 per instance, every set's chain
 ConstantBuffer<InstancingParams>    params;
 
 /// A float64 from its two words (little-endian), rounded to float -- Metal
@@ -153,6 +169,24 @@ void instancerCompose(uint3 tid: SV_DispatchThreadID) {
     rows[k * 3 + 2] = m[2];
 }
 
+/// The set holding instance `i` (counted among the sets): a binary search
+/// over the sets' firsts.
+uint setOf(uint i) {
+    uint lo = 0;
+    uint hi = params.sets;
+    while (hi - lo > 1) {
+        const uint mid = (lo + hi) / 2;
+        if (sets[mid].first <= i) {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    return lo;
+}
+
+/// Every instanced set's records in one dispatch: instance i's chain times
+/// its set's prototype, to view, with the normal matrix.
 [shader("compute")]
 [numthreads(256, 1, 1)]
 void instanceRecords(uint3 tid: SV_DispatchThreadID) {
@@ -160,8 +194,9 @@ void instanceRecords(uint3 tid: SV_DispatchThreadID) {
     if (i >= params.count) {
         return;
     }
-    const float4x4 chain = full(float3x4(levelRows[i * 3], levelRows[i * 3 + 1], levelRows[i * 3 + 2]));
-    const float4x4 world = mul(chain, full(paramRows(false)));
+    const SetRecord set = sets[setOf(i)];
+    const float4x4 chain = full(float3x4(setRows[i * 3], setRows[i * 3 + 1], setRows[i * 3 + 2]));
+    const float4x4 world = mul(chain, full(float3x4(set.prototype0, set.prototype1, set.prototype2)));
     const float4x4 view = mul(full(paramRows(true)), world);
     // The normal matrix: the inverse transpose of view's 3x3, by cofactors.
     const float3 a = view[0].xyz;
@@ -182,10 +217,10 @@ void instanceRecords(uint3 tid: SV_DispatchThreadID) {
     record.world0 = world[0];
     record.world1 = world[1];
     record.world2 = world[2];
-    record.colour = float4(params.c0r, params.c0g, params.c0b, params.c0a);
-    record.mesh = params.mesh;
-    record.primId = params.primId;
-    record.instanceId = i;
-    record.flags = params.flags;
+    record.colour = set.colour;
+    record.mesh = set.mesh;
+    record.primId = set.primId;
+    record.instanceId = i - set.first;
+    record.flags = set.flags;
     records[params.first + i] = record;
 }

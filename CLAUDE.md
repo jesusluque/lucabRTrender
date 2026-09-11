@@ -12,8 +12,10 @@ build/macos-arm64-debug/bin/lrt_lod_tests "chunks*"       # one Catch2 case by n
 cmake --build build/macos-arm64-debug --target lrt_render_tests   # one test binary
 ```
 
-- **Test binaries** are `lrt_<area>_tests` (gpu, scene, render, lod, usd,
-  gpu_host, aofx, sched), from `tests/<area>/`.
+- **Test binaries** are `lrt_<area>_tests` (gpu, scene, render, geom,
+  technique, lod, usd, gpu_host, aofx, sched), from `tests/<area>/`.
+  `lrt_storm_oracle_tests` compares Hydra outputs with Storm's; it needs
+  `HDX_MSAA_SAMPLE_COUNT=1` in the environment, which ctest sets.
 - **Timings** come from the release preset's `lrt bench`.
 - **Checking a shader compiles** without a build:
   `~/tools/slang/bin/slangc shaders/lrt/<dir>/<file>.slang -I shaders -target metal -entry <entry> -stage compute -o /dev/null`.
@@ -67,7 +69,9 @@ the ones above it.
 | gpu_host | gpe adopting slang-rhi's device: one `MTLDevice` or CUDA context, buffers shared without copies |
 | scene | `CloudLoader`: raw records uploaded, decoded on the GPU into `GpuSplats` / `GpuPoints` |
 | render | `TileRasterizer`, `GaussianRayTracer`, `PointRasterizer`, `ReferenceRenderer`, `Camera`/`Projection`, `SplatEdit` |
-| technique | how a frame is drawn from the scene; today `Denoiser` (OIDN on the engine's own Metal queue / CUDA stream) |
+| geom | `MeshBuilder`: Hydra meshes triangulated, smooth-normalled and their primvars expanded on the GPU, in `HdMeshUtil`'s order |
+| world | `GpuScene` (vertex/index/primvar pools, instance records), `Instancing` (Hydra instancer chains), `RayTracingScene` (BLAS/TLAS), `BvhScene` (two-level compute LBVH) |
+| technique | how a frame is drawn: `VisibilityRaster` / `VisibilityTrace` / `VisibilityBvh` (same ids), `HeadlightShading`, `AovShading`, `Denoiser` (OIDN on the engine's own Metal queue) |
 | lod | `LodBuilder`, `CutSelector`; `Lrtc.h` for the `.lrtc` reader/writer and `StreamingPool` |
 | usd | `Engine`, `StageRenderer`, `Export`; the `hdLrt` plugin; codeless schemas in `modules/usd/schemas` |
 | aofx | openFXplayer's plugin SDK (ABI 22) and host |
@@ -82,11 +86,16 @@ How the pieces fit:
   renderer takes. `CutSelector::select` turns `LodInstance`s into per-frame
   `SplatInstance`s whose clouds it owns.
 - **Shaders** mirror the modules under `shaders/lrt/`: common, algo, scene
-  (decode), splat, rt, points, reference, lod. The ray tracer's two routes
+  (decode), splat, rt, points, reference, lod, geom, world, technique, usd. The ray tracer's two routes
   share `rt/rt_integrate.slang`.
 - **Hydra.** `Sync` (any thread) only hands CPU records to `Engine` under a
   lock. The render pass thread commits (uploads, opens `.lrtc`) and renders,
   so the device has one caller.
+- **Meshes.** A visibility buffer holds (instance + 1, triangle) per pixel.
+  Shading and AOVs rebuild the hit from it (`technique/surface.slang`), so all
+  three visibility routes shade alike. Meshes and points are composited by
+  view z and handed to the splat rasteriser as its opaque `under` layer.
+  Hydra render buffers are bottom row first, as Storm's.
 - **Levels of detail.**
   - Splats are sorted by Morton code, and an octree level's cells are runs of
     that order.

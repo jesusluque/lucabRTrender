@@ -623,3 +623,164 @@ What the next milestones build on, in `modules/gpu`.
     Checked: a against 1.1·a gives p99 0.0964 against an exact 1/11.
   - **`countDifferent`:** counts the differing entries of two uint buffers,
     per chunk, then reduces the counts. It is meant for ID AOVs.
+
+## Complete USD: geometry and visibility (M2)
+
+`UsdGeomMesh`, PointInstancer and native instancing, drawn through Hydra
+with ids, depth, normals and primvars as render outputs. There are three
+routes to visibility, and all of them agree with Storm.
+
+### On the device, in Hydra's order
+
+- **`geom::MeshBuilder`.**
+  - Hydra's topology is triangulated in `HdMeshUtil`'s fan order, with holes
+    and left-handed orientation.
+  - Smooth normals use `Hd_SmoothNormals`' formula: cross products per
+    corner, scattered to points through a radix sort.
+  - Primvars of every interpolation are expanded per triangle corner.
+    Indexed primvars are resolved on the device, and doubles are decoded
+    from their two words.
+  - Checked:
+    - Areas agree with the faces'.
+    - A height field's normals come within 1.1e-7 rad of a brute-force sum.
+    - A sphere's normals come within 1.1e-6 rad of radial.
+- **`world::GpuScene`.**
+  - Every mesh sits in shared pools (positions, indices, corners, faces,
+    primvar values) with one 64-byte record each.
+  - Every drawn copy has a 176-byte `InstanceRecord`: object to view and its
+    normal matrix, object to world, look, ids and the double-sided flag.
+  - The pools are repacked only when the mesh set changes, which is what
+    `generation()` counts.
+- **`world::Instancing`.**
+  - Each level is composed as Storm composes it:
+    `instancer * T * R * S * instanceTransform`, nested
+    `parent[i] * level[j]`, and read from float, half or double primvars.
+  - A chain is recomposed only when an instancer in it changes.
+  - Instanced sets are pooled on the device, and one dispatch writes every
+    set's records: a thread binary-searches its set. This used to be a
+    dispatch per set, 32 ms of command recording for Kitchen_set_instanced's
+    1462 sets; it is now 0.4 ms.
+
+### Three routes, one visibility buffer
+
+Each route writes (instance + 1, triangle) per pixel. Shading and AOVs
+rebuild the hit from those two numbers with Möller–Trumbore in view space
+(`technique/surface.slang`), so the routes shade alike.
+
+- **`VisibilityRaster`.**
+  - Reversed infinite Z, with depth `near / z` in D32Float.
+  - One draw per mesh with `instanceCount`, because Metal has no indirect
+    draws.
+  - Every draw shares one root object. A draw's mesh and instances arrive
+    as its start vertex and start instance.
+  - On Metal, `vertex_id` and `instance_id` already include those starts.
+    Slang's Vulkan and D3D output subtracts them. `Caps::drawIdsIncludeStart`
+    records the difference, and `tests/gpu/test_textures.cpp` measures it.
+- **`VisibilityTrace`.**
+  - A BLAS per mesh over the pools, rebuilt when they are repacked. A TLAS
+    per frame.
+  - A kernel writes the instance descriptors from the records, in the
+    backend's layout: 64 B generic/D3D12/Vulkan, 80 B OptiX, 68 B Metal.
+- **`VisibilityBvh`.**
+  - A Karras LBVH per mesh and one over the instances, from the splat ray
+    tracer's build kernels.
+  - It is for devices without ray tracing hardware.
+- **Single-sided meshes keep their front only**, as in Storm.
+  - Raster: `SV_IsFrontFace`, flipped when the transform mirrors.
+  - Hardware rays: cull flags, with double-sided instances opting out.
+  - BVH: `det < 0` in object space.
+- **Which route.**
+  - `lrt:visibility` (`lrt stage --visibility`) selects `automatic`,
+    `raster`, `rays` or `bvh`.
+  - Automatic takes rays where the device has ray queries, else raster,
+    else the BVH. Rays win on this machine at every size measured (below).
+- **Layers.** Meshes and points are composited by view z into the opaque
+  layer the splat rasteriser draws over.
+
+### Hydra outputs
+
+- **Render outputs.** primId, instanceId and elementId (Int32, cleared to
+  −1), Neye and normal (Float32Vec3), `primvars:NAME`, colour and depth.
+- **Conversion.** `usd/aov_convert.slang` converts on the device.
+- **Row order.** Buffers are bottom row first, which is Storm's and
+  hdEmbree's layout. M0 had flipped them; Storm showed it.
+
+### How it is checked
+
+All comparisons are kernels, and the numbers are from the last run.
+
+- **Analytic square.** 8281 pixels covered, with 0 coverage and 0 colour
+  mismatches, and depth exact. Through Hydra: 8464 pixels, all exact.
+- **Instancing.**
+  - Six instances of one mesh against six meshes: identical colour and
+    depth bits.
+  - Six nested instances against six authored: relMSE 1.2e-9. The residue
+    is half-precision rotations.
+  - A PointInstancer against authored transforms: relMSE 3.4e-9.
+- **The routes against each other.**
+  - On a bumpy grid with twelve squares (single-sided, double-sided,
+    mirrored), 0 of 23654 interior pixels differ between raster and either
+    ray route.
+  - Through Hydra, on a scene with instancing, culling and a mirrored mesh,
+    the three routes differ in 15 and 6 id words out of 230400. Those words
+    lie along a grazing edge.
+- **Culling.** A single-sided square shows 6723 pixels from the front and 0
+  from the back, mirrored or not.
+- **Layers.** Splats and points behind an opaque wall change 0 pixels. In
+  front of it they change 24137, on all three routes.
+- **Storm as the oracle** (`lrt_storm_oracle_tests`, in its own process).
+  - Setup: Kitchen_set at 480×270, compared on primId segmentation,
+    coverage, depth and Neye.
+
+    | Route | Coverage | Segmentation | Depth, worst | Neye > 6/255 |
+    |---|---|---|---|---|
+    | raster | 0 differ | 18 of 57219 | 1.2e-6 | 17 |
+    | rays | 4 differ | 41 of 57236 | 6.3e-6 | 17 |
+    | bvh | 4 differ | 36 of 57233 | 6.3e-6 | 17 |
+
+  - **Why segmentation.** Storm numbers prims differently from the engine,
+    so ids are compared as a segmentation: a pixel whose 3×3 neighbourhood
+    is one prim in one image must be one prim in the other.
+  - **Why Neye in bytes.** Storm writes Neye into UNorm8, where negative
+    components clamp. Ours is compared in that space.
+  - **Storm renders single-sampled.**
+    - With multisampling, Metal cannot resolve an R32Sint target. The Metal
+      validation layer asserts it, and without the layer the id buffers come
+      back with their upper 16 bits unwritten.
+    - OpenUSD reads `HDX_MSAA_SAMPLE_COUNT` as its libraries load, so ctest
+      sets it in the environment and the test refuses to run without it.
+
+### Measured (M5 Pro, release)
+
+- **Method.** `lrt stage --frames 40 --visibility <route>`, median frame
+  after the first.
+- **What a frame includes.** Hydra sync, visibility, headlight shading, the
+  splat pass (empty here) and reading colour and depth back.
+- **Camera.** The oracle's: eye (500, −350, 350), focal 20.
+
+| Scene | Size | raster | rays | bvh |
+|---|---|---|---|---|
+| Kitchen_set (1788 meshes) | 480×270 | 18.0 ms | 4.8 ms | 8.9 ms |
+| Kitchen_set | 1920×1080 | 31.7 ms | 19.2 ms | 29.2 ms |
+| Kitchen_set_instanced (1462 sets) | 480×270 | 15.2 ms | 5.4 ms | 9.0 ms |
+| Kitchen_set_instanced | 1920×1080 | 29.1 ms | 19.2 ms | 28.6 ms |
+
+- **First frame.** 3.2–4.3 s with raster or rays, 5.5–6.5 s with the BVH.
+  That is the stage load, mesh builds and shader compiles on a cold cache.
+- **Where raster's time goes.** Recording 1800 draws costs the host about
+  8 ms, even with one root object: slang-rhi writes render state and looks
+  up binding data per draw.
+
+### Not done, not verified
+
+- **Draw count.** Raster pays per draw, and single-instance meshes could
+  share draws.
+- **The TLAS is rebuilt every frame**, not refit.
+- **Other backends.** Vulkan and D3D12 start-location semantics are
+  unverified. So are the OptiX descriptor layout on real hardware and
+  visibility on CUDA, which has no raster.
+- **Storm oracle coverage.** One camera on one stage. Negative Neye
+  components are not compared, because Storm clamps them.
+- **Arrives with later milestones.** geomSubsets and materials (M4).
+  Deformation and motion, which need BLAS refit (M7). Subdivision, curves
+  and implicit surfaces (M8).

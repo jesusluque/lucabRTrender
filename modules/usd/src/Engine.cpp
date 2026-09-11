@@ -490,9 +490,12 @@ Result<void> Engine::render(const render::Projection& projection, const render::
     const bool drawMeshes = !meshInstances.empty() || !meshSets.empty();
     const gpu::Caps& caps = device_->caps();
     if (visibility == MeshVisibility::Automatic) {
-        visibility = caps.rasterization                             ? MeshVisibility::Raster
-                     : caps.rayQuery && caps.accelerationStructure ? MeshVisibility::Rays
-                                                                   : MeshVisibility::Bvh;
+        // Rays first: a draw costs the host a few microseconds to record, and
+        // Kitchen_set's 1800 of them outweigh a frame of rays at any size
+        // measured (docs/decisions.md, M2).
+        visibility = caps.rayQuery && caps.accelerationStructure ? MeshVisibility::Rays
+                     : caps.rasterization                         ? MeshVisibility::Raster
+                                                                  : MeshVisibility::Bvh;
     }
     if (drawMeshes && visibility == MeshVisibility::Raster && !caps.rasterization) {
         return Error(ErrorCode::Unsupported, "mesh visibility by raster: the device does not rasterise");

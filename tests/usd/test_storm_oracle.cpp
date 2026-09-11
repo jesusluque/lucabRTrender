@@ -111,16 +111,13 @@ Outputs storm(const fs::path& stagePath, const render::Camera& camera, uint32_t 
     return out;
 }
 
-Outputs engineOutputs(const fs::path& stagePath, const render::Camera& camera, uint32_t w, uint32_t h) {
-    auto renderer = usd::StageRenderer::open(stagePath);
-    if (!renderer) FAIL(renderer.error().toString());
-    (*renderer)->requestOutputs({"primId", "Neye"});
-    auto image = (*renderer)->render(camera, 0.0, w, h);
+Outputs engineOutputs(usd::StageRenderer& renderer, const render::Camera& camera, uint32_t w, uint32_t h) {
+    auto image = renderer.render(camera, 0.0, w, h);
     if (!image) FAIL(image.error().toString());
     Outputs out;
-    auto primId = (*renderer)->mappedOutput("primId");
-    auto depth = (*renderer)->mappedOutput("depth");
-    auto eye = (*renderer)->mappedOutput("Neye");
+    auto primId = renderer.mappedOutput("primId");
+    auto depth = renderer.mappedOutput("depth");
+    auto eye = renderer.mappedOutput("Neye");
     REQUIRE(primId);
     REQUIRE(depth);
     REQUIRE(eye);
@@ -132,7 +129,8 @@ Outputs engineOutputs(const fs::path& stagePath, const render::Camera& camera, u
 
 }   // namespace
 
-TEST_CASE("Kitchen_set's geometry matches Storm's: prim ids, depth and eye normals", "[usd][gpu][oracle][storm]") {
+TEST_CASE("Kitchen_set's geometry matches Storm's on every visibility route: prim ids, depth and eye normals",
+          "[usd][gpu][oracle][storm]") {
     LRT_REQUIRE_GPU(gpu);
     const fs::path kitchen = fs::path(std::getenv("HOME")) / "tools/assets/Kitchen_set/Kitchen_set.usd";
     if (!fs::exists(kitchen)) {
@@ -153,62 +151,68 @@ TEST_CASE("Kitchen_set's geometry matches Storm's: prim ids, depth and eye norma
     camera.lens.focal = 20.0;
     camera.lens.nearZ = 1.0;
     camera.lens.farZ = 10000.0;
-    const Outputs ours = engineOutputs(kitchen, camera, w, h);
+    auto renderer = usd::StageRenderer::open(kitchen);
+    if (!renderer) FAIL(renderer.error().toString());
+    (*renderer)->requestOutputs({"primId", "Neye"});
     const Outputs theirs = storm(kitchen, camera, w, h);
-    REQUIRE(ours.primId.size() == theirs.primId.size());
-    REQUIRE(ours.depth.size() == theirs.depth.size());
-    REQUIRE(ours.eye.size() == theirs.eye.size() * 3);   // float3 against RGBA8
+    for (const char* route : {"raster", "rays", "bvh"}) {
+        if (auto set = (*renderer)->setMeshVisibility(route); !set) FAIL(set.error().toString());
+        const Outputs ours = engineOutputs(**renderer, camera, w, h);
+        REQUIRE(ours.primId.size() == theirs.primId.size());
+        REQUIRE(ours.depth.size() == theirs.depth.size());
+        REQUIRE(ours.eye.size() == theirs.eye.size() * 3);   // float3 against RGBA8
 
-    const auto upload = [&](const std::vector<uint8_t>& bytes, const char* label) {
-        gpu::BufferDesc desc;
-        desc.bytes = bytes.size();
-        desc.elementBytes = 4;
-        desc.label = label;
-        auto made = gpu::Buffer::create(*gpu->device, desc, bytes.data());
-        REQUIRE(made);
-        return *made;
-    };
-    gpu::Buffer primA = upload(ours.primId, "ours.primId");
-    gpu::Buffer primB = upload(theirs.primId, "storm.primId");
-    gpu::Buffer depthA = upload(ours.depth, "ours.depth");
-    gpu::Buffer depthB = upload(theirs.depth, "storm.depth");
-    gpu::Buffer eyeA = upload(ours.eye, "ours.Neye");
-    gpu::Buffer eyeB = upload(theirs.eye, "storm.Neye");
-    auto compare = gpu::ComputeKernel::create(*gpu->library, "lrt/test/oracle_compare", "oracleCompare");
-    if (!compare) FAIL(compare.error().toString());
-    gpu::Buffer counts = test::uintBuffer(*gpu->device, 9, "oracle.counts");
-    gpu::BufferDesc one;
-    one.bytes = 4;
-    one.elementBytes = 4;
-    auto worst = gpu::Buffer::create(*gpu->device, one);
-    REQUIRE(worst);
-    gpu::CommandBatch batch(*gpu->device);
-    compare->dispatch(batch, {1, 1, 1}, [&](rhi::ShaderCursor cursor) {
-        cursor["primA"].setBinding(primA.rhi());
-        cursor["primB"].setBinding(primB.rhi());
-        cursor["depthA"].setBinding(depthA.rhi());
-        cursor["depthB"].setBinding(depthB.rhi());
-        cursor["eyeA"].setBinding(eyeA.rhi());
-        cursor["eyeB"].setBinding(eyeB.rhi());
-        cursor["counts"].setBinding(counts.rhi());
-        cursor["worst"].setBinding(worst->rhi());
-        cursor["params"]["width"].setData(w);
-        cursor["params"]["height"].setData(h);
-        cursor["params"]["depthEpsilon"].setData(1e-5F);
-        cursor["params"]["byteTolerance"].setData(uint32_t{6});
-    });
-    REQUIRE(batch.submit(true));
-    uint32_t c[9] = {};
-    float depthWorst = 0.0F;
-    REQUIRE(counts.read(*gpu->device, 0, sizeof(c), c));
-    REQUIRE(worst->read(*gpu->device, 0, sizeof(depthWorst), &depthWorst));
-    const uint32_t segmentation = c[1] + c[8];
-    std::printf("  Kitchen_set against Storm: covered %u / %u (%u differ); %u of %u pixels one prim across 3x3 in only "
-                "one image; %u interior pixels: %u depths > 1e-5 (worst %.2e), %u normals > 6/255\n",
-                c[4], c[5], c[6], segmentation, c[7], c[0], c[2], double(depthWorst), c[3]);
-    CHECK(c[0] > 50000);
-    CHECK(uint64_t{c[6]} * 1000 <= uint64_t{w} * h);   // coverage: under 0.1% of the image
-    CHECK(uint64_t{segmentation} * 1000 <= c[7]);
-    CHECK(uint64_t{c[2]} * 1000 <= c[0]);
-    CHECK(uint64_t{c[3]} * 1000 <= c[0]);
+        const auto upload = [&](const std::vector<uint8_t>& bytes, const char* label) {
+            gpu::BufferDesc desc;
+            desc.bytes = bytes.size();
+            desc.elementBytes = 4;
+            desc.label = label;
+            auto made = gpu::Buffer::create(*gpu->device, desc, bytes.data());
+            REQUIRE(made);
+            return *made;
+        };
+        gpu::Buffer primA = upload(ours.primId, "ours.primId");
+        gpu::Buffer primB = upload(theirs.primId, "storm.primId");
+        gpu::Buffer depthA = upload(ours.depth, "ours.depth");
+        gpu::Buffer depthB = upload(theirs.depth, "storm.depth");
+        gpu::Buffer eyeA = upload(ours.eye, "ours.Neye");
+        gpu::Buffer eyeB = upload(theirs.eye, "storm.Neye");
+        auto compare = gpu::ComputeKernel::create(*gpu->library, "lrt/test/oracle_compare", "oracleCompare");
+        if (!compare) FAIL(compare.error().toString());
+        gpu::Buffer counts = test::uintBuffer(*gpu->device, 9, "oracle.counts");
+        gpu::BufferDesc one;
+        one.bytes = 4;
+        one.elementBytes = 4;
+        auto worst = gpu::Buffer::create(*gpu->device, one);
+        REQUIRE(worst);
+        gpu::CommandBatch batch(*gpu->device);
+        compare->dispatch(batch, {1, 1, 1}, [&](rhi::ShaderCursor cursor) {
+            cursor["primA"].setBinding(primA.rhi());
+            cursor["primB"].setBinding(primB.rhi());
+            cursor["depthA"].setBinding(depthA.rhi());
+            cursor["depthB"].setBinding(depthB.rhi());
+            cursor["eyeA"].setBinding(eyeA.rhi());
+            cursor["eyeB"].setBinding(eyeB.rhi());
+            cursor["counts"].setBinding(counts.rhi());
+            cursor["worst"].setBinding(worst->rhi());
+            cursor["params"]["width"].setData(w);
+            cursor["params"]["height"].setData(h);
+            cursor["params"]["depthEpsilon"].setData(1e-5F);
+            cursor["params"]["byteTolerance"].setData(uint32_t{6});
+        });
+        REQUIRE(batch.submit(true));
+        uint32_t c[9] = {};
+        float depthWorst = 0.0F;
+        REQUIRE(counts.read(*gpu->device, 0, sizeof(c), c));
+        REQUIRE(worst->read(*gpu->device, 0, sizeof(depthWorst), &depthWorst));
+        const uint32_t segmentation = c[1] + c[8];
+        std::printf("  Kitchen_set by %s against Storm: covered %u / %u (%u differ); %u of %u pixels one prim across 3x3 "
+                    "in only one image; %u interior pixels: %u depths > 1e-5 (worst %.2e), %u normals > 6/255\n",
+                    route, c[4], c[5], c[6], segmentation, c[7], c[0], c[2], double(depthWorst), c[3]);
+        CHECK(c[0] > 50000);
+        CHECK(uint64_t{c[6]} * 1000 <= uint64_t{w} * h);   // coverage: under 0.1% of the image
+        CHECK(uint64_t{segmentation} * 1000 <= c[7]);
+        CHECK(uint64_t{c[2]} * 1000 <= c[0]);
+        CHECK(uint64_t{c[3]} * 1000 <= c[0]);
+    }
 }

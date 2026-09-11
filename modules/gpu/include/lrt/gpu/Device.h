@@ -66,6 +66,10 @@ struct Caps {
     bool timestampQuery = false;
     bool half = false;
     bool unifiedMemory = false;
+    /// SV_VertexID and SV_InstanceID already count from a draw's start
+    /// locations (Metal's vertex_id and instance_id). Elsewhere Slang
+    /// subtracts them, and a shader adds SV_Start*Location back.
+    bool drawIdsIncludeStart = false;
     uint32_t optixVersion = 0;
 };
 

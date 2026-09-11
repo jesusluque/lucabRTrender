@@ -1,6 +1,8 @@
 // Copyright (c) 2026 lucabRTrender contributors.
 //
 // `lrt convert` and `lrt render --stage`: USD in and out.
+#include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <memory>
 #include <string>
@@ -97,6 +99,7 @@ void addStage(CLI::App& app) {
         double time = 0.0;
         std::vector<double> eye, target, up{0.0, 1.0, 0.0};
         double focal = 35.0, nearZ = 0.1, farZ = 100000.0;
+        uint32_t frames = 1;
     };
     auto o = std::make_shared<Options>();
     auto* cmd = app.add_subcommand("stage", "render a USD stage through the engine's Hydra delegate");
@@ -113,6 +116,8 @@ void addStage(CLI::App& app) {
     cmd->add_option("--near", o->nearZ, "its near clipping distance");
     cmd->add_option("--far", o->farZ, "its far clipping distance");
     cmd->add_option("-o,--output", o->output, "EXR path");
+    cmd->add_option("--frames", o->frames,
+                    "render this many times and print the time a frame takes (Hydra sync, drawing and the readback)");
     cmd->callback([o] {
         uint32_t width = 0, height = 0;
         if (std::sscanf(o->size.c_str(), "%ux%u", &width, &height) != 2) {
@@ -129,16 +134,31 @@ void addStage(CLI::App& app) {
             throw CLI::RuntimeError(1);
         }
         Result<usd::StageImage> image = Error(ErrorCode::InvalidArgument, "no image");
-        if (o->eye.size() == 3 && o->target.size() == 3) {
-            render::Camera camera = render::Camera::lookingAt({o->eye[0], o->eye[1], o->eye[2]},
-                                                              {o->target[0], o->target[1], o->target[2]},
-                                                              {o->up[0], o->up[1], o->up[2]});
-            camera.lens.focal = o->focal;
-            camera.lens.nearZ = o->nearZ;
-            camera.lens.farZ = o->farZ;
-            image = (*renderer)->render(camera, o->time, width, height, o->technique);
-        } else {
-            image = (*renderer)->render(o->camera, o->time, width, height, o->technique);
+        std::vector<double> ms;
+        for (uint32_t frame = 0; frame < std::max(o->frames, uint32_t{1}); ++frame) {
+            const auto start = std::chrono::steady_clock::now();
+            if (o->eye.size() == 3 && o->target.size() == 3) {
+                render::Camera camera = render::Camera::lookingAt({o->eye[0], o->eye[1], o->eye[2]},
+                                                                  {o->target[0], o->target[1], o->target[2]},
+                                                                  {o->up[0], o->up[1], o->up[2]});
+                camera.lens.focal = o->focal;
+                camera.lens.nearZ = o->nearZ;
+                camera.lens.farZ = o->farZ;
+                image = (*renderer)->render(camera, o->time, width, height, o->technique);
+            } else {
+                image = (*renderer)->render(o->camera, o->time, width, height, o->technique);
+            }
+            if (!image) {
+                break;
+            }
+            ms.push_back(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count());
+        }
+        if (ms.size() > 1) {
+            // The first frame loads the stage onto the device and compiles; the rest are steady.
+            std::vector<double> steady(ms.begin() + 1, ms.end());
+            std::sort(steady.begin(), steady.end());
+            std::printf("first frame %.1f ms; then median %.2f ms, fastest %.2f ms over %zu frames\n", ms.front(),
+                        steady[steady.size() / 2], steady.front(), steady.size());
         }
         if (!image) {
             std::fprintf(stderr, "%s\n", image.error().toString().c_str());

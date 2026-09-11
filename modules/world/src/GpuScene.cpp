@@ -29,6 +29,19 @@ struct InstanceRecord {
 static_assert(sizeof(MeshRecord) == 64);
 static_assert(sizeof(InstanceRecord) == 176);
 
+/// shaders/lrt/world/instancing.slang's SetRecord.
+struct SetRecord {
+    float    prototype[12];
+    float    colour[4];
+    uint32_t first;
+    uint32_t count;
+    uint32_t mesh;
+    uint32_t primId;
+    uint32_t flags;
+    uint32_t pad[3];
+};
+static_assert(sizeof(SetRecord) == 96);
+
 struct PrimvarRecord {
     uint32_t interpolation, components, first, count;
 };
@@ -285,38 +298,76 @@ Result<void> GpuScene::update(std::span<const MeshInstance> instances, const ren
     if (!records.empty()) {
         LRT_TRY(instanceRecords_.write(*device_, 0, records.size() * sizeof(InstanceRecord), records.data()));
     }
-    uint32_t first = static_cast<uint32_t>(records.size());
-    gpu::CommandBatch batch(*device_);
+    // Every set's records in one dispatch. Their chains are pooled, copied
+    // on the device when the sets' chains change; per frame only the sets'
+    // own records (a prim's matrix and look each) go up.
+    const uint32_t singles = static_cast<uint32_t>(records.size());
+    std::vector<SetRecord> setRecords;
+    std::vector<std::pair<gpu::Buffer, uint32_t>> layout;
+    uint32_t setInstances = 0;
     for (const InstanceSet& set : sets) {
         if (set.mesh == nullptr || set.mesh->triangles == 0 || set.count == 0) {
             continue;
         }
         const uint32_t mesh = indexOf.at(set.mesh.get());
-        const std::array<float, 12> prototype = set.prototype.rows3x4();
-        const std::array<float, 12> view = projection.worldToView.rows3x4();
-        records_.dispatch(batch, {set.count, 1, 1}, [&](rhi::ShaderCursor cursor) {
-            cursor["levelRows"].setBinding(set.chainRows.rhi());
-            cursor["records"].setBinding(instanceRecords_.rhi());
-            rhi::ShaderCursor p = cursor["params"];
-            p["count"].setData(set.count);
-            p["mesh"].setData(mesh);
-            p["primId"].setData(set.primId);
-            p["first"].setData(first);
-            p["flags"].setData(uint32_t{set.doubleSided ? 1u : 0u});
-            p["c0r"].setData(set.displayColor[0]);
-            p["c0g"].setData(set.displayColor[1]);
-            p["c0b"].setData(set.displayColor[2]);
-            p["c0a"].setData(set.displayOpacity);
-            static constexpr const char* kSuffix[12] = {"00", "01", "02", "03", "10", "11",
-                                                       "12", "13", "20", "21", "22", "23"};
-            for (size_t k = 0; k < 12; ++k) {
-                p[(std::string("m") + kSuffix[k]).c_str()].setData(prototype[k]);
-                p[(std::string("v") + kSuffix[k]).c_str()].setData(view[k]);
-            }
-        });
-        draws_.push_back({mesh, first, set.count});
-        first += set.count;
+        SetRecord record{};
+        rows(set.prototype, record.prototype);
+        record.colour[0] = set.displayColor[0];
+        record.colour[1] = set.displayColor[1];
+        record.colour[2] = set.displayColor[2];
+        record.colour[3] = set.displayOpacity;
+        record.first = setInstances;
+        record.count = set.count;
+        record.mesh = mesh;
+        record.primId = set.primId;
+        record.flags = set.doubleSided ? 1u : 0u;
+        setRecords.push_back(record);
+        layout.emplace_back(set.chainRows, set.count);
+        draws_.push_back({mesh, singles + setInstances, set.count});
+        setInstances += set.count;
     }
+    if (setRecords.empty()) {
+        return ok();
+    }
+    gpu::CommandBatch batch(*device_);
+    const bool samePool = std::equal(layout.begin(), layout.end(), setLayout_.begin(), setLayout_.end(),
+                                     [](const auto& a, const auto& b) {
+                                         return a.first.rhi() == b.first.rhi() && a.second == b.second;
+                                     });
+    if (!samePool) {
+        if (setRows_.count() < uint64_t{setInstances} * 3) {
+            auto made = deviceBuffer(*device_, uint64_t{setInstances} * 3 * 3 / 2, 16, "scene.setRows");
+            if (!made) return std::move(made).error();
+            setRows_ = std::move(*made);
+        }
+        for (size_t k = 0; k < setRecords.size(); ++k) {
+            batch.encoder()->copyBuffer(setRows_.rhi(), uint64_t{setRecords[k].first} * 48, layout[k].first.rhi(), 0,
+                                        uint64_t{layout[k].second} * 48);
+        }
+        batch.markDirty();
+        setLayout_ = std::move(layout);
+    }
+    if (setRecords_.count() < setRecords.size()) {
+        auto made = deviceBuffer(*device_, setRecords.size() * 3 / 2 + 1, sizeof(SetRecord), "scene.sets");
+        if (!made) return std::move(made).error();
+        setRecords_ = std::move(*made);
+    }
+    LRT_TRY(setRecords_.write(*device_, 0, setRecords.size() * sizeof(SetRecord), setRecords.data()));
+    const std::array<float, 12> view = projection.worldToView.rows3x4();
+    records_.dispatch(batch, {setInstances, 1, 1}, [&](rhi::ShaderCursor cursor) {
+        cursor["sets"].setBinding(setRecords_.rhi());
+        cursor["setRows"].setBinding(setRows_.rhi());
+        cursor["records"].setBinding(instanceRecords_.rhi());
+        rhi::ShaderCursor p = cursor["params"];
+        p["count"].setData(setInstances);
+        p["sets"].setData(static_cast<uint32_t>(setRecords.size()));
+        p["first"].setData(singles);
+        static constexpr const char* kNames[12] = {"v00", "v01", "v02", "v03", "v10", "v11",
+                                                  "v12", "v13", "v20", "v21", "v22", "v23"};
+        for (size_t k = 0; k < 12; ++k) {
+            p[kNames[k]].setData(view[k]);
+        }
+    });
     LRT_TRY(batch.submit(true));
     return ok();
 }

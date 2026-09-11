@@ -114,6 +114,10 @@ private:
     std::vector<uint32_t>                              meshRecordWords_;   ///< the mesh records, as uploaded
     gpu::Buffer positions_, indices_, triangleCorners_, triangleFaces_, meshRecords_, instanceRecords_;
     gpu::Buffer primvarValues_, primvarRecords_, primvarSlots_;
+    gpu::Buffer setRows_, setRecords_;
+    /// The chains pooled in setRows_, in order. Held, so that a chain made
+    /// later cannot take a pooled one's address.
+    std::vector<std::pair<gpu::Buffer, uint32_t>>      setLayout_;
 };
 
 }   // namespace lrt::world

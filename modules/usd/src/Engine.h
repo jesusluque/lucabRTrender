@@ -123,7 +123,7 @@ enum class Technique {
 /// Which route finds what meshes a pixel sees. All three fill the same
 /// visibility targets with the same ids (tests/technique/test_visibility.cpp).
 enum class MeshVisibility {
-    Automatic,  ///< raster where the device rasterises, else rays, else the compute BVH
+    Automatic,  ///< rays where the device has ray queries, else raster, else the compute BVH
     Raster,     ///< VisibilityRaster
     Rays,       ///< VisibilityTrace: the device's acceleration structures
     Bvh,        ///< VisibilityBvh: compute BVHs, for devices with neither

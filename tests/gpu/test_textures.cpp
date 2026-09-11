@@ -322,3 +322,66 @@ TEST_CASE("HDR images and ID buffers compare on the device", "[gpu][compare]") {
     REQUIRE(differing);
     CHECK(*differing == (10000 + 36) / 37);
 }
+
+TEST_CASE("a draw's start vertex and instance reach the vertex stage as this backend defines them",
+          "[gpu][raster]") {
+    LRT_REQUIRE_GPU(gpu);
+    if (!gpu->device->caps().rasterization) {
+        SKIP("no rasterisation on this device");
+    }
+    static gpu::ComputeKernel kTexel = kernelOf(*gpu, "textureTexelIds");
+    gpu::RasterDesc desc;
+    desc.module = "lrt/test/textures";
+    desc.vertexEntry = "rasterStartsVertex";
+    desc.fragmentEntry = "rasterStartsFragment";
+    rhi::ColorTargetDesc target;
+    target.format = rhi::Format::RGBA32Uint;
+    desc.targets = {target};
+    auto kernel = gpu::RasterKernel::create(*gpu->library, desc);
+    if (!kernel) FAIL(kernel.error().toString());
+    const uint32_t w = 8;
+    const uint32_t h = 8;
+    gpu::TextureDesc ids;
+    ids.width = w;
+    ids.height = h;
+    ids.format = rhi::Format::RGBA32Uint;
+    ids.usage = rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource;
+    auto t = gpu::Texture::create(*gpu->device, ids);
+    REQUIRE(t);
+    auto view = t->view(0);
+    REQUIRE(view);
+    gpu::RasterPass pass;
+    pass.width = w;
+    pass.height = h;
+    pass.colours = {(*view).get()};
+    pass.clearColours = {{0.0F, 0.0F, 0.0F, 0.0F}};
+    pass.bind = [](rhi::ShaderCursor) {};
+    const gpu::RasterDraw draw{6, 1, 12, 5, {}};
+    {
+        gpu::CommandBatch batch(*gpu->device);
+        kernel->run(batch, pass, std::span<const gpu::RasterDraw>(&draw, 1));
+        REQUIRE(batch.submit(true));
+    }
+    gpu::Buffer out = test::uintBuffer(*gpu->device, 4, "texel");
+    {
+        gpu::CommandBatch batch(*gpu->device);
+        kTexel.dispatch(batch, {1, 1, 1}, [&](rhi::ShaderCursor cursor) {
+            cursor["idsTexture"].setBinding((*view).get());
+            cursor["counts"].setBinding(out.rhi());
+            cursor["params"]["width"].setData(w);
+            cursor["params"]["height"].setData(h);
+        });
+        REQUIRE(batch.submit(true));
+    }
+    uint32_t v[4] = {};
+    REQUIRE(out.read(*gpu->device, 0, sizeof(v), v));
+    std::printf("  %s: start vertex 12, instance 5 -> SV_VertexID %u, SV_InstanceID %u, "
+                "SV_StartVertexLocation %u, SV_StartInstanceLocation %u\n",
+                gpu->device->caps().apiName.c_str(), v[0], v[1], v[2], v[3]);
+    CHECK(v[2] == 12);
+    CHECK(v[3] == 5);
+    // What Caps::drawIdsIncludeStart promises the engine's shaders.
+    const bool included = gpu->device->caps().drawIdsIncludeStart;
+    CHECK((included ? v[0] : v[0] + v[2]) == 12);
+    CHECK((included ? v[1] : v[1] + v[3]) == 5);
+}

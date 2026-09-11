@@ -40,7 +40,7 @@ public:
                                             uint32_t height, const std::string& technique = "raster");
 
     /// How renders find what meshes a pixel sees: "automatic" (the default:
-    /// raster where the device rasterises, else rays, else compute BVHs),
+    /// rays where the device has ray queries, else raster, else compute BVHs),
     /// "raster", "rays" or "bvh". The delegate's `lrt:visibility` setting.
     [[nodiscard]] Result<void> setMeshVisibility(const std::string& route);
 

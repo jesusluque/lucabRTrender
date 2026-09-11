@@ -152,6 +152,7 @@ Result<std::shared_ptr<Device>> Device::create(const DeviceDesc& desc) {
     // Apple silicon is unified; every discrete CUDA card is not. A Vulkan
     // integrated GPU would be, but nothing here depends on it being told.
     caps.unifiedMemory = device->backend_ == Backend::Metal;
+    caps.drawIdsIncludeStart = device->backend_ == Backend::Metal;   // tests/gpu/test_textures.cpp measures it
 
     log::info("GPU: {} on {}", caps.apiName, caps.adapterName);
     return device;

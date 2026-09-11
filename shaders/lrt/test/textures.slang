@@ -115,3 +115,38 @@ float4 rasterHalfFragment(RasterOut input) : SV_Target0 {
     return float4(params.colourR, params.colourG, params.colourB, params.colourA);
 }
 
+
+// What a draw's start locations become in the vertex stage, on this backend:
+// a quad over the target, each pixel the ids its vertex saw.
+struct StartsOut {
+    float4 position : SV_Position;
+    nointerpolation uint4 ids : IDS;
+};
+
+[shader("vertex")]
+StartsOut rasterStartsVertex(uint vertex : SV_VertexID, uint instance : SV_InstanceID,
+                             uint startVertex : SV_StartVertexLocation, uint startInstance : SV_StartInstanceLocation) {
+    static const float2 kCorners[6] = { float2(-1, -1), float2(1, -1), float2(1, 1),
+                                        float2(-1, -1), float2(1, 1), float2(-1, 1) };
+    StartsOut out;
+    out.position = float4(kCorners[vertex % 6], 0.5, 1.0);   // the draw starts at a multiple of 6
+    out.ids = uint4(vertex - vertex % 6, instance, startVertex, startInstance);
+    return out;
+}
+
+[shader("fragment")]
+uint4 rasterStartsFragment(StartsOut input) : SV_Target0 {
+    return input.ids;
+}
+
+Texture2D<uint4> idsTexture;
+
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void textureTexelIds(uint3 tid: SV_DispatchThreadID) {
+    const uint4 v = idsTexture.Load(int3(int(params.width / 2), int(params.height / 2), 0));
+    counts[0] = v.x;
+    counts[1] = v.y;
+    counts[2] = v.z;
+    counts[3] = v.w;
+}

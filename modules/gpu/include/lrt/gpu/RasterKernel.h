@@ -47,9 +47,15 @@ struct RasterPass {
     rhi::ITextureView*                    depth = nullptr;
     bool                                  clearDepth = true;
     float                                 depthClear = 1.0F;
+    /// What every draw binds. Draws with no `bind` of their own share one
+    /// root object, so thousands of them cost no binding each: what differs
+    /// between them travels in their start locations (SV_StartVertexLocation,
+    /// SV_StartInstanceLocation).
+    std::function<void(rhi::ShaderCursor)> bind;
 };
 
-/// One draw: its counts, and what it binds (a fresh root object per draw).
+/// One draw: its counts, and what it binds beyond the pass (a fresh root
+/// object when it binds anything).
 struct RasterDraw {
     uint32_t                               vertexCount = 0;
     uint32_t                               instanceCount = 1;

@@ -74,25 +74,23 @@ Result<void> VisibilityRaster::render(gpu::CommandBatch& batch, const world::Gpu
     pass.clearColours = {{0.0F, 0.0F, 0.0F, 0.0F}};
     pass.depth = (*depthView).get();
     pass.depthClear = 0.0F;
+    pass.bind = [&](rhi::ShaderCursor cursor) {
+        cursor["positions"].setBinding(scene.positions().rhi());
+        cursor["indices"].setBinding(scene.indices().rhi());
+        cursor["meshes"].setBinding(scene.meshRecords().rhi());
+        cursor["instances"].setBinding(scene.instanceRecords().rhi());
+        setCamera(cursor["camera"], projection, width, height);
+        cursor["pass"]["idsIncludeStart"].setData(uint32_t{device_->caps().drawIdsIncludeStart ? 1u : 0u});
+    };
     std::vector<gpu::RasterDraw> draws;
+    draws.reserve(scene.draws().size());
     for (const world::DrawRange& range : scene.draws()) {
-        const geom::GpuMesh& mesh = scene.mesh(range.mesh);
         gpu::RasterDraw draw;
-        draw.vertexCount = mesh.triangles * 3;
+        draw.vertexCount = scene.mesh(range.mesh).triangles * 3;
         draw.instanceCount = range.instances;
-        const uint32_t firstInstance = range.firstInstance;
-        const uint32_t firstPoint = scene.firstPoint(range.mesh);
-        const uint32_t firstTriangle = scene.firstTriangle(range.mesh);
-        draw.bind = [&, firstInstance, firstPoint, firstTriangle](rhi::ShaderCursor cursor) {
-            cursor["positions"].setBinding(scene.positions().rhi());
-            cursor["indices"].setBinding(scene.indices().rhi());
-            cursor["instances"].setBinding(scene.instanceRecords().rhi());
-            setCamera(cursor["camera"], projection, width, height);
-            cursor["draw"]["firstInstance"].setData(firstInstance);
-            cursor["draw"]["firstPoint"].setData(firstPoint);
-            cursor["draw"]["firstTriangle"].setData(firstTriangle);
-        };
-        draws.push_back(std::move(draw));
+        draw.firstVertex = scene.firstTriangle(range.mesh) * 3;
+        draw.firstInstance = range.firstInstance;
+        draws.push_back(draw);
     }
     pass_.run(batch, pass, draws);
     return ok();

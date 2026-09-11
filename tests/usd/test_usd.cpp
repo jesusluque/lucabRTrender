@@ -172,6 +172,83 @@ TEST_CASE("a cloud written to USD and drawn through Hydra matches the cloud draw
     CHECK(tracedDiff->max <= 2);
 }
 
+TEST_CASE("splats and points behind a mesh leave it as it is; in front of it they show", "[usd][gpu][mesh][layers]") {
+    LRT_REQUIRE_GPU(gpu);
+    const io::RawSplats raw = cloud(2500);
+    const fs::path clouds = scratch("layers_cloud.usdc");
+    fs::remove(clouds);
+    REQUIRE(usd::writeParticleFieldStage(*gpu->library, raw, clouds, {.addCamera = false}));
+    // A wall (single sided, facing the camera) at z, splats within |z| <= 2
+    // and a sheet of points at z = 0, seen from z = 9.
+    const auto stage = [&](const std::string& name, double wallZ, bool withSplats, bool withPoints) {
+        const fs::path path = scratch(name);
+        std::ofstream out(path);
+        out << "#usda 1.0\n(\n    upAxis = \"Y\"\n)\n"
+               "def Mesh \"Wall\"\n{\n"
+               "    int[] faceVertexCounts = [4]\n"
+               "    int[] faceVertexIndices = [0, 1, 2, 3]\n"
+               "    point3f[] points = [(-9, -9, 0), (9, -9, 0), (9, 9, 0), (-9, 9, 0)]\n"
+               "    uniform token subdivisionScheme = \"none\"\n"
+               "    color3f[] primvars:displayColor = [(0.3, 0.6, 0.9)] ( interpolation = \"constant\" )\n"
+               "    double3 xformOp:translate = (0, 0, " << wallZ << ")\n"
+               "    uniform token[] xformOpOrder = [\"xformOp:translate\"]\n"
+               "}\n";
+        if (withSplats) {
+            out << "def \"Cloud\" ( references = @./layers_cloud.usdc@</World/Splats> )\n{\n}\n";
+        }
+        if (withPoints) {
+            out << "def Points \"Sheet\"\n{\n    point3f[] points = [";
+            for (int y = -4; y <= 4; ++y) {
+                for (int x = -4; x <= 4; ++x) {
+                    out << (x == -4 && y == -4 ? "" : ", ") << "(" << x * 0.3 << ", " << y * 0.3 << ", 0)";
+                }
+            }
+            out << "]\n    float[] widths = [0.12] ( interpolation = \"constant\" )\n"
+                   "    color3f[] primvars:displayColor = [(1, 0.5, 0.25)] ( interpolation = \"constant\" )\n}\n";
+        }
+        out << "def Camera \"Camera\"\n{\n"
+               "    float2 clippingRange = (0.1, 1000)\n    float focalLength = 30\n"
+               "    float horizontalAperture = 24.576\n    float verticalAperture = 18.432\n"
+               "    double3 xformOp:translate = (0.2, 0.1, 9)\n"
+               "    uniform token[] xformOpOrder = [\"xformOp:translate\"]\n}\n";
+        return path;
+    };
+    const uint32_t w = 240;
+    const uint32_t h = 180;
+    const auto render = [&](const fs::path& path, const char* route) {
+        auto renderer = usd::StageRenderer::open(path);
+        if (!renderer) FAIL(renderer.error().toString());
+        REQUIRE((*renderer)->setMeshVisibility(route));
+        auto image = (*renderer)->render("/Camera", 0.0, w, h);
+        if (!image) FAIL(image.error().toString());
+        gpu::BufferDesc desc;
+        desc.bytes = image->rgba.size() * sizeof(float);
+        desc.elementBytes = 16;
+        auto buffer = gpu::Buffer::create(*gpu->device, desc, image->rgba.data());
+        REQUIRE(buffer);
+        return *buffer;
+    };
+    const fs::path hiddenPath = stage("layers_hidden.usda", 3.0, true, true);
+    const fs::path frontWallPath = stage("layers_front_wall.usda", 3.0, false, false);
+    const fs::path shownPath = stage("layers_shown.usda", -5.0, true, true);
+    const fs::path backWallPath = stage("layers_back_wall.usda", -5.0, false, false);
+    for (const char* route : {"raster", "rays", "bvh"}) {
+        const gpu::Buffer hidden = render(hiddenPath, route);
+        const gpu::Buffer frontWall = render(frontWallPath, route);
+        const gpu::Buffer shown = render(shownPath, route);
+        const gpu::Buffer backWall = render(backWallPath, route);
+        auto behind = render::compareImages(*gpu->library, hidden, frontWall, w, h);
+        auto before = render::compareImages(*gpu->library, shown, backWall, w, h);
+        REQUIRE(behind);
+        REQUIRE(before);
+        std::printf("  %s: splats and points behind the wall change %llu pixels (max %u); in front, %llu (max %u)\n",
+                    route, static_cast<unsigned long long>(behind->over2), behind->max,
+                    static_cast<unsigned long long>(before->over2), before->max);
+        CHECK(behind->max == 0);
+        CHECK(before->over2 > uint64_t{w} * h / 10);
+    }
+}
+
 TEST_CASE("a UsdGeomPoints prim draws through Hydra", "[usd][gpu][points]") {
     LRT_REQUIRE_GPU(gpu);
     const fs::path path = scratch("points.usda");
@@ -603,7 +680,7 @@ TEST_CASE("Hydra gets the same ids whichever route finds the meshes", "[usd][gpu
     const Frame automatic = frame("automatic");
     auto raysDiffer = render::countDifferent(*gpu->library, raster.ids, rays.ids, 3 * w * h);
     auto bvhDiffer = render::countDifferent(*gpu->library, raster.ids, bvh.ids, 3 * w * h);
-    auto automaticDiffer = render::countDifferent(*gpu->library, raster.ids, automatic.ids, 3 * w * h);
+    auto automaticDiffer = render::countDifferent(*gpu->library, rays.ids, automatic.ids, 3 * w * h);
     REQUIRE(raysDiffer);
     REQUIRE(bvhDiffer);
     REQUIRE(automaticDiffer);
@@ -612,7 +689,7 @@ TEST_CASE("Hydra gets the same ids whichever route finds the meshes", "[usd][gpu
                 w, h, static_cast<unsigned long long>(raster.covered), static_cast<unsigned long long>(*raysDiffer),
                 static_cast<unsigned long long>(*bvhDiffer), static_cast<unsigned long long>(*automaticDiffer));
     CHECK(raster.covered > uint64_t{w} * h / 8);
-    CHECK(*automaticDiffer == 0);   // this device rasterises
+    CHECK(*automaticDiffer == 0);   // this device has ray queries: automatic is rays
     // Raster samples pixel centres as the rays do, so they part only where a
     // centre falls on an edge -- here along the grazing floor: measured 15
     // and 6 words of 3 x 76800.

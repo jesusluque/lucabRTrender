@@ -9,18 +9,17 @@ module visibility_raster;
 import camera;
 import lrt.world.scene_types;
 
-struct DrawParams {
-    uint firstInstance;
-    uint firstPoint;
-    uint firstTriangle;
-    uint pad0;
+struct PassParams {
+    uint idsIncludeStart;   // SV_VertexID and SV_InstanceID count from the draw's starts (Metal)
+    uint pad0; uint pad1; uint pad2;
 };
 
 StructuredBuffer<float4>          positions;
 StructuredBuffer<uint>            indices;
+StructuredBuffer<MeshRecord>      meshes;
 StructuredBuffer<InstanceRecord>  instances;
 ConstantBuffer<CameraParams>      camera;
-ConstantBuffer<DrawParams>        draw;
+ConstantBuffer<PassParams>        pass;
 
 struct VertexOut {
     float4 position : SV_Position;
@@ -29,13 +28,18 @@ struct VertexOut {
     nointerpolation uint cullBack : CULL;   // 1: single sided, keep the front only
 };
 
+// One draw per mesh, all sharing the pass's bindings: a draw starts at its
+// mesh's first index corner and its first instance record.
 [shader("vertex")]
-VertexOut visibilityVertex(uint vertex : SV_VertexID, uint instanceIndex : SV_InstanceID) {
+VertexOut visibilityVertex(uint vertex : SV_VertexID, uint instanceIndex : SV_InstanceID,
+                           uint startVertex : SV_StartVertexLocation, uint startInstance : SV_StartInstanceLocation) {
     VertexOut out;
-    const uint instance = draw.firstInstance + instanceIndex;
-    const uint triangle = vertex / 3;
-    const uint point = draw.firstPoint + indices[(draw.firstTriangle * 3) + vertex];
+    const uint corner = pass.idsIncludeStart != 0 ? vertex : vertex + startVertex;
+    const uint instance = pass.idsIncludeStart != 0 ? instanceIndex : instanceIndex + startInstance;
     const InstanceRecord record = instances[instance];
+    const MeshRecord mesh = meshes[record.mesh];
+    const uint triangle = corner / 3 - mesh.firstTriangle;
+    const uint point = mesh.firstPoint + indices[corner];
     const float3 v = rowsApply(record.view0, record.view1, record.view2, positions[point].xyz, 1.0);
     out.position = viewToClip(camera, v);
     out.instance = instance;

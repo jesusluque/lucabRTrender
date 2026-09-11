@@ -60,15 +60,22 @@ void RasterKernel::run(CommandBatch& batch, const RasterPass& pass, std::span<co
     state.viewportCount = 1;
     state.scissorRects[0] = rhi::ScissorRect::fromSize(pass.width, pass.height);
     state.scissorRectCount = 1;
+    bool shared = false;   // the pass's root object is bound
     for (const RasterDraw& draw : draws) {
         if (draw.vertexCount == 0 || draw.instanceCount == 0) {
             continue;
         }
-        rhi::IShaderObject* root = encoder->bindPipeline(pipeline_.get());
-        if (draw.bind) {
-            draw.bind(rhi::ShaderCursor(root));
+        if (draw.bind || !shared) {
+            rhi::IShaderObject* root = encoder->bindPipeline(pipeline_.get());
+            if (pass.bind) {
+                pass.bind(rhi::ShaderCursor(root));
+            }
+            if (draw.bind) {
+                draw.bind(rhi::ShaderCursor(root));
+            }
+            encoder->setRenderState(state);
+            shared = !draw.bind;
         }
-        encoder->setRenderState(state);
         rhi::DrawArguments args;
         args.vertexCount = draw.vertexCount;
         args.instanceCount = draw.instanceCount;
