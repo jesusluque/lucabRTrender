@@ -43,6 +43,8 @@ LightRecord LightTable::recordOf(const Light& light) {
     const bool shaped = light.coneAngle > 0.0F && light.coneAngle < 3.14159265358979F / 2.0F;
     record.coneCos = shaped ? std::cos(light.coneAngle) : -1.0F;
     record.coneSoftness = light.coneSoftness;
+    record.texture = light.textureId;
+    record.sampler = light.sampler;
     const std::array<float, 12> rows = light.lightToWorld.rows3x4();
     for (size_t k = 0; k < rows.size(); ++k) {
         record.rows[k] = rows[k];
@@ -54,9 +56,11 @@ Result<void> LightTable::set(std::span<const Light> lights) {
     std::vector<LightRecord> records;
     records.reserve(lights.size() + 1);
     shadows_ = false;
+    domes_ = false;
     for (const Light& light : lights) {
         records.push_back(recordOf(light));
         shadows_ = shadows_ || light.shadow;
+        domes_ = domes_ || light.kind == LightKind::Dome;
     }
     if (records.empty()) {
         records.emplace_back();   // a buffer to bind, which nothing reads

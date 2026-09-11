@@ -101,6 +101,10 @@ public:
     /// "raster", "rays" or "bvh". The delegate's `lrt:visibility` setting.
     [[nodiscard]] Result<void> setMeshVisibility(const std::string& route);
 
+    /// Samples per light per pixel: one for an interactive frame, more where
+    /// an area light's noise would be read as error.
+    void setLightSamples(uint32_t samples);
+
     /// The Hydra outputs renders produce, colour and depth always among them
     /// ("primId", "instanceId", "elementId", "Neye", "normal", "primvars:st"...).
     void requestOutputs(const std::vector<std::string>& aovs);

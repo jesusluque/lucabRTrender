@@ -135,6 +135,18 @@ void Engine::setMaterial(const pxr::SdfPath& id, std::shared_ptr<void> mtlxDocum
     entry.pending = true;
 }
 
+void Engine::setLight(const pxr::SdfPath& id, const light::Light& lamp) {
+    const std::lock_guard<std::mutex> held(guard_);
+    lights_[id] = lamp;
+}
+
+void Engine::setLightSamples(uint32_t samples) { lightSamples_.store(std::max(samples, 1u)); }
+
+void Engine::removeLight(const pxr::SdfPath& id) {
+    const std::lock_guard<std::mutex> held(guard_);
+    lights_.erase(id);
+}
+
 void Engine::removeMaterial(const pxr::SdfPath& id) {
     const std::lock_guard<std::mutex> held(guard_);
     materials_.erase(id);
@@ -569,6 +581,7 @@ Result<void> Engine::render(const render::Projection& projection, const render::
         }
         return rows;
     };
+    std::vector<light::Light> lamps;
     std::vector<world::MeshInstance> meshInstances;
     std::vector<world::InstanceSet> meshSets;
     std::vector<render::SplatInstance> splats;
@@ -577,6 +590,10 @@ Result<void> Engine::render(const render::Projection& projection, const render::
     std::vector<lod::StreamingPool*> poolOf;   // per cut: its pool, if streamed
     {
         const std::lock_guard<std::mutex> held(guard_);
+        lamps.reserve(lights_.size());
+        for (const auto& [id, lamp] : lights_) {
+            lamps.push_back(lamp);
+        }
         for (const auto& [id, entry] : splats_) {
             if (!entry.visible) {
                 continue;
@@ -751,6 +768,50 @@ Result<void> Engine::render(const render::Projection& projection, const render::
     if (meshLayer) {
         LRT_TRY(scene_->update(meshInstances, projection, meshSets));
         gpu::CommandBatch batch(*device_);
+        // The frame's lights, and what a shadow ray traces against: rays
+        // shadow whatever route found the visibility, so the structure is
+        // built even where the rasteriser drew.
+        if (!lightTable_.has_value()) {
+            auto made = light::LightTable::create(*device_);
+            if (!made) return std::move(made).error();
+            lightTable_.emplace(std::move(*made));
+        }
+        // A dome's image goes through the same texture table the materials
+        // sample, so it is requested here and committed before the frame's
+        // records are uploaded.
+        if (!textures_) {
+            auto made = material::TextureStore::create(*library_);
+            if (!made) return std::move(made).error();
+            textures_ = std::move(*made);
+        }
+        bool domeTextures = false;
+        for (light::Light& lamp : lamps) {
+            if (lamp.texture.empty()) {
+                continue;
+            }
+            lamp.textureId = textures_->request(lamp.texture, material::ColourSpace::Auto);
+            // Lat-long: around in u, clamped at the poles.
+            lamp.sampler = textures_->sampler(material::Wrap::Repeat, material::Wrap::Clamp);
+            domeTextures = true;
+        }
+        if (domeTextures) {
+            if (auto loaded = textures_->commit(); !loaded) {
+                return std::move(loaded).error();
+            }
+        }
+        LRT_TRY(lightTable_->set(lamps));
+        rhi::IAccelerationStructure* shadows = nullptr;
+        if (lightTable_->anyShadow() && caps.rayQuery && caps.accelerationStructure) {
+            if (!rayTracingScene_.has_value()) {
+                auto accel = world::RayTracingScene::create(*library_);
+                if (!accel) return std::move(accel).error();
+                rayTracingScene_.emplace(std::move(*accel));
+            }
+            if (visibility != MeshVisibility::Rays) {
+                LRT_TRY(rayTracingScene_->build(*scene_));   // the rays route has built it already
+            }
+            shadows = rayTracingScene_->topLevel();
+        }
         // What a material needs wherever it is evaluated: shading always,
         // visibility only where a material cuts its samples away.
         technique::MaterialFrame frame;
@@ -759,6 +820,9 @@ Result<void> Engine::render(const render::Projection& projection, const render::
         frame.records = &materialRecords_;
         frame.blob = &materialBlob_;
         frame.textures = textures_.get();
+        frame.lights = &*lightTable_;
+        frame.samples = lightSamples_.load();
+        frame.shadows = shadows;
         const technique::MaterialFrame* cutouts = materialCutouts_ ? &frame : nullptr;
         switch (visibility) {
             case MeshVisibility::Automatic:
@@ -861,9 +925,43 @@ Result<void> Engine::render(const render::Projection& projection, const render::
     }
     if (under != nullptr) {
         LRT_TRY(rasterizer_->render(projection, splats, settings, targets, {}, under));
+    } else {
+        LRT_TRY(rasterizer_->render(projection, splats, settings, targets, points));
+    }
+    LRT_TRY(paintDomes(projection, settings.width, settings.height, targets));
+    return ok();
+}
+
+Result<void> Engine::paintDomes(const render::Projection& projection, uint32_t width, uint32_t height,
+                                render::RenderTargets& targets) {
+    if (!lightTable_.has_value() || !lightTable_->anyDome() || !targets.colour.valid()) {
         return ok();
     }
-    LRT_TRY(rasterizer_->render(projection, splats, settings, targets, points));
+    if (!domeBackground_.has_value()) {
+        auto made = gpu::ComputeKernel::create(*library_, "lrt/technique/dome_background", "domeBackground");
+        if (!made) return std::move(made).error();
+        domeBackground_.emplace(std::move(*made));
+    }
+    const std::array<float, 12> toWorld = aofx::xform::inverseAffine(projection.worldToView).rows3x4();
+    gpu::CommandBatch batch(*device_);
+    domeBackground_->dispatch(batch, {width, height, 1}, [&](rhi::ShaderCursor cursor) {
+        lightTable_->bind(cursor);
+        // A dome reads its image through the same table the materials sample,
+        // so the background pass binds it too: without it every dome is the
+        // white a missing file falls back to.
+        if (textures_) {
+            textures_->bind(cursor["gTextures"]);
+        }
+        cursor["colour"].setBinding(targets.colour.rhi());
+        cursor["depth"].setBinding(targets.depth.rhi());
+        technique::setCamera(cursor["camera"], projection, width, height);
+        static constexpr const char* kNames[12] = {"v00", "v01", "v02", "v03", "v10", "v11",
+                                                   "v12", "v13", "v20", "v21", "v22", "v23"};
+        for (size_t k = 0; k < 12; ++k) {
+            cursor["background"][kNames[k]].setData(toWorld[k]);
+        }
+    });
+    LRT_TRY(batch.submit(true));
     return ok();
 }
 

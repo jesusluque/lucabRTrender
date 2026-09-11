@@ -49,6 +49,11 @@ struct Light {
     bool         shadow = true;
     float        coneAngle = 0.0F;     ///< shaping: the half angle; 0 or 180 means none
     float        coneSoftness = 0.0F;
+    /// A dome's lat-long image, resolved. Empty: the light is its colour.
+    std::string  texture;
+    /// Filled in by whoever owns the texture store, before the table is set.
+    uint32_t     textureId = 0xFFFFFFFFU;
+    uint32_t     sampler = 0;
 };
 
 /// What shaders/lrt/light/lights.slang reads.
@@ -62,7 +67,11 @@ struct LightRecord {
     float    temperature = 6500.0F;
     float    coneCos = -1.0F;
     float    coneSoftness = 0.0F;
-    float    pad0 = 0.0F;
+    uint32_t texture = 0xFFFFFFFFU;   ///< a dome's image in the texture table; none: its colour alone
+    uint32_t sampler = 0;
+    uint32_t pad0 = 0;
+    uint32_t pad1 = 0;
+    uint32_t pad2 = 0;
     float    rows[12] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0};   ///< light to world, rows of a 3x4
 };
 
@@ -80,6 +89,8 @@ public:
 
     [[nodiscard]] uint32_t count() const noexcept { return count_; }
     [[nodiscard]] bool     anyShadow() const noexcept { return shadows_; }
+    /// Whether any of them is a dome, which a frame paints where it drew nothing.
+    [[nodiscard]] bool     anyDome() const noexcept { return domes_; }
     [[nodiscard]] const gpu::Buffer& records() const noexcept { return records_; }
 
     /// `lights` and `lightCount`, by name.
@@ -94,6 +105,7 @@ private:
     uint32_t     count_ = 0;
     uint32_t     capacity_ = 0;
     bool         shadows_ = false;
+    bool         domes_ = false;
 };
 
 }   // namespace lrt::light

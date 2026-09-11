@@ -1,6 +1,7 @@
 // Copyright (c) 2026 lucabRTrender contributors.
 #include "RenderDelegate.h"
 
+#include "Light.h"
 #include "Material.h"
 
 #include <pxr/base/tf/staticTokens.h>
@@ -47,7 +48,10 @@ TfTokenVector const& HdLrtRenderDelegate::GetSupportedRprimTypes() const {
 }
 
 TfTokenVector const& HdLrtRenderDelegate::GetSupportedSprimTypes() const {
-    static const TfTokenVector types{HdPrimTypeTokens->camera, HdPrimTypeTokens->material};
+    static const TfTokenVector types{HdPrimTypeTokens->camera,      HdPrimTypeTokens->material,
+                                     HdPrimTypeTokens->sphereLight, HdPrimTypeTokens->diskLight,
+                                     HdPrimTypeTokens->rectLight,   HdPrimTypeTokens->distantLight,
+                                     HdPrimTypeTokens->domeLight};
     return types;
 }
 
@@ -67,7 +71,8 @@ HdRenderPassSharedPtr HdLrtRenderDelegate::CreateRenderPass(HdRenderIndex* index
 }
 
 TF_DEFINE_PRIVATE_TOKENS(_lrtSettings, ((technique, "lrt:technique"))((settleStreams, "lrt:settleStreams"))
-                                           ((visibility, "lrt:visibility"))(raster)(rt)(automatic)(rays)(bvh));
+                                           ((visibility, "lrt:visibility"))((lightSamples, "lrt:lightSamples"))
+                                           (raster)(rt)(automatic)(rays)(bvh));
 
 HdRenderSettingDescriptorList HdLrtRenderDelegate::GetRenderSettingDescriptors() const {
     HdRenderSettingDescriptor technique;
@@ -82,7 +87,11 @@ HdRenderSettingDescriptorList HdLrtRenderDelegate::GetRenderSettingDescriptors()
     visibility.name = "Mesh visibility (automatic | raster | rays | bvh)";
     visibility.key = _lrtSettings->visibility;
     visibility.defaultValue = VtValue(_lrtSettings->automatic);
-    return {technique, settle, visibility};
+    HdRenderSettingDescriptor samples;
+    samples.name = "Samples per light";
+    samples.key = _lrtSettings->lightSamples;
+    samples.defaultValue = VtValue(1);
+    return {technique, settle, visibility, samples};
 }
 
 lrt::usd::MeshVisibility HdLrtRenderDelegate::GetMeshVisibility() const {
@@ -97,6 +106,17 @@ lrt::usd::MeshVisibility HdLrtRenderDelegate::GetMeshVisibility() const {
     if (name == _lrtSettings->rays.GetString()) return lrt::usd::MeshVisibility::Rays;
     if (name == _lrtSettings->bvh.GetString()) return lrt::usd::MeshVisibility::Bvh;
     return lrt::usd::MeshVisibility::Automatic;
+}
+
+uint32_t HdLrtRenderDelegate::GetLightSamples() const {
+    const VtValue value = GetRenderSetting(_lrtSettings->lightSamples);
+    if (value.IsHolding<int>()) {
+        return static_cast<uint32_t>(std::max(value.UncheckedGet<int>(), 1));
+    }
+    if (value.IsHolding<unsigned int>()) {
+        return std::max(value.UncheckedGet<unsigned int>(), 1u);
+    }
+    return 1;
 }
 
 bool HdLrtRenderDelegate::GetSettleStreams() const {
@@ -141,12 +161,18 @@ HdSprim* HdLrtRenderDelegate::CreateSprim(TfToken const& typeId, SdfPath const& 
     if (typeId == HdPrimTypeTokens->material) {
         return new HdLrtMaterial(id);
     }
+    if (HdPrimTypeIsLight(typeId)) {
+        return new HdLrtLight(typeId, id);
+    }
     return typeId == HdPrimTypeTokens->camera ? new HdCamera(id) : nullptr;
 }
 
 HdSprim* HdLrtRenderDelegate::CreateFallbackSprim(TfToken const& typeId) {
     if (typeId == HdPrimTypeTokens->material) {
         return new HdLrtMaterial(SdfPath::EmptyPath());
+    }
+    if (HdPrimTypeIsLight(typeId)) {
+        return new HdLrtLight(typeId, SdfPath::EmptyPath());
     }
     return typeId == HdPrimTypeTokens->camera ? new HdCamera(SdfPath::EmptyPath()) : nullptr;
 }

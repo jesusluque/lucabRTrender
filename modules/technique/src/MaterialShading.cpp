@@ -107,7 +107,8 @@ void shadeMaterials(uint3 group: SV_GroupID, uint index: SV_GroupIndex) {
             const bool shadow = (light.flags & kLightShadow) != 0;
             float3 sum = float3(0.0);
             for (uint i = 0; i < samples; ++i) {
-                const LightSample ls = sampleLight(light, inputs.positionWorld, sampleAt(tid, k, i));
+                const LightSample ls =
+                    sampleLight(light, inputs.positionWorld, inputs.normalWorld, sampleAt(tid, k, i));
                 if (!ls.valid) {
                     continue;
                 }
@@ -185,6 +186,14 @@ Result<void> MaterialShading::shade(gpu::CommandBatch& batch, const VisibilityTa
     if (!ids) return std::move(ids).error();
     kernel_->dispatch(batch, {targets.width, targets.height, 1}, [&](rhi::ShaderCursor cursor) {
         bindMaterialFrame(cursor, frame, projection);
+        // The lights are this kernel's alone.
+        if (frame.lights != nullptr) {
+            frame.lights->bind(cursor);
+            cursor["lighting"]["samples"].setData(frame.samples);
+        }
+        if (frame.shadows != nullptr) {
+            cursor["shadowScene"].setBinding(frame.shadows);
+        }
         cursor["visibility"].setBinding((*ids).get());
         cursor["colour"].setBinding(out.colour.rhi());
         cursor["depth"].setBinding(out.depth.rhi());

@@ -19,6 +19,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <atomic>
 #include <optional>
 #include <span>
 #include <string>
@@ -38,6 +39,7 @@
 #include "lrt/lod/Lrtc.h"
 #include "lrt/material/MaterialCompiler.h"
 #include "lrt/material/TextureStore.h"
+#include "lrt/light/LightTable.h"
 #include "lrt/technique/MaterialShading.h"
 #include "lrt/render/GaussianRayTracer.h"
 #include "lrt/render/PointRasterizer.h"
@@ -171,6 +173,13 @@ public:
     /// read it: its meshes show displayColor). Compiled at the next commit.
     void setMaterial(const pxr::SdfPath& id, std::shared_ptr<void> mtlxDocument);
     void removeMaterial(const pxr::SdfPath& id);
+    /// A UsdLux light, as the delegate read it. Lights light the meshes; the
+    /// splats carry their own radiance until LrtSplatLightingAPI (M5).
+    void setLight(const pxr::SdfPath& id, const light::Light& lamp);
+    void removeLight(const pxr::SdfPath& id);
+    /// Samples per light per pixel. One is what an interactive frame takes;
+    /// a render that wants an area light without noise asks for more.
+    void setLightSamples(uint32_t samples);
     void setInstancer(const pxr::SdfPath& id, const pxr::SdfPath& parent, InstancerArrays arrays);
     void removeInstancer(const pxr::SdfPath& id);
     void remove(const pxr::SdfPath& id);
@@ -240,6 +249,9 @@ private:
     std::optional<technique::MaterialPrograms> materialPrograms_;
     std::optional<technique::MaterialShading> materialShading_;
     std::map<pxr::SdfPath, MaterialEntry>     materials_;
+    std::map<pxr::SdfPath, light::Light>      lights_;
+    std::optional<light::LightTable>          lightTable_;
+    std::atomic<uint32_t>                     lightSamples_{1};
     bool                                      materialsChanged_ = true;
     bool                                      materialCutouts_ = false;   ///< a material in the frame cuts samples away
     std::unique_ptr<material::MaterialCompiler> compiler_;
@@ -252,6 +264,10 @@ private:
     /// Row and blob for this frame's materials, primvar slots set on the scene.
     [[nodiscard]] Result<void> prepareMaterials(const std::vector<std::string>& aovPrimvars);
     std::optional<gpu::ComputeKernel>          nearest_;
+    std::optional<gpu::ComputeKernel>          domeBackground_;
+    /// The frame's domes over what it drew nothing on, after everything else.
+    [[nodiscard]] Result<void> paintDomes(const render::Projection& projection, uint32_t width, uint32_t height,
+                                          render::RenderTargets& targets);
     technique::VisibilityTargets              visibility_;
     std::optional<technique::AovShading>      aovShading_;
     technique::AovBuffers                     aovs_;

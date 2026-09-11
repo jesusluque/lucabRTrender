@@ -6,6 +6,9 @@
 // colour is derived here, not on the host -- exposure, and the blackbody of a
 // colour temperature -- so a record carries what USD authored.
 module lights;
+// gTextures lives here: a dome reads its image through the same table the
+// materials sample, and the kernels that light a surface import both anyway.
+__exported import lrt.material.material_inputs;
 
 public static const uint kLightDistant = 0;
 public static const uint kLightSphere  = 1;
@@ -27,7 +30,11 @@ public struct LightRecord {
     public float  temperature;   // kelvin
     public float  coneCos;       // cosine of the shaping cone's half angle; -1: none
     public float  coneSoftness;
-    public float  pad0;
+    public uint   texture;       // a dome's lat-long image; 0xFFFFFFFF: its colour alone
+    public uint   sampler;
+    public uint   pad0;
+    public uint   pad1;
+    public uint   pad2;
     public float4 row0;          // light to world, rows of a 3x4
     public float4 row1;
     public float4 row2;
@@ -78,6 +85,26 @@ public float3 blackbody(float kelvin) {
     const float3 positive = max(rgb, float3(0.0));
     const float luminance = dot(float3(0.2126, 0.7152, 0.0722), positive);
     return luminance > 0.0 ? positive / luminance : float3(1.0);
+}
+
+/// Where a direction lands in a lat-long image: u around the light's own
+/// -Z, v from its +Y down, as UsdLux maps a dome.
+public float2 domeUv(LightRecord l, float3 wi) {
+    const float3 d = normalize(float3(dot(lightAxisX(l), wi), dot(lightAxisY(l), wi), dot(lightAxisZ(l), wi)));
+    const float u = atan2(d.x, -d.z) * (0.5 / 3.14159265358979) + 0.5;
+    const float v = acos(clamp(d.y, -1.0, 1.0)) * (1.0 / 3.14159265358979);
+    return float2(u, v);
+}
+
+/// A dome's image along `wi`, white where it has none.
+public float3 domeImage(LightRecord l, float3 wi) {
+    if (l.texture == 0xFFFFFFFF) {
+        return float3(1.0);
+    }
+    const float2 uv = domeUv(l, wi);
+    bool found;
+    const float4 value = sampleTexture(gTextures, l.texture, l.sampler, uv, float2(0.0), float2(0.0), found);
+    return found ? value.rgb : float3(1.0);
 }
 
 /// The area a light's `normalize` divides by, 0 where it has none.
@@ -145,8 +172,9 @@ void lightFrame(float3 z, out float3 x, out float3 y) {
     y = float3(b, sign + z.y * z.y * a, -z.y);
 }
 
-/// One sample of `l` as seen from `p`.
-public LightSample sampleLight(LightRecord l, float3 p, float2 u) {
+/// One sample of `l` as seen from `p`, whose surface faces `n`. Only a dome
+/// reads the normal: the rest are somewhere rather than everywhere.
+public LightSample sampleLight(LightRecord l, float3 p, float3 n, float2 u) {
     LightSample s;
     s.wi = float3(0.0, 0.0, 1.0);
     s.distance = kLightInfinity;
@@ -176,12 +204,19 @@ public LightSample sampleLight(LightRecord l, float3 p, float2 u) {
         break;
     }
     case kLightDome: {
+        // Cosine weighted around the surface, which is where a dome's light
+        // reaches it from: uniform over the sphere throws half its samples
+        // below the horizon, and a plane under a constant dome came out with
+        // 7% of noise at 4096 of them. The warp that follows the image's own
+        // brightness (the plan's mip warp) is still to come, and is what a
+        // dome with a sun in it needs.
         float3 x, y;
-        lightFrame(float3(0.0, 0.0, 1.0), x, y);
-        const float3 local = sampleCone(-1.0, u);
-        s.wi = normalize(x * local.x + y * local.y + float3(0.0, 0.0, 1.0) * local.z);
-        s.pdf = 1.0 / (4.0 * 3.14159265358979);
-        s.radiance = emission;
+        lightFrame(n, x, y);
+        const float2 d = sampleDisk(u);
+        const float z = sqrt(max(0.0, 1.0 - dot(d, d)));
+        s.wi = normalize(x * d.x + y * d.y + n * z);
+        s.pdf = max(z, 1.0e-6) / 3.14159265358979;
+        s.radiance = emission * domeImage(l, s.wi);
         break;
     }
     case kLightSphere: {

@@ -14,6 +14,7 @@ static const uint kDisk    = 1;
 static const uint kRect    = 2;
 static const uint kDistant = 3;
 static const uint kPoint   = 4;
+static const uint kDome    = 5;
 
 struct IrradianceParams {
     uint   kind;
@@ -34,7 +35,7 @@ struct IrradianceParams {
 StructuredBuffer<float4>         colour;
 StructuredBuffer<float>          depth;
 RWStructuredBuffer<uint>         counts;   // [covered, beyond the tolerance]
-RWStructuredBuffer<float>        worst;    // [worst relative difference]
+RWStructuredBuffer<float>        worst;    // [worst relative difference, then a probe pixel: expected, x, y, z]
 ConstantBuffer<CameraParams>     camera;
 ConstantBuffer<IrradianceParams> plane;
 
@@ -114,7 +115,11 @@ void lambertIrradiance(uint3 tid: SV_DispatchThreadID) {
                 }
             }
             float factor = 0.0;
-            if (plane.kind == kDistant) {
+            if (plane.kind == kDome) {
+                // A hemisphere of it, unoccluded: the cosine integrates to pi
+                // whatever way the surface faces.
+                factor = 3.14159265358979;
+            } else if (plane.kind == kDistant) {
                 // A disc of angular diameter sizeX around the light's axis:
                 // its solid angle times the cosine to it.
                 const float3 towards = normalize(plane.axisY.xyz);
@@ -143,6 +148,13 @@ void lambertIrradiance(uint3 tid: SV_DispatchThreadID) {
                                        abs(got.b - expected.b)) / scale;
             worstRelative = max(worstRelative, relative);
             beyond += relative > plane.radiance.w ? 1u : 0u;
+            // One pixel reported in full, to see what a difference is made of.
+            if (x == camera.width / 2 + 40 && y == camera.height / 2) {
+                worst[1] = expected.r;
+                worst[2] = p.x;
+                worst[3] = p.y;
+                worst[4] = p.z;
+            }
         }
     }
     counts[0] = covered;

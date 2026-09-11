@@ -91,6 +91,9 @@ void HdLrtRenderPass::_Execute(HdRenderPassStateSharedPtr const& state, TfTokenV
     const bool settle = _delegate != nullptr && _delegate->GetSettleStreams();
     const auto visibility =
         _delegate != nullptr ? _delegate->GetMeshVisibility() : lrt::usd::MeshVisibility::Automatic;
+    if (_delegate != nullptr) {
+        _engine->setLightSamples(_delegate->GetLightSamples());
+    }
     if (auto drawn =
             _engine->render(projection, settings, *_targets, technique, settle, &renderTags, request, visibility);
         !drawn) {

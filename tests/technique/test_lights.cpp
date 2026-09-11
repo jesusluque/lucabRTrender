@@ -114,11 +114,12 @@ TEST_CASE("a Lambert plane under a sphere, a disk and a rectangle is lit as the 
     };
     // Each light sits between the camera and the plane, facing it down its
     // own -Z, with no occluder: what arrives is what the light emits.
-    const std::array<Case, 5> cases{Case{"sphere", light::LightKind::Sphere, 0, 0.4F, 0.0F},
+    const std::array<Case, 6> cases{Case{"sphere", light::LightKind::Sphere, 0, 0.4F, 0.0F},
                                     Case{"disk", light::LightKind::Disk, 1, 0.6F, 0.0F},
                                     Case{"rect", light::LightKind::Rect, 2, 1.2F, 0.8F},
                                     Case{"sun", light::LightKind::Distant, 3, 0.0F, 0.0F},
-                                    Case{"sun (0.2 rad)", light::LightKind::Distant, 3, 0.2F, 0.0F}};
+                                    Case{"sun (0.2 rad)", light::LightKind::Distant, 3, 0.2F, 0.0F},
+                                    Case{"dome", light::LightKind::Dome, 5, 0.0F, 0.0F}};
     for (const Case& c : cases) {
         light::Light lamp;
         lamp.kind = c.kind;
