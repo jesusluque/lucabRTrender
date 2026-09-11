@@ -183,6 +183,55 @@ TEST_CASE("a PNG comes back texel for texel, its sRGB decoded by its view and av
     CHECK(s[11] == 0.0F);
 }
 
+TEST_CASE("a footprint filtered by its gradients and by the level they pick agree", "[material][texture]") {
+    LRT_REQUIRE_GPU(gpu);
+    // Not every target lets a compute entry point sample with gradients:
+    // CUDA has no SampleGrad there, so the table falls back to the level the
+    // footprint lands on. Here both paths exist, so they can be compared.
+    const uint32_t w = 64;
+    const uint32_t h = 64;
+    const fs::path png = scratch("footprint.png");
+    writePattern(*gpu, png, w, h);
+    auto store = material::TextureStore::create(*gpu->library);
+    if (!store) FAIL(store.error().toString());
+    const uint32_t slot = (*store)->request(png.string(), material::ColourSpace::Raw);
+    auto loaded = (*store)->commit();
+    REQUIRE(loaded);
+    auto footprint = gpu::ComputeKernel::create(*gpu->library, "lrt/test/material_textures", "materialFootprint");
+    if (!footprint) FAIL(footprint.error().toString());
+    const uint32_t count = 4;
+    gpu::Buffer probes = floatBuffer(*gpu->device, count, "probes");
+    const float probeData[count * 4] = {0.5F, 0.5F, float(slot), 1.0F / float(w),
+                                        0.5F, 0.5F, float(slot), 2.0F / float(w),
+                                        0.5F, 0.5F, float(slot), 4.0F / float(w),
+                                        0.5F, 0.5F, float(slot), 8.0F / float(w)};
+    REQUIRE(probes.write(*gpu->device, 0, sizeof(probeData), probeData));
+    gpu::Buffer sampled = floatBuffer(*gpu->device, count, "sampled");
+    gpu::Buffer counts = test::uintBuffer(*gpu->device, 1, "counts");
+    {
+        gpu::CommandBatch batch(*gpu->device);
+        footprint->dispatch(batch, {1, 1, 1}, [&](rhi::ShaderCursor cursor) {
+            (*store)->bind(cursor["table"]);
+            cursor["probes"].setBinding(probes.rhi());
+            cursor["sampled"].setBinding(sampled.rhi());
+            cursor["counts"].setBinding(counts.rhi());
+            cursor["params"]["count"].setData(count);
+            cursor["params"]["tolerance"].setData(4.0e-3F);
+        });
+        REQUIRE(batch.submit(true));
+    }
+    float s[count * 4] = {};
+    REQUIRE(sampled.read(*gpu->device, 0, sizeof(s), s));
+    uint32_t differ = 0;
+    REQUIRE(counts.read(*gpu->device, 0, sizeof(differ), &differ));
+    std::printf("  footprints of 1, 2, 4 and 8 texels: levels %.2f %.2f %.2f %.2f, %u samples apart\n",
+                double(s[3]), double(s[7]), double(s[11]), double(s[15]), differ);
+    for (uint32_t k = 0; k < count; ++k) {
+        CHECK(s[k * 4 + 3] == Catch::Approx(float(k)).margin(1e-5F));
+    }
+    CHECK(differ == 0);
+}
+
 TEST_CASE("a UDIM set samples the tile its uv falls in, and nothing where it has none", "[material][texture][udim]") {
     LRT_REQUIRE_GPU(gpu);
     const float red[3] = {0.8F, 0.2F, 0.1F};

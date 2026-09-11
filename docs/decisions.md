@@ -906,6 +906,12 @@ compiled from MaterialX into Slang and evaluated on the device.
 - **The table.** One `ParameterBlock` of 1024 texture slots and its
   samplers, deduplicated. Metal takes it as an argument buffer; a device
   with bindless will take the same interface.
+- **Filtering is per target.** A footprint is sampled with its gradients
+  where a compute entry point may ask for them, and otherwise from the level
+  the wider side of the footprint lands on -- CUDA has no `SampleGrad` in
+  compute. The choice is a `__target_switch` in the shader, not a build
+  flag. On Metal, where both exist, they pick the same levels (0, 1, 2, 3
+  for footprints of 1, 2, 4 and 8 texels) and the same samples.
 - **Colour spaces.** MaterialX `srgb_texture` is sRGB and anything else is
   raw; `UsdUVTexture`'s `sourceColorSpace` is auto, raw or sRGB, auto
   meaning sRGB for 8-bit images.
