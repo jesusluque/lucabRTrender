@@ -325,7 +325,8 @@ Result<void> Engine::writeAov(const render::RenderTargets& targets, AovSource ao
 
 Result<void> Engine::render(const render::Projection& projection, const render::RenderSettings& settings,
                             render::RenderTargets& targets, Technique technique, bool settleStreams,
-                            const pxr::TfTokenVector* renderTags, const AovRequest& aovRequest) {
+                            const pxr::TfTokenVector* renderTags, const AovRequest& aovRequest,
+                            MeshVisibility visibility) {
     lastTargets_ = &targets;
     aovsValid_ = false;
     std::vector<world::MeshInstance> meshInstances;
@@ -487,22 +488,24 @@ Result<void> Engine::render(const render::Projection& projection, const render::
     }
     // Opaque layers first -- meshes, points -- then splats blended over them.
     const bool drawMeshes = !meshInstances.empty() || !meshSets.empty();
-    if (drawMeshes && !device_->caps().rasterization) {
-        static bool warned = false;
-        if (!warned) {
-            warned = true;
-            log::warn("hdLrt: meshes need a rasterising device until ray traced visibility lands");
-        }
+    const gpu::Caps& caps = device_->caps();
+    if (visibility == MeshVisibility::Automatic) {
+        visibility = caps.rasterization                             ? MeshVisibility::Raster
+                     : caps.rayQuery && caps.accelerationStructure ? MeshVisibility::Rays
+                                                                   : MeshVisibility::Bvh;
     }
-    const bool meshLayer = drawMeshes && device_->caps().rasterization;
+    if (drawMeshes && visibility == MeshVisibility::Raster && !caps.rasterization) {
+        return Error(ErrorCode::Unsupported, "mesh visibility by raster: the device does not rasterise");
+    }
+    if (drawMeshes && visibility == MeshVisibility::Rays && !(caps.rayQuery && caps.accelerationStructure)) {
+        return Error(ErrorCode::Unsupported, "mesh visibility by rays: the device has no ray queries");
+    }
+    const bool meshLayer = drawMeshes;
     if (meshLayer) {
         if (!scene_.has_value()) {
             auto scene = world::GpuScene::create(*library_);
             if (!scene) return std::move(scene).error();
             scene_.emplace(std::move(*scene));
-            auto raster = technique::VisibilityRaster::create(*library_);
-            if (!raster) return std::move(raster).error();
-            visibilityRaster_.emplace(std::move(*raster));
             auto shading = technique::HeadlightShading::create(*library_);
             if (!shading) return std::move(shading).error();
             headlight_.emplace(std::move(*shading));
@@ -510,7 +513,44 @@ Result<void> Engine::render(const render::Projection& projection, const render::
         scene_->setExtraPrimvarSlots(aovRequest.primvars);
         LRT_TRY(scene_->update(meshInstances, projection, meshSets));
         gpu::CommandBatch batch(*device_);
-        LRT_TRY(visibilityRaster_->render(batch, *scene_, projection, settings.width, settings.height, visibility_));
+        switch (visibility) {
+            case MeshVisibility::Automatic:
+            case MeshVisibility::Raster:
+                if (!visibilityRaster_.has_value()) {
+                    auto made = technique::VisibilityRaster::create(*library_);
+                    if (!made) return std::move(made).error();
+                    visibilityRaster_.emplace(std::move(*made));
+                }
+                LRT_TRY(visibilityRaster_->render(batch, *scene_, projection, settings.width, settings.height,
+                                                  visibility_));
+                break;
+            case MeshVisibility::Rays:
+                if (!visibilityTrace_.has_value()) {
+                    auto accel = world::RayTracingScene::create(*library_);
+                    if (!accel) return std::move(accel).error();
+                    rayTracingScene_.emplace(std::move(*accel));
+                    auto made = technique::VisibilityTrace::create(*library_);
+                    if (!made) return std::move(made).error();
+                    visibilityTrace_.emplace(std::move(*made));
+                }
+                LRT_TRY(rayTracingScene_->build(*scene_));
+                LRT_TRY(visibilityTrace_->render(batch, *rayTracingScene_, projection, settings.width,
+                                                 settings.height, visibility_));
+                break;
+            case MeshVisibility::Bvh:
+                if (!visibilityBvh_.has_value()) {
+                    auto bvh = world::BvhScene::create(*library_);
+                    if (!bvh) return std::move(bvh).error();
+                    bvhScene_.emplace(std::move(*bvh));
+                    auto made = technique::VisibilityBvh::create(*library_);
+                    if (!made) return std::move(made).error();
+                    visibilityBvh_.emplace(std::move(*made));
+                }
+                LRT_TRY(bvhScene_->build(*scene_));
+                LRT_TRY(visibilityBvh_->render(batch, *scene_, *bvhScene_, projection, settings.width,
+                                               settings.height, visibility_));
+                break;
+        }
         LRT_TRY(headlight_->shade(batch, *scene_, visibility_, projection, meshLayer_));
         if (aovRequest.ids || aovRequest.normals || !aovRequest.primvars.empty()) {
             if (!aovShading_.has_value()) {

@@ -42,7 +42,8 @@ Result<VisibilityRaster> VisibilityRaster::create(gpu::ShaderLibrary& library) {
 Result<void> VisibilityRaster::render(gpu::CommandBatch& batch, const world::GpuScene& scene,
                                       const render::Projection& projection, uint32_t width, uint32_t height,
                                       VisibilityTargets& targets) {
-    if (targets.width != width || targets.height != height || !targets.ids.valid()) {
+    // Rays leave no depth texture: the rasteriser remakes both.
+    if (targets.width != width || targets.height != height || !targets.ids.valid() || !targets.depth.valid()) {
         gpu::TextureDesc ids;
         ids.width = width;
         ids.height = height;

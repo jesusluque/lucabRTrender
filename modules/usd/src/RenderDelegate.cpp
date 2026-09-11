@@ -59,7 +59,8 @@ HdRenderPassSharedPtr HdLrtRenderDelegate::CreateRenderPass(HdRenderIndex* index
     return std::make_shared<HdLrtRenderPass>(index, collection, _engine.get(), this);
 }
 
-TF_DEFINE_PRIVATE_TOKENS(_lrtSettings, ((technique, "lrt:technique"))((settleStreams, "lrt:settleStreams"))(raster)(rt));
+TF_DEFINE_PRIVATE_TOKENS(_lrtSettings, ((technique, "lrt:technique"))((settleStreams, "lrt:settleStreams"))
+                                           ((visibility, "lrt:visibility"))(raster)(rt)(automatic)(rays)(bvh));
 
 HdRenderSettingDescriptorList HdLrtRenderDelegate::GetRenderSettingDescriptors() const {
     HdRenderSettingDescriptor technique;
@@ -70,7 +71,25 @@ HdRenderSettingDescriptorList HdLrtRenderDelegate::GetRenderSettingDescriptors()
     settle.name = "Wait for streamed assets before drawing";
     settle.key = _lrtSettings->settleStreams;
     settle.defaultValue = VtValue(false);
-    return {technique, settle};
+    HdRenderSettingDescriptor visibility;
+    visibility.name = "Mesh visibility (automatic | raster | rays | bvh)";
+    visibility.key = _lrtSettings->visibility;
+    visibility.defaultValue = VtValue(_lrtSettings->automatic);
+    return {technique, settle, visibility};
+}
+
+lrt::usd::MeshVisibility HdLrtRenderDelegate::GetMeshVisibility() const {
+    const VtValue value = GetRenderSetting(_lrtSettings->visibility);
+    std::string name;
+    if (value.IsHolding<TfToken>()) {
+        name = value.UncheckedGet<TfToken>().GetString();
+    } else if (value.IsHolding<std::string>()) {
+        name = value.UncheckedGet<std::string>();
+    }
+    if (name == _lrtSettings->raster.GetString()) return lrt::usd::MeshVisibility::Raster;
+    if (name == _lrtSettings->rays.GetString()) return lrt::usd::MeshVisibility::Rays;
+    if (name == _lrtSettings->bvh.GetString()) return lrt::usd::MeshVisibility::Bvh;
+    return lrt::usd::MeshVisibility::Automatic;
 }
 
 bool HdLrtRenderDelegate::GetSettleStreams() const {

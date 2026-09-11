@@ -109,6 +109,14 @@ Result<std::vector<uint8_t>> StageRenderer::mappedOutput(const std::string& aov)
     return out;
 }
 
+Result<void> StageRenderer::setMeshVisibility(const std::string& route) {
+    if (route != "automatic" && route != "raster" && route != "rays" && route != "bvh") {
+        return Error::make(ErrorCode::InvalidArgument, "mesh visibility '{}': automatic, raster, rays or bvh", route);
+    }
+    impl_->delegate->SetRenderSetting(TfToken("lrt:visibility"), VtValue(TfToken(route)));
+    return ok();
+}
+
 double StageRenderer::timeCodesPerSecond() const {
     return impl_->stage->GetTimeCodesPerSecond();
 }

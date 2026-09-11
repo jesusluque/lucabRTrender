@@ -92,7 +92,8 @@ void addConvert(CLI::App& app) {
 
 void addStage(CLI::App& app) {
     struct Options {
-        std::string stage, camera, output = "out.exr", size = "1920x1080", technique = "raster";
+        std::string stage, camera, output = "out.exr", size = "1920x1080", technique = "raster",
+                    visibility = "automatic";
         double time = 0.0;
         std::vector<double> eye, target, up{0.0, 1.0, 0.0};
         double focal = 35.0, nearZ = 0.1, farZ = 100000.0;
@@ -104,6 +105,7 @@ void addStage(CLI::App& app) {
     cmd->add_option("--time", o->time, "USD time code");
     cmd->add_option("--size", o->size, "WIDTHxHEIGHT");
     cmd->add_option("--technique", o->technique, "raster | rt (the delegate's lrt:technique setting)");
+    cmd->add_option("--visibility", o->visibility, "how meshes are seen: automatic | raster | rays | bvh");
     cmd->add_option("--eye", o->eye, "a camera of its own at x y z (with --target), not one on the stage")->expected(3);
     cmd->add_option("--target", o->target, "where that camera looks")->expected(3);
     cmd->add_option("--up", o->up, "its up vector")->expected(3);
@@ -120,6 +122,10 @@ void addStage(CLI::App& app) {
         auto renderer = usd::StageRenderer::open(o->stage);
         if (!renderer) {
             std::fprintf(stderr, "%s\n", renderer.error().toString().c_str());
+            throw CLI::RuntimeError(1);
+        }
+        if (auto set = (*renderer)->setMeshVisibility(o->visibility); !set) {
+            std::fprintf(stderr, "%s\n", set.error().toString().c_str());
             throw CLI::RuntimeError(1);
         }
         Result<usd::StageImage> image = Error(ErrorCode::InvalidArgument, "no image");

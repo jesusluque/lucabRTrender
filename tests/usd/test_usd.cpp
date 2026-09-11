@@ -512,6 +512,114 @@ TEST_CASE("a PointInstancer draws as its instances authored one by one", "[usd][
     CHECK(diff->relMse < 1e-5);    // half-precision orientations
 }
 
+TEST_CASE("Hydra gets the same ids whichever route finds the meshes", "[usd][gpu][mesh][visibility]") {
+    LRT_REQUIRE_GPU(gpu);
+    const gpu::Caps& caps = gpu->device->caps();
+    if (!caps.rasterization || !caps.rayQuery || !caps.accelerationStructure) {
+        SKIP("needs rasterisation and ray queries, to compare all three routes");
+    }
+    const fs::path path = scratch("routes.usda");
+    {
+        std::ofstream out(path);
+        out << "#usda 1.0\n(\n    upAxis = \"Y\"\n)\n"
+               // Instanced squares, turned and scaled; a single-sided floor
+               // facing the camera and a wall behind it facing away; a
+               // mirrored single-sided square.
+               "def PointInstancer \"Many\"\n{\n"
+               "    rel prototypes = [</Many/Prototypes/Square>]\n"
+               "    int[] protoIndices = [0, 0, 0, 0]\n"
+               "    point3f[] positions = [(-2, 0, 0), (0, 1, -1), (2, -0.5, 0.5), (0.5, -1.2, 1)]\n"
+               "    quath[] orientations = [(1, 0, 0, 0), (0.7071068, 0, 0.7071068, 0), (0.9238795, 0.3826834, 0, 0),"
+               " (0.9659258, 0, 0, 0.258819)]\n"
+               "    float3[] scales = [(1, 1, 1), (2, 1, 1), (1, 1.5, 1), (0.7, 0.7, 0.7)]\n"
+               "    def Scope \"Prototypes\"\n    {\n"
+               "        def Mesh \"Square\"\n        {\n"
+               "            int[] faceVertexCounts = [4]\n"
+               "            int[] faceVertexIndices = [0, 1, 2, 3]\n"
+               "            point3f[] points = [(-0.5, -0.5, 0), (0.5, -0.5, 0), (0.5, 0.5, 0), (-0.5, 0.5, 0)]\n"
+               "            uniform token subdivisionScheme = \"none\"\n"
+               "            uniform bool doubleSided = 1\n"
+               "        }\n    }\n}\n"
+               "def Mesh \"Ground\"\n{\n"
+               "    int[] faceVertexCounts = [4, 4]\n"
+               "    int[] faceVertexIndices = [0, 1, 2, 3, 3, 5, 4, 2]\n"
+               "    point3f[] points = [(-4, -2, 3), (4, -2, 3), (4, -2, -3), (-4, -2, -3), (4, 1, -5), (-4, 1, -5)]\n"
+               "    uniform token subdivisionScheme = \"none\"\n"
+               "}\n"
+               "def Mesh \"Mirrored\"\n{\n"
+               "    int[] faceVertexCounts = [4]\n"
+               "    int[] faceVertexIndices = [0, 1, 2, 3]\n"
+               "    point3f[] points = [(-0.5, -0.5, 0), (0.5, -0.5, 0), (0.5, 0.5, 0), (-0.5, 0.5, 0)]\n"
+               "    uniform token subdivisionScheme = \"none\"\n"
+               "    double3 xformOp:translate = (-1.5, 1.5, 1)\n    float3 xformOp:scale = (-1, 1, 1)\n"
+               "    uniform token[] xformOpOrder = [\"xformOp:translate\", \"xformOp:scale\"]\n"
+               "}\n"
+               "def Camera \"Camera\"\n{\n"
+               "    float focalLength = 30\n"
+               "    float horizontalAperture = 24.576\n    float verticalAperture = 18.432\n"
+               "    double3 xformOp:translate = (0.5, 0.5, 9)\n"
+               "    uniform token[] xformOpOrder = [\"xformOp:translate\"]\n}\n";
+    }
+    auto renderer = usd::StageRenderer::open(path);
+    if (!renderer) FAIL(renderer.error().toString());
+    (*renderer)->requestOutputs({"primId", "instanceId", "elementId"});
+    const uint32_t w = 320;
+    const uint32_t h = 240;
+    struct Frame {
+        gpu::Buffer ids;   // primId, instanceId, elementId: three words a pixel
+        uint64_t    covered = 0;
+    };
+    const auto frame = [&](const char* route) {
+        REQUIRE((*renderer)->setMeshVisibility(route));
+        REQUIRE((*renderer)->render("/Camera", 0.0, w, h));
+        std::vector<uint8_t> bytes;
+        for (const char* aov : {"primId", "instanceId", "elementId"}) {
+            auto mapped = (*renderer)->mappedOutput(aov);
+            REQUIRE(mapped);
+            REQUIRE(mapped->size() == size_t{w} * h * 4);
+            bytes.insert(bytes.end(), mapped->begin(), mapped->end());
+        }
+        gpu::BufferDesc desc;
+        desc.bytes = bytes.size();
+        desc.elementBytes = 4;
+        auto ids = gpu::Buffer::create(*gpu->device, desc, bytes.data());
+        REQUIRE(ids);
+        // Coverage: the primId plane against a cleared one (-1 everywhere).
+        const std::vector<int32_t> cleared(size_t{w} * h, -1);
+        gpu::BufferDesc plane;
+        plane.bytes = cleared.size() * 4;
+        plane.elementBytes = 4;
+        auto blank = gpu::Buffer::create(*gpu->device, plane, cleared.data());
+        auto prims = gpu::Buffer::create(*gpu->device, plane, bytes.data());
+        REQUIRE(blank);
+        REQUIRE(prims);
+        auto covered = render::countDifferent(*gpu->library, *prims, *blank, w * h);
+        REQUIRE(covered);
+        return Frame{std::move(*ids), *covered};
+    };
+    const Frame raster = frame("raster");
+    const Frame rays = frame("rays");
+    const Frame bvh = frame("bvh");
+    const Frame automatic = frame("automatic");
+    auto raysDiffer = render::countDifferent(*gpu->library, raster.ids, rays.ids, 3 * w * h);
+    auto bvhDiffer = render::countDifferent(*gpu->library, raster.ids, bvh.ids, 3 * w * h);
+    auto automaticDiffer = render::countDifferent(*gpu->library, raster.ids, automatic.ids, 3 * w * h);
+    REQUIRE(raysDiffer);
+    REQUIRE(bvhDiffer);
+    REQUIRE(automaticDiffer);
+    std::printf("  ids through Hydra, %u x %u, raster covering %llu: rays differ in %llu words, the BVH in %llu, "
+                "automatic in %llu\n",
+                w, h, static_cast<unsigned long long>(raster.covered), static_cast<unsigned long long>(*raysDiffer),
+                static_cast<unsigned long long>(*bvhDiffer), static_cast<unsigned long long>(*automaticDiffer));
+    CHECK(raster.covered > uint64_t{w} * h / 8);
+    CHECK(*automaticDiffer == 0);   // this device rasterises
+    // Raster samples pixel centres as the rays do, so they part only where a
+    // centre falls on an edge -- here along the grazing floor: measured 15
+    // and 6 words of 3 x 76800.
+    CHECK(*raysDiffer * 1000 <= raster.covered);
+    CHECK(*bvhDiffer * 1000 <= raster.covered);
+}
+
 TEST_CASE("the hdLrt plugin loads through USD's renderer plugin registry", "[usd][plugin]") {
     const fs::path plugins = LRT_HYDRA_PLUGIN_DIR;
     PlugRegistry::GetInstance().RegisterPlugins(plugins.string());

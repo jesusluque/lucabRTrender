@@ -39,6 +39,11 @@ public:
     [[nodiscard]] Result<StageImage> render(const render::Camera& camera, double time, uint32_t width,
                                             uint32_t height, const std::string& technique = "raster");
 
+    /// How renders find what meshes a pixel sees: "automatic" (the default:
+    /// raster where the device rasterises, else rays, else compute BVHs),
+    /// "raster", "rays" or "bvh". The delegate's `lrt:visibility` setting.
+    [[nodiscard]] Result<void> setMeshVisibility(const std::string& route);
+
     /// The Hydra outputs renders produce, colour and depth always among them
     /// ("primId", "instanceId", "elementId", "Neye", "normal", "primvars:st"...).
     void requestOutputs(const std::vector<std::string>& aovs);

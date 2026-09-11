@@ -49,6 +49,8 @@ public:
     /// `lrt:settleStreams`: false (default) for a viewport, which lets streamed
     /// assets fill in over frames; true for an image that must be complete.
     [[nodiscard]] bool GetSettleStreams() const;
+    /// `lrt:visibility`: "automatic" (default), "raster", "rays" or "bvh".
+    [[nodiscard]] lrt::usd::MeshVisibility GetMeshVisibility() const;
 
     /// True when a device opened; a delegate without one draws nothing.
     [[nodiscard]] bool HasEngine() const { return _engine != nullptr; }

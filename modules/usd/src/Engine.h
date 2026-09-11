@@ -120,6 +120,15 @@ enum class Technique {
     RayTraced,  ///< GaussianRayTracer, the device's faster route; splats only
 };
 
+/// Which route finds what meshes a pixel sees. All three fill the same
+/// visibility targets with the same ids (tests/technique/test_visibility.cpp).
+enum class MeshVisibility {
+    Automatic,  ///< raster where the device rasterises, else rays, else the compute BVH
+    Raster,     ///< VisibilityRaster
+    Rays,       ///< VisibilityTrace: the device's acceleration structures
+    Bvh,        ///< VisibilityBvh: compute BVHs, for devices with neither
+};
+
 class Engine {
 public:
     /// Null with a reason when there is no device; Hydra then gets nothing drawn.
@@ -151,7 +160,7 @@ public:
     Result<void> render(const render::Projection& projection, const render::RenderSettings& settings,
                         render::RenderTargets& targets, Technique technique = Technique::Raster,
                         bool settleStreams = false, const pxr::TfTokenVector* renderTags = nullptr,
-                        const AovRequest& aovs = {});
+                        const AovRequest& aovs = {}, MeshVisibility visibility = MeshVisibility::Automatic);
 
     [[nodiscard]] gpu::Device& device() noexcept { return *device_; }
 
@@ -188,7 +197,11 @@ private:
     std::optional<world::Instancing>          instancing_;
     std::optional<geom::MeshBuilder>          meshBuilder_;   ///< made on first use
     std::optional<world::GpuScene>            scene_;
-    std::optional<technique::VisibilityRaster> visibilityRaster_;
+    std::optional<technique::VisibilityRaster> visibilityRaster_;   ///< each made on first use
+    std::optional<world::RayTracingScene>      rayTracingScene_;
+    std::optional<technique::VisibilityTrace>  visibilityTrace_;
+    std::optional<world::BvhScene>             bvhScene_;
+    std::optional<technique::VisibilityBvh>    visibilityBvh_;
     std::optional<technique::HeadlightShading> headlight_;
     std::optional<gpu::ComputeKernel>          nearest_;
     technique::VisibilityTargets              visibility_;
