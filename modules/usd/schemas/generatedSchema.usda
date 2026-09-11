@@ -1,0 +1,85 @@
+#usda 1.0
+(
+    "Codeless schemas for lucabRTrender, written by hand in usdGenSchema's output form: no C++ is generated for them and none is needed -- the render delegate reads their properties as primvars. Registered through modules/usd/schemas/plugInfo.json."
+)
+
+class "LrtSplatEditAPI" (
+    doc = """A SplatEdit over the Gaussian splat clouds at and below this prim:
+a selection volume in each cloud's own space, what happens to the splats it
+selects, and a grade -- openFXplayer's SplatEdit, rule for rule
+(shaders/lrt/common/edit.slang). Its properties are constant primvars, so an
+edit on an Xform is inherited by every ParticleField under it, and one
+authored nearer a cloud overrides it."""
+)
+{
+    bool primvars:lrt:edit:active = 0 (
+        doc = "Whether the edit applies."
+        interpolation = "constant"
+    )
+    token primvars:lrt:edit:shape = "box" (
+        allowedTokens = ["box", "sphere"]
+        doc = "The selection volume: a box of half extents `size`, or a sphere of radius size.x."
+        interpolation = "constant"
+    )
+    token primvars:lrt:edit:mode = "grade" (
+        allowedTokens = ["keep", "remove", "grade"]
+        doc = "keep: splats outside the volume go. remove: splats inside go. grade: nothing goes. Splats inside that remain are graded."
+        interpolation = "constant"
+    )
+    float3 primvars:lrt:edit:centre = (0, 0, 0) (
+        doc = "The volume's centre, in the cloud's own space."
+        interpolation = "constant"
+    )
+    float3 primvars:lrt:edit:size = (1, 1, 1) (
+        doc = "Half extents of the box, or radius of the sphere in x, in the cloud's own space."
+        interpolation = "constant"
+    )
+    color3f primvars:lrt:edit:tint = (1, 1, 1) (
+        doc = "Multiplies the colour of graded splats, in the encoded space the cloud was trained in."
+        interpolation = "constant"
+    )
+    float primvars:lrt:edit:saturation = 1 (
+        doc = "Lerps graded colour from its Rec.709 luma (0) to itself (1)."
+        interpolation = "constant"
+    )
+    float primvars:lrt:edit:brightness = 1 (
+        doc = "Multiplies graded colour."
+        interpolation = "constant"
+    )
+    float primvars:lrt:edit:opacity = 1 (
+        doc = "Multiplies the opacity of graded splats; below 1/255 they go."
+        interpolation = "constant"
+    )
+    float primvars:lrt:edit:minOpacity = 0 (
+        doc = "Wherever the volume is, splats below this opacity go (0: off)."
+        interpolation = "constant"
+    )
+    float primvars:lrt:edit:maxScale = 0 (
+        doc = "Wherever the volume is, splats longer than this on their longest axis, in the cloud's units, go (0: off)."
+        interpolation = "constant"
+    )
+    bool primvars:lrt:edit:invert = 0 (
+        doc = "Turns the volume test round."
+        interpolation = "constant"
+    )
+}
+
+class "LrtPointStyleAPI" (
+    doc = """How lucabRTrender draws a UsdGeomPoints: widths are world units
+unless sizeInPixels says otherwise, with optional eye-dome lighting and
+surface splatting (render::PointStyle)."""
+)
+{
+    float primvars:lrt:sizeInPixels = 0 (
+        doc = "Above zero, every point is this many pixels across and widths are ignored."
+        interpolation = "constant"
+    )
+    float primvars:lrt:edl = 0 (
+        doc = "Eye-dome lighting strength (0: off)."
+        interpolation = "constant"
+    )
+    float primvars:lrt:surfaceOffset = 0 (
+        doc = "Surface splatting's depth slack in world units: points within it of the nearest blend (0: off)."
+        interpolation = "constant"
+    )
+}

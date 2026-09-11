@@ -26,6 +26,7 @@
 //   - colour is blended in the encoded space the cloud was trained in, and the
 //     finished pixel is linearised.
 module frame;
+import lrt.common.edit;
 
 public static const uint kTile = 16;
 
@@ -60,6 +61,7 @@ public struct FrameParams {
     public uint  linearise;      // 1: finished pixel sRGB -> linear
     public uint  hasUnder;       // 1: an opaque layer (raster points) is under the splats
     public uint  pad1; public uint pad2;
+    public EditParams edit;      // this cloud instance's SplatEdit (common/edit.slang)
 };
 
 /// What the projection leaves for the blend, one record per splat, so a pair

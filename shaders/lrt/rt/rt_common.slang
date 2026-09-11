@@ -8,6 +8,7 @@
 // the ray's own.
 module rt_common;
 import lrt.common.packing;
+__exported import lrt.common.edit;
 
 public static const uint kIcoVertices = 12;
 public static const uint kIcoTriangles = 20;
@@ -41,6 +42,7 @@ public struct RtParams {
     public uint  depthMode;      // 0 alpha-weighted mean, 1 first crossing
     public float depthThreshold;
     public uint  pad0; public uint pad1; public uint pad2;
+    public EditParams edit;      // shade: this instance's SplatEdit (common/edit.slang)
 };
 
 /// The squared Mahalanobis radius a particle is cut at: the raster's rule, so

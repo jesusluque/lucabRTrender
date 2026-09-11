@@ -37,9 +37,13 @@ std::unique_ptr<Engine> Engine::create(std::string& why) {
 }
 
 void Engine::setSplats(const pxr::SdfPath& id, std::optional<io::RawSplats> raw,
-                       const render::Mat4* transform, std::optional<bool> visible) {
+                       const render::Mat4* transform, std::optional<bool> visible,
+                       std::optional<render::SplatEdit> edit) {
     const std::lock_guard<std::mutex> held(guard_);
     SplatEntry& entry = splats_[id];
+    if (edit.has_value()) {
+        entry.edit = *edit;
+    }
     if (raw.has_value()) {
         entry.pending = std::move(raw);
     }
@@ -126,7 +130,7 @@ Result<void> Engine::render(const render::Projection& projection, const render::
         const std::lock_guard<std::mutex> held(guard_);
         for (const auto& [id, entry] : splats_) {
             if (entry.visible && entry.gpu != nullptr) {
-                splats.push_back({entry.gpu.get(), entry.objectToWorld});
+                splats.push_back({entry.gpu.get(), entry.objectToWorld, entry.edit});
             }
         }
         for (const auto& [id, entry] : points_) {

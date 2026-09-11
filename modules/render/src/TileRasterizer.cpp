@@ -239,6 +239,7 @@ Result<FrameStats> TileRasterizer::render(const Projection& projection,
             cursor["params"]["base"].setData(base);
             cursor["params"]["restPerColour"].setData(cloud->restPerColour);
             cursor["params"]["shWords"].setData(cloud->shWords);
+            setEdit(cursor["params"]["edit"], instance.edit);
         });
         base += cloud->count;
     }

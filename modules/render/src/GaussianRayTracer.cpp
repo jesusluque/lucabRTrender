@@ -11,6 +11,7 @@
 #include "lrt/gpu/CommandBatch.h"
 #include "lrt/gpu/Device.h"
 #include "lrt/gpu/ShaderLibrary.h"
+#include "FrameParams.h"
 
 namespace lrt::render {
 namespace {
@@ -392,6 +393,7 @@ Result<void> GaussianRayTracer::prepareFrame(std::span<const SplatInstance> inst
         const scene::GpuSplats* cloud;
         uint32_t                colourStart;
         Vec3                    eye;
+        SplatEdit               edit;
     };
     std::vector<Shade> shades;
     uint64_t colours = 0;
@@ -407,7 +409,7 @@ Result<void> GaussianRayTracer::prepareFrame(std::span<const SplatInstance> inst
         const std::array<float, 12> rows = instance.objectToWorld.rows3x4();
         const std::array<float, 12> toCloudRows = toCloud.rows3x4();
         const auto colourStart = static_cast<uint32_t>(colours);
-        shades.push_back({instance.splats, colourStart, toCloud.point(eyeWorld)});
+        shades.push_back({instance.splats, colourStart, toCloud.point(eyeWorld), instance.edit});
         colours += instance.splats->count;
         if (!hardware) {
             data.insert(data.end(), toCloudRows.begin(), toCloudRows.end());
@@ -503,6 +505,7 @@ Result<void> GaussianRayTracer::prepareFrame(std::span<const SplatInstance> inst
             p["v03"].setData(static_cast<float>(shade.eye.x));
             p["v13"].setData(static_cast<float>(shade.eye.y));
             p["v23"].setData(static_cast<float>(shade.eye.z));
+            setEdit(p["edit"], shade.edit);
         });
     }
     return batch.submit(false);

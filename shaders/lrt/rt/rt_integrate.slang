@@ -314,7 +314,13 @@ public struct Integrator<P : IPrimitives> {
             const float4 f0 = frames[id * 4];
             const float4 f1 = frames[id * 4 + 1];
             const float4 f2 = frames[id * 4 + 2];
-            const float4 f3 = frames[id * 4 + 3];
+            // The opacity this instance draws the particle with, after its
+            // SplatEdit (rt_shade.slang); zero is removed. The cut follows it,
+            // as the rasteriser's does.
+            const float opacity = colours[id + instanceIndices[instance * 2 + 1]].w;
+            if (!(opacity >= 1.0 / 255.0)) {
+                continue;
+            }
             // Into the particle's frame, where it is the unit sphere.
             const float3x3 m = float3x3(f0.xyz, f1.xyz, f2.xyz);
             const float3 o = mul(m, origin - float3(f0.w, f1.w, f2.w));
@@ -322,10 +328,10 @@ public struct Integrator<P : IPrimitives> {
             const float tPeak = -dot(o, d) / max(dot(d, d), 1e-30);
             const float3 closest = o + tPeak * d;
             const float power = dot(closest, closest);
-            if (power > f3.x || tPeak < params.nearZ || tPeak > params.farZ) {
+            if (power > rtCutoff(opacity) || tPeak < params.nearZ || tPeak > params.farZ) {
                 continue;
             }
-            const float alpha = min(0.99, f3.y * exp(-0.5 * power));
+            const float alpha = min(0.99, opacity * exp(-0.5 * power));
             if (alpha < 1.0 / 255.0) {
                 continue;
             }

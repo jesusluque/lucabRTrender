@@ -6,6 +6,7 @@ module splat_project;
 import lrt.common.packing;
 import lrt.common.sh;
 import frame;
+import lrt.common.edit;
 
 StructuredBuffer<float4>    positions;
 StructuredBuffer<uint>      shape;
@@ -38,7 +39,18 @@ void splatProject(uint3 tid: SV_DispatchThreadID) {
     }
     const uint slot = params.base + i;
 
-    const float4 posOpacity = positions[i];
+    float4 posOpacity = positions[i];
+    const uint row = i * 4;
+    const float3 scale = exp(float3(lowHalf(shape[row + 1]), highHalf(shape[row + 1]),
+                                    lowHalf(shape[row + 2])));
+    // The SplatEdit, in the cloud's own space, before anything is projected.
+    const EditFate fate = editFate(params.edit, posOpacity.xyz, posOpacity.w, scale);
+    if (fate.removed) {
+        cull(slot);
+        return;
+    }
+    posOpacity.w = fate.opacity;
+
     const float3 t = toView(params, posOpacity.xyz);
     if (!(t.z > params.nearZ) || t.z > params.farZ) {
         cull(slot);
@@ -46,10 +58,7 @@ void splatProject(uint3 tid: SV_DispatchThreadID) {
     }
 
     // 3D covariance in the cloud's space: R S S^T R^T.
-    const uint row = i * 4;
     const float4 q = decodeQuaternion(shape[row]);
-    const float3 scale = exp(float3(lowHalf(shape[row + 1]), highHalf(shape[row + 1]),
-                                    lowHalf(shape[row + 2])));
     const float x = q.x, y = q.y, z = q.z, w = q.w;
     const float3x3 r = float3x3(
         1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y - w * z), 2.0 * (x * z + w * y),
@@ -139,7 +148,10 @@ void splatProject(uint3 tid: SV_DispatchThreadID) {
                                highHalf(shape[row + 3]));
     const uint degree = min(degreeOf(params.restPerColour), params.shLimit);
     const float3 dir = normalize(posOpacity.xyz - float3(params.eyeX, params.eyeY, params.eyeZ));
-    const float3 colour = max(base + evaluateRest(sh, i * params.shWords, degree, dir), 0.0);
+    float3 colour = max(base + evaluateRest(sh, i * params.shWords, degree, dir), 0.0);
+    if (fate.graded) {
+        colour = editGrade(params.edit, colour);
+    }
 
     ProjRecord record;
     record.screen = float4(centre, t.z, cutoff);

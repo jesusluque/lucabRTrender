@@ -50,3 +50,9 @@ set_target_properties(hdLrt PROPERTIES
 file(MAKE_DIRECTORY "${LRT_HYDRA_PLUGIN_DIR}/hdLrt/resources")
 configure_file(plugin/plugInfo.json.in "${LRT_HYDRA_PLUGIN_DIR}/hdLrt/resources/plugInfo.json" @ONLY)
 file(WRITE "${LRT_HYDRA_PLUGIN_DIR}/plugInfo.json" "{ \"Includes\": [ \"*/resources/\" ] }\n")
+
+# The codeless schemas (LrtSplatEditAPI, LrtPointStyleAPI), beside hdLrt so
+# the same PXR_PLUGINPATH_NAME finds both.
+file(MAKE_DIRECTORY "${LRT_HYDRA_PLUGIN_DIR}/lrtSchemas/resources")
+configure_file(schemas/plugInfo.json "${LRT_HYDRA_PLUGIN_DIR}/lrtSchemas/resources/plugInfo.json" COPYONLY)
+configure_file(schemas/generatedSchema.usda "${LRT_HYDRA_PLUGIN_DIR}/lrtSchemas/resources/generatedSchema.usda" COPYONLY)

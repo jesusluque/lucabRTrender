@@ -69,6 +69,29 @@ inline void setObject(rhi::ShaderCursor cursor, const Mat4& objectToView, const 
 }
 
 
+/// EditParams (shaders/lrt/common/edit.slang) under `e`: the struct nested as
+/// `edit` in FrameParams and RtParams.
+inline void setEdit(rhi::ShaderCursor e, const SplatEdit& edit) {
+    e["active"].setData(uint32_t{edit.active ? 1u : 0u});
+    e["shape"].setData(static_cast<uint32_t>(edit.shape));
+    e["mode"].setData(static_cast<uint32_t>(edit.mode));
+    e["invert"].setData(uint32_t{edit.invert ? 1u : 0u});
+    e["centreX"].setData(edit.centre[0]);
+    e["centreY"].setData(edit.centre[1]);
+    e["centreZ"].setData(edit.centre[2]);
+    e["sizeX"].setData(edit.size[0]);
+    e["sizeY"].setData(edit.size[1]);
+    e["sizeZ"].setData(edit.size[2]);
+    e["tintR"].setData(edit.tint[0]);
+    e["tintG"].setData(edit.tint[1]);
+    e["tintB"].setData(edit.tint[2]);
+    e["saturation"].setData(edit.saturation);
+    e["brightness"].setData(edit.brightness);
+    e["opacity"].setData(edit.opacity);
+    e["minOpacity"].setData(edit.minOpacity);
+    e["maxScale"].setData(edit.maxScale);
+}
+
 /// PointParams (shaders/lrt/points/point_frame.slang) under `cursor`, which is
 /// the root's "params" for the raster and EDL passes and "points" for the
 /// disc projection.

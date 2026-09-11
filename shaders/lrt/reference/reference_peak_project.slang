@@ -8,6 +8,7 @@ module reference_peak_project;
 import lrt.common.packing;
 import lrt.common.sh;
 import lrt.splat.frame;
+import lrt.common.edit;
 
 StructuredBuffer<float4>    positions;
 StructuredBuffer<uint>      shape;
@@ -39,12 +40,14 @@ void referencePeakProject(uint3 tid: SV_DispatchThreadID) {
     }
     const uint slot = params.base + i;
     peakColour[slot] = float4(0.0, 0.0, 0.0, -1.0);
-    const float4 p = positions[i];
-    if (!(p.w >= 1.0 / 255.0)) {
-        return;
-    }
+    float4 p = positions[i];
     const uint row = i * 4;
     const float3 s = exp(float3(lowHalf(shape[row + 1]), highHalf(shape[row + 1]), lowHalf(shape[row + 2])));
+    const EditFate fate = editFate(params.edit, p.xyz, p.w, s);
+    if (fate.removed || !(fate.opacity >= 1.0 / 255.0)) {
+        return;
+    }
+    p.w = fate.opacity;
     const float4 q = decodeQuaternion(shape[row]);
     const float x = q.x, y = q.y, z = q.z, w = q.w;
     const float3x3 r = float3x3(1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y - w * z), 2.0 * (x * z + w * y),
@@ -60,5 +63,9 @@ void referencePeakProject(uint3 tid: SV_DispatchThreadID) {
     const float3 base = float3(highHalf(shape[row + 2]), lowHalf(shape[row + 3]), highHalf(shape[row + 3]));
     const uint degree = min(degreeOf(params.restPerColour), params.shLimit);
     const float3 dir = normalize(p.xyz - float3(params.eyeX, params.eyeY, params.eyeZ));
-    peakColour[slot] = float4(max(base + evaluateRest(sh, i * params.shWords, degree, dir), 0.0), p.w);
+    float3 colour = max(base + evaluateRest(sh, i * params.shWords, degree, dir), 0.0);
+    if (fate.graded) {
+        colour = editGrade(params.edit, colour);
+    }
+    peakColour[slot] = float4(colour, p.w);
 }

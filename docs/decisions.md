@@ -243,3 +243,53 @@ renders against the source PLY rather than splat by splat:
 A first `sh3` of 200 splats had a 128-entry palette. Its k-means loss on
 random harmonics gave p99 61, which proves nothing about decoding. The
 fixture was cut to one palette entry per splat.
+
+## SplatEdit and the lrt schemas
+
+`shaders/lrt/common/edit.slang`, `render::SplatEdit`, `modules/usd/schemas`.
+
+### One rule, every renderer
+
+A SplatEdit is openFXplayer's, rule for rule: a box or sphere in the cloud's
+own space, what happens to the splats inside it (keep, remove, grade), a
+grade (tint, brightness, saturation about Rec.709 luma, opacity), and two
+filters that apply wherever the volume is (minimum opacity, maximum scale).
+
+The rule is written once and read by four renderers:
+
+- the tile rasteriser;
+- the rasteriser's GPU reference;
+- the ray tracer, in its per-instance shade pass, carrying the edited opacity
+  that the integrator then cuts by;
+- the ray tracer's GPU reference.
+
+An edit belongs to an instance, not to a cloud, so two instances of one
+cloud can be edited differently.
+
+Checks, p99 in 8-bit sRGB code values:
+
+| Test | Result |
+|---|---|
+| Rasteriser vs its reference, keep, remove, inverted grade, filters | 0 |
+| Ray tracer vs its reference, both routes, two differently edited instances | 0 |
+
+### In USD
+
+`LrtSplatEditAPI` is a codeless applied API schema. Its properties are
+constant primvars `primvars:lrt:edit:*`, and constant primvars inherit down
+the namespace. An edit authored on an Xform therefore stands over every
+ParticleField below it, which is openFXplayer's Edit node over its subtree,
+with no UsdImaging adapter to write. A Hydra render of such a stage matches
+the direct render with the same edit at p99 1.
+
+`LrtPointStyleAPI` declares the point primvars the delegate already read
+(`lrt:sizeInPixels`, `lrt:edl`, `lrt:surfaceOffset`).
+
+Both schemas are written by hand in usdGenSchema's output form, since this
+OpenUSD build has no Python. They are installed beside hdLrt, so one
+`PXR_PLUGINPATH_NAME` finds both.
+
+No `LrtCameraWindowAPI`: a UsdGeomCamera already expresses openFXplayer's
+window. Translate is the aperture offsets, scale is the apertures, and roll
+is the camera's own rotation. The SceneText bridge maps to those.
+`LrtStreamedAssetAPI` waits for the LOD work.

@@ -1,7 +1,11 @@
 // Copyright (c) 2026 lucabRTrender contributors.
 #include "ParticleField.h"
 
+#include <array>
+
+#include <pxr/base/gf/vec3d.h>
 #include <pxr/base/gf/vec3h.h>
+#include <pxr/base/tf/staticTokens.h>
 #include <pxr/base/gf/quath.h>
 #include <pxr/imaging/hd/changeTracker.h>
 #include <pxr/imaging/hd/sceneDelegate.h>
@@ -14,6 +18,89 @@
 PXR_NAMESPACE_OPEN_SCOPE
 
 namespace {
+
+// LrtSplatEditAPI's constant primvars (modules/usd/schemas). Constant primvars
+// are inherited down the namespace, so an edit authored on an Xform stands
+// over every cloud below it -- openFXplayer's Edit node over its subtree.
+TF_DEFINE_PRIVATE_TOKENS(_editTokens,
+    ((active, "lrt:edit:active"))
+    ((shape, "lrt:edit:shape"))
+    ((mode, "lrt:edit:mode"))
+    ((centre, "lrt:edit:centre"))
+    ((size, "lrt:edit:size"))
+    ((tint, "lrt:edit:tint"))
+    ((saturation, "lrt:edit:saturation"))
+    ((brightness, "lrt:edit:brightness"))
+    ((opacity, "lrt:edit:opacity"))
+    ((minOpacity, "lrt:edit:minOpacity"))
+    ((maxScale, "lrt:edit:maxScale"))
+    ((invert, "lrt:edit:invert"))
+    (sphere)(keep)(remove)
+);
+
+float floatOf(VtValue const& value, float fallback) {
+    if (value.IsHolding<float>()) return value.UncheckedGet<float>();
+    if (value.IsHolding<double>()) return static_cast<float>(value.UncheckedGet<double>());
+    if (value.IsHolding<VtFloatArray>() && !value.UncheckedGet<VtFloatArray>().empty())
+        return value.UncheckedGet<VtFloatArray>()[0];
+    return fallback;
+}
+
+bool boolOf(VtValue const& value, bool fallback) {
+    if (value.IsHolding<bool>()) return value.UncheckedGet<bool>();
+    if (value.IsHolding<VtBoolArray>() && !value.UncheckedGet<VtBoolArray>().empty())
+        return value.UncheckedGet<VtBoolArray>()[0];
+    return fallback;
+}
+
+std::array<float, 3> vec3Of(VtValue const& value, std::array<float, 3> fallback) {
+    if (value.IsHolding<GfVec3f>()) {
+        const GfVec3f v = value.UncheckedGet<GfVec3f>();
+        return {v[0], v[1], v[2]};
+    }
+    if (value.IsHolding<GfVec3d>()) {
+        const GfVec3d v = value.UncheckedGet<GfVec3d>();
+        return {static_cast<float>(v[0]), static_cast<float>(v[1]), static_cast<float>(v[2])};
+    }
+    if (value.IsHolding<VtVec3fArray>() && !value.UncheckedGet<VtVec3fArray>().empty()) {
+        const GfVec3f v = value.UncheckedGet<VtVec3fArray>()[0];
+        return {v[0], v[1], v[2]};
+    }
+    return fallback;
+}
+
+TfToken tokenOf(VtValue const& value) {
+    if (value.IsHolding<TfToken>()) return value.UncheckedGet<TfToken>();
+    if (value.IsHolding<VtTokenArray>() && !value.UncheckedGet<VtTokenArray>().empty())
+        return value.UncheckedGet<VtTokenArray>()[0];
+    if (value.IsHolding<std::string>()) return TfToken(value.UncheckedGet<std::string>());
+    return TfToken();
+}
+
+lrt::render::SplatEdit editOf(HdSceneDelegate* delegate, SdfPath const& id) {
+    using Edit = lrt::render::SplatEdit;
+    Edit edit;
+    edit.active = boolOf(delegate->Get(id, _editTokens->active), false);
+    if (!edit.active) {
+        return edit;
+    }
+    edit.shape = tokenOf(delegate->Get(id, _editTokens->shape)) == _editTokens->sphere ? Edit::Shape::Sphere
+                                                                                       : Edit::Shape::Box;
+    const TfToken mode = tokenOf(delegate->Get(id, _editTokens->mode));
+    edit.mode = mode == _editTokens->keep ? Edit::Mode::Keep
+              : mode == _editTokens->remove ? Edit::Mode::Remove
+                                            : Edit::Mode::Grade;
+    edit.centre = vec3Of(delegate->Get(id, _editTokens->centre), edit.centre);
+    edit.size = vec3Of(delegate->Get(id, _editTokens->size), edit.size);
+    edit.tint = vec3Of(delegate->Get(id, _editTokens->tint), edit.tint);
+    edit.saturation = floatOf(delegate->Get(id, _editTokens->saturation), edit.saturation);
+    edit.brightness = floatOf(delegate->Get(id, _editTokens->brightness), edit.brightness);
+    edit.opacity = floatOf(delegate->Get(id, _editTokens->opacity), edit.opacity);
+    edit.minOpacity = floatOf(delegate->Get(id, _editTokens->minOpacity), edit.minOpacity);
+    edit.maxScale = floatOf(delegate->Get(id, _editTokens->maxScale), edit.maxScale);
+    edit.invert = boolOf(delegate->Get(id, _editTokens->invert), false);
+    return edit;
+}
 
 VtVec3fArray vec3fOf(VtValue const& value) {
     if (value.IsHolding<VtVec3fArray>()) {
@@ -77,6 +164,10 @@ void HdLrtParticleField::Sync(HdSceneDelegate* delegate, HdRenderParam* renderPa
         }
         raw = lrt::usd::rawSplatsFrom(arrays, id.GetString());
     }
+    std::optional<lrt::render::SplatEdit> edit;
+    if ((*dirtyBits & HdChangeTracker::DirtyPrimvar) != 0) {
+        edit = editOf(delegate, id);
+    }
 
     lrt::render::Mat4 transform;
     const bool transformDirty = HdChangeTracker::IsTransformDirty(*dirtyBits, id);
@@ -88,7 +179,7 @@ void HdLrtParticleField::Sync(HdSceneDelegate* delegate, HdRenderParam* renderPa
         _UpdateVisibility(delegate, dirtyBits);
         visible = IsVisible();
     }
-    engine->setSplats(id, std::move(raw), transformDirty ? &transform : nullptr, visible);
+    engine->setSplats(id, std::move(raw), transformDirty ? &transform : nullptr, visible, edit);
     *dirtyBits &= ~HdChangeTracker::AllSceneDirtyBits;
 }
 

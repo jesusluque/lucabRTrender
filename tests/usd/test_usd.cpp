@@ -14,6 +14,8 @@
 #include <pxr/base/plug/registry.h>
 #include <pxr/imaging/hd/pluginRenderDelegateUniqueHandle.h>
 #include <pxr/imaging/hd/rendererPluginRegistry.h>
+#include <pxr/usd/usd/primDefinition.h>
+#include <pxr/usd/usd/schemaRegistry.h>
 #include <pxr/usd/usd/stage.h>
 #include <pxr/usd/usdGeom/camera.h>
 #include <pxr/usd/usdGeom/points.h>
@@ -206,4 +208,112 @@ TEST_CASE("the hdLrt plugin loads through USD's renderer plugin registry", "[usd
     HdPluginRenderDelegateUniqueHandle delegate =
         HdRendererPluginRegistry::GetInstance().CreateRenderDelegate(TfToken("HdLrtRendererPlugin"));
     CHECK(delegate);
+}
+
+TEST_CASE("a SplatEdit authored on an ancestor Xform reaches the cloud through Hydra", "[usd][gpu][edit]") {
+    LRT_REQUIRE_GPU(gpu);
+    const io::RawSplats raw = cloud(2500);
+    const fs::path path = scratch("edit-cloud.usdc");
+    fs::remove(path);
+    REQUIRE(usd::writeParticleFieldStage(*gpu->library, raw, path, {.addCamera = false}));
+
+    // The edit on a group above the cloud, as constant primvars: inherited by
+    // everything under it, in each cloud's own space.
+    const fs::path shot = scratch("edit-shot.usda");
+    {
+        std::ofstream out(shot);
+        out << "#usda 1.0\n(\n    defaultPrim = \"World\"\n    upAxis = \"Y\"\n)\n"
+               "def Xform \"World\"\n{\n"
+               "    def Xform \"Group\" (\n        prepend apiSchemas = [\"LrtSplatEditAPI\"]\n    )\n    {\n"
+               "        bool primvars:lrt:edit:active = 1 ( interpolation = \"constant\" )\n"
+               "        token primvars:lrt:edit:shape = \"sphere\" ( interpolation = \"constant\" )\n"
+               "        token primvars:lrt:edit:mode = \"grade\" ( interpolation = \"constant\" )\n"
+               "        float3 primvars:lrt:edit:centre = (0.5, 0, 0) ( interpolation = \"constant\" )\n"
+               "        float3 primvars:lrt:edit:size = (1.5, 0, 0) ( interpolation = \"constant\" )\n"
+               "        color3f primvars:lrt:edit:tint = (1, 0.3, 0.1) ( interpolation = \"constant\" )\n"
+               "        float primvars:lrt:edit:saturation = 0.5 ( interpolation = \"constant\" )\n"
+               "        float primvars:lrt:edit:opacity = 0.6 ( interpolation = \"constant\" )\n"
+               "        bool primvars:lrt:edit:invert = 1 ( interpolation = \"constant\" )\n"
+               "        def \"Cloud\" ( references = @./edit-cloud.usdc@</World/Splats> )\n        {\n"
+               "            double3 xformOp:rotateXYZ = (0, 35, 0)\n"
+               "            uniform token[] xformOpOrder = [\"xformOp:rotateXYZ\"]\n        }\n    }\n"
+               "    def Camera \"Shot\"\n    {\n"
+               "        float2 clippingRange = (0.1, 1000)\n        float focalLength = 30\n"
+               "        float horizontalAperture = 24.576\n        float verticalAperture = 18.432\n"
+               "        double3 xformOp:translate = (0.4, 0.2, 7)\n"
+               "        uniform token[] xformOpOrder = [\"xformOp:translate\"]\n    }\n}\n";
+    }
+    auto renderer = usd::StageRenderer::open(shot);
+    if (!renderer) {
+        FAIL(renderer.error().toString());
+    }
+    auto image = (*renderer)->render("/World/Shot", 0.0, 240, 180);
+    if (!image) {
+        FAIL(image.error().toString());
+    }
+
+    auto loader = scene::CloudLoader::create(*gpu->library);
+    REQUIRE(loader);
+    auto splats = loader->upload(raw);
+    REQUIRE(splats);
+    auto rasterizer = render::TileRasterizer::create(*gpu->library);
+    REQUIRE(rasterizer);
+    render::Camera camera;
+    camera.cameraToWorld = aofx::xform::translation({0.4, 0.2, 7.0});
+    camera.lens.focal = 30.0;
+    camera.lens.nearZ = 0.1;
+    camera.lens.farZ = 1000.0;
+    render::RenderSettings settings;
+    settings.width = 240;
+    settings.height = 180;
+    render::SplatEdit edit;
+    edit.active = true;
+    edit.shape = render::SplatEdit::Shape::Sphere;
+    edit.mode = render::SplatEdit::Mode::Grade;
+    edit.centre = {0.5F, 0.0F, 0.0F};
+    edit.size = {1.5F, 0.0F, 0.0F};
+    edit.tint = {1.0F, 0.3F, 0.1F};
+    edit.saturation = 0.5F;
+    edit.opacity = 0.6F;
+    edit.invert = true;
+    render::RenderTargets direct, plain;
+    REQUIRE(rasterizer->render(camera, std::vector<render::SplatInstance>{{&*splats, aofx::xform::rotationY(35.0), edit}},
+                               settings, direct));
+    REQUIRE(rasterizer->render(camera, std::vector<render::SplatInstance>{{&*splats, aofx::xform::rotationY(35.0)}},
+                               settings, plain));
+
+    gpu::BufferDesc desc;
+    desc.bytes = image->rgba.size() * sizeof(float);
+    desc.elementBytes = 16;
+    auto hydra = gpu::Buffer::create(*gpu->device, desc, image->rgba.data());
+    REQUIRE(hydra);
+    auto diff = render::compareImages(*gpu->library, *hydra, direct.colour, 240, 180);
+    REQUIRE(diff);
+    CHECK(diff->p99 <= 1);
+    CHECK(diff->max <= 2);
+    auto unedited = render::compareImages(*gpu->library, *hydra, plain.colour, 240, 180);
+    REQUIRE(unedited);
+    CHECK(unedited->over2 > unedited->pixels / 20);   // the edit really arrived
+}
+
+TEST_CASE("the codeless lrt schemas register, with their defaults", "[usd][schema]") {
+    PlugRegistry::GetInstance().RegisterPlugins(fs::path(LRT_HYDRA_PLUGIN_DIR).string());
+    const UsdSchemaRegistry& registry = UsdSchemaRegistry::GetInstance();
+    const UsdPrimDefinition* edit = registry.FindAppliedAPIPrimDefinition(TfToken("LrtSplatEditAPI"));
+    REQUIRE(edit != nullptr);
+    CHECK(registry.FindAppliedAPIPrimDefinition(TfToken("LrtPointStyleAPI")) != nullptr);
+
+    UsdStageRefPtr stage = UsdStage::CreateInMemory();
+    UsdPrim group = stage->DefinePrim(SdfPath("/Group"), TfToken("Xform"));
+    CHECK(group.ApplyAPI(TfToken("LrtSplatEditAPI")));
+    CHECK(group.HasAPI(TfToken("LrtSplatEditAPI")));
+    // Unauthored, the schema's defaults answer.
+    float saturation = 0.0F;
+    CHECK(group.GetAttribute(TfToken("primvars:lrt:edit:saturation")).Get(&saturation));
+    CHECK(saturation == 1.0F);
+    TfToken mode;
+    CHECK(group.GetAttribute(TfToken("primvars:lrt:edit:mode")).Get(&mode));
+    CHECK(mode == TfToken("grade"));
+    VtValue allowed;
+    CHECK(group.GetAttribute(TfToken("primvars:lrt:edit:shape")).GetMetadata(TfToken("allowedTokens"), &allowed));
 }

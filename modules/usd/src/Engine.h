@@ -40,6 +40,7 @@ struct SplatEntry {
     std::unique_ptr<scene::GpuSplats>   gpu;
     render::Mat4                        objectToWorld = render::Mat4::identity();
     bool                                visible = true;
+    render::SplatEdit                   edit;
 };
 
 struct PointsEntry {
@@ -63,7 +64,8 @@ public:
 
     // --- from Sync (any thread) ---
     void setSplats(const pxr::SdfPath& id, std::optional<io::RawSplats> raw,
-                   const render::Mat4* transform, std::optional<bool> visible);
+                   const render::Mat4* transform, std::optional<bool> visible,
+                   std::optional<render::SplatEdit> edit = std::nullopt);
     void setPoints(const pxr::SdfPath& id, std::optional<io::RawPoints> raw,
                    const render::Mat4* transform, std::optional<bool> visible,
                    std::optional<render::PointStyle> style);

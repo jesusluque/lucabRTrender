@@ -225,3 +225,98 @@ TEST_CASE("antialiasing pays back the energy dilation adds to a sub-pixel splat"
     CHECK(without > 0.0);
     CHECK(with < 0.6 * without);
 }
+
+TEST_CASE("a SplatEdit renders as the GPU reference renders it", "[render][gpu][edit]") {
+    LRT_REQUIRE_GPU(gpu);
+    auto h = harness(gpu);
+    CloudBuilder built = randomCloud(3000, 29);
+    auto cloud = h->loader.upload(built.raw, 3);
+    REQUIRE(cloud);
+    render::RenderSettings settings;
+    settings.width = 250;
+    settings.height = 190;
+    render::Camera camera = render::Camera::lookingAt({1.5, 1.0, 6.0}, {0.0, 0.0, 0.0});
+    camera.lens.focal = 30.0;
+    render::SplatEdit edit;
+    edit.active = true;
+
+    SECTION("keep what is inside a box") {
+        edit.mode = render::SplatEdit::Mode::Keep;
+        edit.centre = {0.5F, 0.0F, 0.0F};
+        edit.size = {1.0F, 0.8F, 1.5F};
+    }
+    SECTION("remove what is inside a sphere, and the grade does nothing to the rest") {
+        edit.mode = render::SplatEdit::Mode::Remove;
+        edit.shape = render::SplatEdit::Shape::Sphere;
+        edit.size = {1.2F, 0.0F, 0.0F};
+        edit.tint = {0.2F, 1.0F, 1.0F};
+    }
+    SECTION("grade inside an inverted box: tint, saturation, brightness, opacity") {
+        edit.mode = render::SplatEdit::Mode::Grade;
+        edit.invert = true;
+        edit.size = {1.0F, 1.0F, 1.0F};
+        edit.tint = {1.0F, 0.6F, 0.3F};
+        edit.saturation = 0.3F;
+        edit.brightness = 1.4F;
+        edit.opacity = 0.5F;
+    }
+    SECTION("the haze filters, wherever the volume is") {
+        edit.mode = render::SplatEdit::Mode::Grade;
+        edit.size = {100.0F, 100.0F, 100.0F};
+        edit.minOpacity = 0.4F;
+        edit.maxScale = 0.2F;
+    }
+    const std::vector<render::SplatInstance> instances{{&*cloud, render::Mat4::identity(), edit}};
+    const auto diff = compareToReference(*h, camera, instances, settings);
+    CHECK(diff.p99 <= 2);
+
+    // And the edit changed the picture.
+    render::RenderTargets edited, plain;
+    REQUIRE(h->raster.render(camera, instances, settings, edited));
+    const std::vector<render::SplatInstance> untouched{{&*cloud, render::Mat4::identity()}};
+    REQUIRE(h->raster.render(camera, untouched, settings, plain));
+    auto changed = render::compareImages(*gpu->library, edited.colour, plain.colour, settings.width, settings.height);
+    REQUIRE(changed);
+    CHECK(changed->over2 > changed->pixels / 20);
+}
+
+TEST_CASE("a SplatEdit is in the cloud's own space and per instance", "[render][gpu][edit]") {
+    LRT_REQUIRE_GPU(gpu);
+    auto h = harness(gpu);
+    // One opaque white splat at the cloud's origin.
+    CloudBuilder b;
+    b.add(0.0F, 0.0F, 0.0F, 0.95F, 0.3F, 0.3F, 0.3F, {1, 0, 0, 0}, {1, 1, 1});
+    auto cloud = h->loader.upload(b.raw);
+    REQUIRE(cloud);
+    render::RenderSettings settings;
+    settings.width = 65;
+    settings.height = 65;
+    render::Camera camera = render::Camera::lookingAt({0.0, 0.0, 5.0}, {0.0, 0.0, 0.0});
+    // Two instances side by side; the edit's box is around the cloud origin,
+    // which the left instance's transform moves with it.
+    render::SplatEdit keepNothing;
+    keepNothing.active = true;
+    keepNothing.mode = render::SplatEdit::Mode::Keep;
+    keepNothing.centre = {5.0F, 0.0F, 0.0F};   // far from the splat: nothing kept
+    render::SplatEdit greenOnly;
+    greenOnly.active = true;
+    greenOnly.mode = render::SplatEdit::Mode::Grade;
+    greenOnly.size = {1.0F, 1.0F, 1.0F};
+    greenOnly.tint = {0.0F, 1.0F, 0.0F};
+    const std::vector<render::SplatInstance> instances{
+        {&*cloud, aofx::xform::translation({-1.0, 0.0, 0.0}), keepNothing},
+        {&*cloud, aofx::xform::translation({1.0, 0.0, 0.0}), greenOnly}};
+    render::RenderTargets targets;
+    REQUIRE(h->raster.render(camera, instances, settings, targets));
+    const auto p = readColour(*gpu, targets);
+    // 65 px over a 24.576 aperture at 50mm is 132 px per unit at distance 1:
+    // x = +-1 at 5 units lands 26 px either side of the centre.
+    const auto at = [&](int x, int y) { return &p[static_cast<size_t>((y * 65 + x) * 4)]; };
+    const float* left = at(32 - 26, 32);
+    const float* right = at(32 + 26, 32);
+    CHECK(left[3] < 0.01F);              // removed
+    CHECK(right[3] > 0.5F);
+    CHECK(right[0] < 0.01F);             // tinted green
+    CHECK(right[2] < 0.01F);
+    CHECK(right[1] > 0.3F);
+}

@@ -11,6 +11,7 @@ module reference_project;
 import lrt.common.packing;
 import lrt.common.sh;
 import lrt.splat.frame;
+import lrt.common.edit;
 
 StructuredBuffer<float4>    positions;
 StructuredBuffer<uint>      shape;
@@ -37,13 +38,18 @@ void referenceProject(uint3 tid: SV_DispatchThreadID) {
     const uint slot = params.base + i;
     refScreen[slot] = float4(0.0, 0.0, -1.0, 0.0);
 
-    const float4 p = positions[i];
+    float4 p = positions[i];
+    const uint row = i * 4;
+    const float3 s = exp(float3(lowHalf(shape[row + 1]), highHalf(shape[row + 1]), lowHalf(shape[row + 2])));
+    const EditFate fate = editFate(params.edit, p.xyz, p.w, s);
+    if (fate.removed) {
+        return;
+    }
+    p.w = fate.opacity;
     const float3 v = toView(params, p.xyz);
     if (!(v.z > params.nearZ) || v.z > params.farZ) {
         return;
     }
-    const uint row = i * 4;
-    const float3 s = exp(float3(lowHalf(shape[row + 1]), highHalf(shape[row + 1]), lowHalf(shape[row + 2])));
     const float3x3 rs = mul(rotationOf(decodeQuaternion(shape[row])),
                             float3x3(s.x, 0.0, 0.0, 0.0, s.y, 0.0, 0.0, 0.0, s.z));
     const float3x3 cov3 = mul(rs, transpose(rs));
@@ -91,5 +97,9 @@ void referenceProject(uint3 tid: SV_DispatchThreadID) {
     const float3 dir = normalize(p.xyz - float3(params.eyeX, params.eyeY, params.eyeZ));
     refScreen[slot] = float4(centre, v.z, cutoffPower(alpha));
     refConic[slot] = float4(c / det, -b / det, a / det, alpha);
-    refColour[slot] = float4(max(base + evaluateRest(sh, i * params.shWords, degree, dir), 0.0), 0.0);
+    float3 colour = max(base + evaluateRest(sh, i * params.shWords, degree, dir), 0.0);
+    if (fate.graded) {
+        colour = editGrade(params.edit, colour);
+    }
+    refColour[slot] = float4(colour, 0.0);
 }

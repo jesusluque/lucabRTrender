@@ -362,3 +362,35 @@ TEST_CASE("splitting a cloud into chunks does not change the image", "[render][r
 }
 
 
+
+TEST_CASE("a SplatEdit traces as the ray tracer's reference renders it", "[render][rt][gpu][edit]") {
+    LRT_REQUIRE_GPU(gpu);
+    LRT_ROUTE(gpu, route)
+    auto h = harness(gpu, on(route));
+    CloudBuilder built = randomCloud(2000, 31, 0.04F, 0.5F);
+    auto cloud = h->loader.upload(built.raw, 3);
+    REQUIRE(cloud);
+    render::SplatEdit removeSphere;
+    removeSphere.active = true;
+    removeSphere.mode = render::SplatEdit::Mode::Remove;
+    removeSphere.shape = render::SplatEdit::Shape::Sphere;
+    removeSphere.size = {1.0F, 0.0F, 0.0F};
+    render::SplatEdit gradeBox;
+    gradeBox.active = true;
+    gradeBox.mode = render::SplatEdit::Mode::Grade;
+    gradeBox.size = {1.5F, 1.0F, 1.5F};
+    gradeBox.tint = {1.0F, 0.5F, 0.2F};
+    gradeBox.saturation = 0.4F;
+    gradeBox.opacity = 0.4F;
+    gradeBox.maxScale = 0.35F;
+    const std::vector<render::SplatInstance> instances{
+        {&*cloud, render::Mat4::identity(), removeSphere},
+        {&*cloud, aofx::xform::translation({0.5, 0.0, -2.5}) * aofx::xform::rotationY(40.0), gradeBox}};
+    render::RenderSettings settings;
+    settings.width = 250;
+    settings.height = 190;
+    render::Camera camera = render::Camera::lookingAt({1.0, 1.5, 9.0}, {-0.5, 0.0, -0.5});
+    const Comparison c = compare(*h, camera, instances, settings);
+    CHECK(c.toPeaks.p99 <= kToPeaksP99);
+    CHECK(fewOver2(c.toPeaks));
+}

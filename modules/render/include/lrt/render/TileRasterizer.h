@@ -23,9 +23,36 @@ class ShaderLibrary;
 
 namespace lrt::render {
 
+/// A selection volume in a cloud's own space, what happens to the splats in
+/// it, and a grade: openFXplayer's SplatEdit. The rule is written once, in
+/// shaders/lrt/common/edit.slang; every splat renderer reads it.
+struct SplatEdit {
+    enum class Shape : uint32_t { Box = 0, Sphere = 1 };
+    enum class Mode : uint32_t { Keep = 0, Remove = 1, Grade = 2 };
+    bool                 active = false;
+    Shape                shape = Shape::Box;
+    Mode                 mode = Mode::Grade;
+    std::array<float, 3> centre{0, 0, 0};
+    /// Half extents of the box; radius of the sphere in x.
+    std::array<float, 3> size{1, 1, 1};
+    std::array<float, 3> tint{1, 1, 1};
+    float                saturation = 1.0F;
+    float                brightness = 1.0F;
+    /// Multiplies the opacity of what the volume selects.
+    float                opacity = 1.0F;
+    /// Wherever the volume is: below this opacity a splat goes (0: off).
+    float                minOpacity = 0.0F;
+    /// Wherever the volume is: longer than this on its longest axis, in the
+    /// cloud's units, a splat goes (0: off).
+    float                maxScale = 0.0F;
+    /// The volume test turned round.
+    bool                 invert = false;
+};
+
 struct SplatInstance {
     const scene::GpuSplats* splats = nullptr;
     Mat4                    objectToWorld = Mat4::identity();
+    SplatEdit               edit;
 };
 
 struct RenderSettings {
