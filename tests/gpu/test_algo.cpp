@@ -142,6 +142,13 @@ TEST_CASE("a scatter-shaped kernel reads and writes the words it was given", "[g
     gpu::Buffer saw = test::uintBuffer(*gpu->device, kPairs * 4, "saw");
     REQUIRE(srcLo.write(*gpu->device, 0, sizeof(keys), keys));
     REQUIRE(srcVal.write(*gpu->device, 0, sizeof(values), values));
+    // A buffer this test made is not zeroed, and the kernel reads its cursor
+    // before it writes one: the sort's own cursors come from radix_starts,
+    // which writes every one of them, so the probe writes its own here.
+    const std::vector<uint32_t> zeros(kDigits, 0);
+    REQUIRE(starts.write(*gpu->device, 0, zeros.size() * sizeof(uint32_t), zeros.data()));
+    REQUIRE(spare.write(*gpu->device, 0, zeros.size() * sizeof(uint32_t), zeros.data()));
+    REQUIRE(spareHi.write(*gpu->device, 0, zeros.size() * sizeof(uint32_t), zeros.data()));
     gpu::CommandBatch batch(*gpu->device);
     kProbe.dispatch(batch, {1, 1, 1}, [&](rhi::ShaderCursor cursor) {
         cursor["srcKeysLo"].setBinding(srcLo.rhi());

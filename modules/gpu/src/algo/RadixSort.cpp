@@ -95,21 +95,6 @@ Result<void> RadixSort::sort(CommandBatch& batch, SortBuffers& buffers, uint32_t
     const uint32_t chunks = (count + chunk - 1) / chunk;
     LRT_TRY(reserve(chunks));
     chunks_ = chunks;
-    // The stand-ins are indexed like the pairs, so they are as long as them.
-    if (!wide && standInPairs_ < count) {
-        BufferDesc desc;
-        desc.bytes = uint64_t{count} * sizeof(uint32_t);
-        desc.elementBytes = sizeof(uint32_t);
-        desc.label = "radix.standIn.lo";
-        auto lo = Buffer::create(*device_, desc);
-        if (!lo) return std::move(lo).error();
-        desc.label = "radix.standIn.hi";
-        auto hi = Buffer::create(*device_, desc);
-        if (!hi) return std::move(hi).error();
-        standInLo_ = *lo;
-        standInHi_ = *hi;
-        standInPairs_ = count;
-    }
 
     Buffer* srcLo = &buffers.keysLo;
     Buffer* srcHi = wide ? &buffers.keysHi : &dummy_;
@@ -138,15 +123,11 @@ Result<void> RadixSort::sort(CommandBatch& batch, SortBuffers& buffers, uint32_t
             cursor["chunkStarts"].setBinding(chunkStarts_.rhi());
             setParams(cursor, count, chunks, shift, wide);
         });
-        // Stand-ins for the high-word names when keys are 32 bits. Each name
-        // gets a buffer of its own: a buffer bound as both read-only and
-        // read-write in one dispatch is refused by D3D and Vulkan validation
-        // even when the kernel never touches it, and nothing here may be the
-        // buffer another name in the same dispatch already has. They are as
-        // long as the pairs, so any index the kernel forms before it decides
-        // it has no high words is inside them.
-        Buffer* scatterSrcHi = wide ? srcHi : &standInLo_;
-        Buffer* scatterDstHi = wide ? dstHi : &standInHi_;
+        // Distinct placeholders for the unused hi bindings: a buffer bound as
+        // both read-only and read-write in one dispatch is refused by D3D and
+        // Vulkan validation even when the kernel never touches it.
+        Buffer* scatterSrcHi = wide ? srcHi : &dummy_;
+        Buffer* scatterDstHi = wide ? dstHi : &histogramBuffer_;
         scatter_.dispatch(batch, {chunks, 1, 1}, [&](rhi::ShaderCursor cursor) {
             cursor["srcKeysLo"].setBinding(srcLo->rhi());
             cursor["srcKeysHi"].setBinding(scatterSrcHi->rhi());

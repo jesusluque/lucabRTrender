@@ -87,9 +87,6 @@ private:
     Buffer        digitTotals_;
     Buffer        chunkStarts_;
     Buffer        dummy_;
-    Buffer        standInLo_;   ///< bound to the scatter's unused high-word names when keys are
-    Buffer        standInHi_;   ///< 32 bits: a buffer of their own, never one another name holds
-    uint32_t      standInPairs_ = 0;
     uint32_t      capacity_ = 0;
     uint32_t      chunks_ = 0;   ///< the last sort's, for `working`
 };
