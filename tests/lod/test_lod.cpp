@@ -5,11 +5,13 @@
 #include "../gpu/GpuTest.h"
 #include "../render/SplatFixtures.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
 #include <vector>
 
+#include "lrt/gpu/CommandBatch.h"
 #include "lrt/io/Exr.h"
 #include "lrt/lod/Lod.h"
 #include "lrt/render/ReferenceRenderer.h"
@@ -175,3 +177,161 @@ TEST_CASE("far away, a dense cloud draws a fraction of its splats and looks the 
     }
 }
 
+
+namespace {
+
+/// The cloud as a stream would hold it: chunk c in slot chunks-1-c (copied on
+/// the device), and only the chunks `keep` says on it.
+lod::LodCloud streamedCopy(Harness& h, const lod::LodCloud& lod, const std::vector<bool>& keep) {
+    gpu::Device& device = *h.gpu->device;
+    lod::LodCloud out = lod;
+    out.streamed = true;
+    const auto like = [&](const gpu::Buffer& b) {
+        gpu::BufferDesc desc;
+        desc.bytes = b.bytes();
+        desc.elementBytes = b.elementBytes();
+        desc.label = "test.store";
+        auto made = gpu::Buffer::create(device, desc);
+        REQUIRE(made);
+        return *made;
+    };
+    out.splats.positions = like(lod.splats.positions);
+    out.splats.shape = like(lod.splats.shape);
+    out.splats.sh = like(lod.splats.sh);
+    out.groups = like(lod.groups);
+    std::vector<uint32_t> resident(lod.chunks(), 0);
+    gpu::CommandBatch batch(device);
+    for (uint32_t c = 0; c < lod.chunks(); ++c) {
+        if (!keep[c]) {
+            out.slots[c] = -1;
+            continue;
+        }
+        const uint32_t slot = lod.chunks() - 1 - c;
+        out.slots[c] = static_cast<int32_t>(slot);
+        resident[c] = 1;
+        const uint64_t from = uint64_t{c} * lod.chunkSplats;
+        const uint64_t to = uint64_t{slot} * lod.chunkSplats;
+        const uint64_t n = lod.chunkCount(c);
+        const auto copy = [&](const gpu::Buffer& dst, const gpu::Buffer& src, uint64_t perSplat) {
+            batch.encoder()->copyBuffer(dst.rhi(), to * perSplat, src.rhi(), from * perSplat, n * perSplat);
+        };
+        copy(out.splats.positions, lod.splats.positions, 16);
+        copy(out.splats.shape, lod.splats.shape, 16);
+        copy(out.splats.sh, lod.splats.sh, 4 * uint64_t{lod.splats.shWords});
+        copy(out.groups, lod.groups, 4);
+    }
+    batch.markDirty();
+    REQUIRE(batch.submit(true));
+    auto flags = gpu::Buffer::fromSpan(device, std::span<const uint32_t>(resident), "test.resident");
+    REQUIRE(flags);
+    out.resident = *flags;
+    return out;
+}
+
+struct Cut {
+    lod::CutStats           stats;
+    render::RenderTargets   targets;
+};
+
+Cut cutAndRender(Harness& h, const render::Projection& projection, const lod::LodCloud& lod, float threshold,
+                 const render::RenderSettings& settings) {
+    Cut cut;
+    std::vector<lod::CutStats> stats;
+    const std::vector<lod::LodInstance> instances{{&lod, render::Mat4::identity()}};
+    auto selected = h.cut.select(projection, instances, threshold, &stats);
+    if (!selected) FAIL(selected.error().toString());
+    REQUIRE(stats.size() == 1);
+    cut.stats = stats.front();
+    REQUIRE(h.raster.render(projection, *selected, settings, cut.targets));
+    return cut;
+}
+
+}   // namespace
+
+TEST_CASE("chunks not on the device are drawn merged, and chunks not wanted change nothing", "[lod][gpu]") {
+    LRT_REQUIRE_GPU(gpu);
+    auto h = harness(gpu);
+    CloudBuilder built = randomCloud(20000, 47, 0.003F, 0.05F);
+    auto cloud = h->loader.upload(built.raw, 3);
+    REQUIRE(cloud);
+    lod::LodBuildSettings chunked;
+    chunked.chunkSplats = 1000;
+    auto lod = h->builder.build(*cloud, chunked);
+    if (!lod) FAIL(lod.error().toString());
+    REQUIRE(lod->chunks() == 20);
+    render::RenderSettings settings;
+    settings.width = 240;
+    settings.height = 180;
+    render::Camera camera = render::Camera::lookingAt({4.0, 3.0, 18.0}, {0.0, 0.0, 0.0});
+    const render::Projection projection = render::projectionFor(camera, settings.width, settings.height);
+    const auto compare = [&](const Cut& a, const Cut& b) {
+        auto diff = render::compareImages(*gpu->library, a.targets.colour, b.targets.colour, settings.width,
+                                          settings.height);
+        REQUIRE(diff);
+        return *diff;
+    };
+
+    SECTION("every chunk there, in other slots: the same cut, the same image") {
+        const lod::LodCloud all = streamedCopy(*h, *lod, std::vector<bool>(20, true));
+        for (const float threshold : {0.0F, 2.0F, 1e6F}) {
+            const Cut memory = cutAndRender(*h, projection, *lod, threshold, settings);
+            const Cut stream = cutAndRender(*h, projection, all, threshold, settings);
+            const auto diff = compare(memory, stream);
+            CHECK(stream.stats.splats == memory.stats.splats);
+            CHECK(stream.stats.merged == memory.stats.merged);
+            CHECK(diff.max == 0);
+            REQUIRE(stream.stats.needs.size() == 20);
+            const auto wanted = std::count(stream.stats.needs.begin(), stream.stats.needs.end(), uint8_t{1});
+            if (threshold == 0.0F) {
+                CHECK(wanted == 20);
+            } else if (threshold == 1e6F) {
+                CHECK(wanted == 0);
+                CHECK(stream.stats.splats == 0);
+            }
+        }
+    }
+
+    SECTION("chunks missing: their places drawn merged until they come") {
+        std::vector<bool> keep(20, true);
+        uint32_t missing = 0;
+        for (uint32_t c = 0; c < 20; c += 3) {
+            keep[c] = false;
+            missing += lod->chunkCount(c);
+        }
+        const lod::LodCloud partial = streamedCopy(*h, *lod, keep);
+        const Cut memory = cutAndRender(*h, projection, *lod, 0.0F, settings);
+        const Cut stream = cutAndRender(*h, projection, partial, 0.0F, settings);
+        const auto diff = compare(memory, stream);
+        std::printf("  %u of %u splats missing: %u splats + %u merged drawn; p99 %u, max %u\n", missing, lod->count,
+                    stream.stats.splats, stream.stats.merged, diff.p99, diff.max);
+        CHECK(stream.stats.splats <= lod->count - missing);
+        CHECK(stream.stats.merged > 0);
+        CHECK(std::count(stream.stats.needs.begin(), stream.stats.needs.end(), uint8_t{1}) == 20);
+        CHECK(diff.max > 0);
+    }
+
+    SECTION("dropping the chunks a view does not want leaves it as it was") {
+        // Close to one side of the cloud: the near chunks are wanted, the far
+        // ones merged away.
+        const render::Projection near = render::projectionFor(
+            render::Camera::lookingAt({0.0, 0.5, 4.5}, {0.0, 0.0, 0.0}), settings.width, settings.height);
+        const lod::LodCloud all = streamedCopy(*h, *lod, std::vector<bool>(20, true));
+        for (const float threshold : {36.0F, 48.0F}) {
+            const Cut full = cutAndRender(*h, near, all, threshold, settings);
+            std::vector<bool> keep(20);
+            for (uint32_t c = 0; c < 20; ++c) {
+                keep[c] = full.stats.needs[c] != 0;
+            }
+            const auto wanted = std::count(keep.begin(), keep.end(), true);
+            const lod::LodCloud needed = streamedCopy(*h, *lod, keep);
+            const Cut trimmed = cutAndRender(*h, near, needed, threshold, settings);
+            const auto diff = compare(full, trimmed);
+            std::printf("  threshold %.0f px: %ld of 20 chunks wanted; %u splats + %u merged; max %u\n", threshold,
+                        static_cast<long>(wanted), trimmed.stats.splats, trimmed.stats.merged, diff.max);
+            CHECK(wanted < 20);
+            CHECK(trimmed.stats.splats == full.stats.splats);
+            CHECK(trimmed.stats.merged == full.stats.merged);
+            CHECK(diff.max == 0);
+        }
+    }
+}

@@ -22,6 +22,14 @@
 // size (edge over nearest distance) is never larger: along any line down the
 // tree the test flips once, and every place is drawn at exactly one level.
 // Threshold 0 draws every splat and nothing merged: the cloud as it is.
+//
+// STREAMING
+//
+// The splats come in chunks -- runs of the Morton order -- that may or may not
+// be on the device; the merged levels always are. A finest-level group whose
+// cell wants its splats, but some of whose splats are in a chunk not loaded,
+// is drawn merged instead (its own Gaussian: the nearest resident ancestor of
+// those splats), and those chunks are asked for.
 module lod_common;
 
 public static const uint kLevels = 10;   // 30-bit codes
@@ -47,7 +55,11 @@ public struct LodParams {
     public float threshold;       // pixels a drawn cell may span
     public uint  orthographic;
     public uint  coarsest;        // 1 when this is the coarsest stored level
-    public uint  pad0;
+    public uint  offset;          // chunks: the chunk's first splat within its buffers
+    public uint  chunkSplats;     // splats per chunk
+    public uint  chunks;
+    public uint  splats;          // the whole cloud's splats
+    public uint  pad0; public uint pad1;
 };
 
 public uint levelShift(uint level) {

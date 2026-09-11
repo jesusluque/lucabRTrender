@@ -10,10 +10,12 @@
 //                  which splats to draw, gathered into one cloud the tile
 //                  rasteriser draws as it would any other
 //
-// Only counts cross back to the CPU: one per level while building, and one per
-// level per instance per frame, read together.
+// Only counts cross back to the CPU: one per level while building, and per
+// instance per frame one read of the drawn counts (and, streaming, of the
+// chunks the view wants).
 #pragma once
 
+#include <algorithm>
 #include <cstdint>
 #include <memory>
 #include <span>
@@ -40,13 +42,29 @@ struct LodLevel {
     gpu::Buffer       cells;       ///< uint per group: the cell's code at `level`
 };
 
+/// A cloud with its levels of detail. The merged levels are always on the
+/// device; the cloud's own splats come in chunks -- runs of `chunkSplats` of
+/// the Morton order, the last holding the rest -- which need not be. A chunk
+/// on the device sits in a slot of the store (slot k: splats from
+/// k * chunkSplats); built in memory, chunk c is slot c and all are there.
 struct LodCloud {
-    scene::GpuSplats      splats;   ///< the cloud's own splats, in Morton order
-    gpu::Buffer           keys;     ///< uint per splat: its 30-bit Morton code
-    std::vector<LodLevel> levels;   ///< coarsest first, consecutive levels
+    uint32_t              count = 0;         ///< splats in the cloud
+    uint32_t              chunkSplats = 0;   ///< splats per chunk
+    scene::GpuSplats      splats;            ///< the store: chunks' splats in their slots
+    gpu::Buffer           groups;            ///< uint per store splat: its finest-level group
+    std::vector<int32_t>  slots;             ///< per chunk: its slot, or -1 when not on the device
+    gpu::Buffer           resident;          ///< uint per chunk: 1 when on the device
+    std::vector<LodLevel> levels;            ///< coarsest first, consecutive levels, never empty
+    gpu::Buffer           starts;            ///< uint per finest-level group: its first splat
     float                 boundsLo[3] = {0, 0, 0};
-    float                 extent = 0.0F;   ///< the largest edge of the bounds
+    float                 extent = 0.0F;     ///< the largest edge of the bounds
+    /// Chunks come and go (a StreamingPool's): the cut says which it wants.
+    bool                  streamed = false;
 
+    [[nodiscard]] uint32_t chunks() const noexcept { return static_cast<uint32_t>(slots.size()); }
+    [[nodiscard]] uint32_t chunkCount(uint32_t chunk) const noexcept {
+        return std::min(chunkSplats, count - chunk * chunkSplats);
+    }
     [[nodiscard]] uint32_t mergedGaussians() const noexcept {
         uint32_t n = 0;
         for (const LodLevel& l : levels) {
@@ -63,6 +81,8 @@ struct LodBuildSettings {
     float maxGroupFraction = 0.5F;
     /// The coarsest stored level.
     uint32_t coarsestLevel = 1;
+    /// Splats per chunk: what a stream loads and drops at once.
+    uint32_t chunkSplats = uint32_t{1} << 16;
 };
 
 class LodBuilder {
@@ -87,6 +107,9 @@ struct CutStats {
     uint32_t splats = 0;     ///< the cloud's own splats drawn
     uint32_t merged = 0;     ///< merged Gaussians drawn
     uint32_t available = 0;  ///< splats in the cloud
+    /// Streamed clouds: per chunk, 1 when this view wants its splats (on the
+    /// device or not). Empty for a cloud that is all in memory.
+    std::vector<uint8_t> needs;
 };
 
 class CutSelector {
@@ -110,7 +133,7 @@ private:
     struct Frame;
     gpu::Device*                        device_ = nullptr;
     gpu::PrefixSum                      prefix_;
-    gpu::ComputeKernel                  cutGroups_, cutSplats_, gather_;
+    gpu::ComputeKernel                  cutGroups_, cutFinest_, cutSplats_, chunkNeeds_, gather_;
     std::vector<std::unique_ptr<Frame>> frames_;
 };
 

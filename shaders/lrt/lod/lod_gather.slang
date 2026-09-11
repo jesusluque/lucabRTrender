@@ -23,11 +23,12 @@ void lodGather(uint3 tid: SV_DispatchThreadID) {
         return;
     }
     const uint j = params.base + dest[i];
-    positions[j] = srcPositions[i];
+    const uint k = params.offset + i;   // chunks share their cloud's buffers from `offset`
+    positions[j] = srcPositions[k];
     for (uint w = 0; w < 4; ++w) {
-        shape[j * 4 + w] = srcShape[i * 4 + w];
+        shape[j * 4 + w] = srcShape[k * 4 + w];
     }
     for (uint w = 0; w < params.shWords; ++w) {
-        sh[j * params.shWords + w] = srcSh[i * params.shWords + w];
+        sh[j * params.shWords + w] = srcSh[k * params.shWords + w];
     }
 }

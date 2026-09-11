@@ -132,8 +132,9 @@ Result<LodCloud> LodBuilder::build(const scene::GpuSplats& cloud, const LodBuild
     }
     splats->source = cloud.source;
     splats->bounds = cloud.bounds;
+    lod.count = n;
     lod.splats = std::move(*splats);
-    lod.keys = sorting.keysLo;
+    const gpu::Buffer keys = sorting.keysLo;
 
     // Every level's groups, and how many there are: one small read each.
     struct Level {
@@ -151,7 +152,7 @@ Result<LodCloud> LodBuilder::build(const scene::GpuSplats& cloud, const LodBuild
         Level& level = levels[r];
         gpu::CommandBatch batch(device);
         boundaries_.dispatch(batch, {n, 1, 1}, [&](rhi::ShaderCursor cursor) {
-            cursor["keys"].setBinding(lod.keys.rhi());
+            cursor["keys"].setBinding(keys.rhi());
             cursor["boundary"].setBinding(boundary->rhi());
             cursor["params"]["count"].setData(n);
             cursor["params"]["level"].setData(r);
@@ -170,7 +171,7 @@ Result<LodCloud> LodBuilder::build(const scene::GpuSplats& cloud, const LodBuild
         level.cells = std::move(*cells);
         gpu::CommandBatch write(device);
         groups_.dispatch(write, {n, 1, 1}, [&](rhi::ShaderCursor cursor) {
-            cursor["keys"].setBinding(lod.keys.rhi());
+            cursor["keys"].setBinding(keys.rhi());
             cursor["boundary"].setBinding(boundary->rhi());
             cursor["before"].setBinding(before->rhi());
             cursor["group"].setBinding(level.group.rhi());
@@ -253,6 +254,10 @@ Result<LodCloud> LodBuilder::build(const scene::GpuSplats& cloud, const LodBuild
         out.gaussians = std::move(*gaussians);
         out.cells = level.cells;
         stored.push_back(std::move(out));
+        if (r == finest) {
+            lod.groups = level.group;
+            lod.starts = level.starts;
+        }
         fineMoments = std::move(*moments);
         if (r + 1 <= kLevels) {
             levels[r + 1] = Level{};   // its groups were only needed to build this one
@@ -260,6 +265,18 @@ Result<LodCloud> LodBuilder::build(const scene::GpuSplats& cloud, const LodBuild
     }
     std::reverse(stored.begin(), stored.end());
     lod.levels = std::move(stored);
+
+    // In memory, chunk c is slot c and every chunk is there.
+    lod.chunkSplats = std::max<uint32_t>(settings.chunkSplats, 1);
+    const uint32_t chunks = (n + lod.chunkSplats - 1) / lod.chunkSplats;
+    lod.slots.resize(chunks);
+    for (uint32_t c = 0; c < chunks; ++c) {
+        lod.slots[c] = static_cast<int32_t>(c);
+    }
+    auto resident = gpu::Buffer::fromSpan(device, std::span<const uint32_t>(std::vector<uint32_t>(chunks, 1)),
+                                          "lod.resident");
+    if (!resident) return std::move(resident).error();
+    lod.resident = std::move(*resident);
     log::info("{}: levels of detail {}..{}, {} merged Gaussians over {} splats", cloud.source, coarsest, finest,
               lod.mergedGaussians(), n);
     return lod;
@@ -268,8 +285,12 @@ Result<LodCloud> LodBuilder::build(const scene::GpuSplats& cloud, const LodBuild
 struct CutSelector::Frame {
     scene::GpuSplats cloud;
     uint32_t         capacity = 0;
+    /// Per part -- the levels, then the runs of the store the splats are
+    /// drawn from -- which elements are drawn, where they go, how many.
     std::vector<gpu::Buffer> selected, dest, totals;
-    gpu::Buffer      allTotals;   ///< every part's count, copied together for one read
+    gpu::Buffer      state;       ///< the finest level's per-group state
+    gpu::Buffer      needs;       ///< per chunk
+    gpu::Buffer      readback;    ///< every part's count, then the needs: one read
 };
 
 CutSelector::CutSelector() = default;
@@ -290,10 +311,41 @@ Result<CutSelector> CutSelector::create(gpu::ShaderLibrary& library) {
         return ok();
     };
     LRT_TRY(make(c.cutGroups_, "lrt/lod/lod_cut", "lodCutGroups"));
+    LRT_TRY(make(c.cutFinest_, "lrt/lod/lod_cut", "lodCutFinest"));
     LRT_TRY(make(c.cutSplats_, "lrt/lod/lod_cut", "lodCutSplats"));
+    LRT_TRY(make(c.chunkNeeds_, "lrt/lod/lod_cut", "lodChunkNeeds"));
     LRT_TRY(make(c.gather_, "lrt/lod/lod_gather", "lodGather"));
     return c;
 }
+
+namespace {
+
+/// A run of consecutive chunks in consecutive slots: one dispatch draws it.
+struct Run {
+    uint32_t offset = 0;   ///< first splat in the store
+    uint32_t count = 0;
+};
+
+std::vector<Run> runsOf(const LodCloud& lod) {
+    std::vector<Run> runs;
+    int32_t previous = -2;
+    for (uint32_t c = 0; c < lod.chunks(); ++c) {
+        const int32_t slot = lod.slots[c];
+        if (slot < 0) {
+            previous = -2;
+            continue;
+        }
+        if (slot == previous + 1 && !runs.empty()) {
+            runs.back().count += lod.chunkCount(c);
+        } else {
+            runs.push_back({static_cast<uint32_t>(slot) * lod.chunkSplats, lod.chunkCount(c)});
+        }
+        previous = slot;
+    }
+    return runs;
+}
+
+}   // namespace
 
 Result<std::vector<render::SplatInstance>> CutSelector::select(const render::Projection& projection,
                                                                std::span<const LodInstance> instances,
@@ -308,34 +360,42 @@ Result<std::vector<render::SplatInstance>> CutSelector::select(const render::Pro
     }
     for (size_t k = 0; k < instances.size(); ++k) {
         const LodInstance& instance = instances[k];
-        if (instance.cloud == nullptr || instance.cloud->splats.count == 0) {
+        if (instance.cloud == nullptr || instance.cloud->count == 0) {
             continue;
         }
         const LodCloud& lod = *instance.cloud;
+        if (lod.levels.empty()) {
+            return Error(ErrorCode::InvalidArgument, lod.splats.source + ": a cut needs a merged level");
+        }
         Frame& frame = *frames_[k];
-        const size_t parts = lod.levels.size() + 1;   // the levels, then the splats
+        const std::vector<Run> runs = runsOf(lod);
+        const size_t levels = lod.levels.size();
+        const size_t parts = levels + runs.size();
+        const uint32_t chunks = lod.chunks();
+        const uint32_t finestGroups = lod.levels.back().gaussians.count;
         frame.selected.resize(parts);
         frame.dest.resize(parts);
         frame.totals.resize(parts);
         const auto countOf = [&](size_t part) {
-            return part < lod.levels.size() ? lod.levels[part].gaussians.count : lod.splats.count;
+            return part < levels ? lod.levels[part].gaussians.count : runs[part - levels].count;
+        };
+        const auto ensure = [&](gpu::Buffer& into, uint64_t count, const char* label) -> Result<void> {
+            if (into.count() < std::max<uint64_t>(count, 1)) {
+                auto made = buffer(device, count, 4, label);
+                if (!made) return std::move(made).error();
+                into = std::move(*made);
+            }
+            return ok();
         };
         for (size_t part = 0; part < parts; ++part) {
-            const uint32_t count = countOf(part);
-            if (frame.selected[part].count() < count) {
-                auto s = buffer(device, count, 4, "cut.selected");
-                if (!s) return std::move(s).error();
-                auto d = buffer(device, count, 4, "cut.dest");
-                if (!d) return std::move(d).error();
-                frame.selected[part] = std::move(*s);
-                frame.dest[part] = std::move(*d);
-            }
-            if (!frame.totals[part].valid()) {
-                auto t = buffer(device, 1, 4, "cut.total");
-                if (!t) return std::move(t).error();
-                frame.totals[part] = std::move(*t);
-            }
+            LRT_TRY(ensure(frame.selected[part], countOf(part), "cut.selected"));
+            LRT_TRY(ensure(frame.dest[part], countOf(part), "cut.dest"));
+            LRT_TRY(ensure(frame.totals[part], 1, "cut.total"));
         }
+        LRT_TRY(ensure(frame.state, finestGroups, "cut.state"));
+        LRT_TRY(ensure(frame.needs, chunks, "cut.needs"));
+        const size_t wanted = parts + (lod.streamed ? chunks : 0);
+        LRT_TRY(ensure(frame.readback, wanted, "cut.readback"));
 
         // The eye in the cloud's space. Perspective size is edge over distance,
         // which a uniform scale leaves alone; orthographic size is not.
@@ -357,51 +417,69 @@ Result<std::vector<render::SplatInstance>> CutSelector::select(const render::Pro
             p["threshold"].setData(threshold);
             p["orthographic"].setData(uint32_t{projection.orthographic ? 1u : 0u});
             p["coarsest"].setData(uint32_t{coarsest ? 1u : 0u});
+            p["chunkSplats"].setData(lod.chunkSplats);
+            p["chunks"].setData(chunks);
+            p["splats"].setData(lod.count);
         };
         {
             gpu::CommandBatch batch(device);
+            for (size_t part = 0; part < levels; ++part) {
+                const LodLevel& level = lod.levels[part];
+                const uint32_t count = level.gaussians.count;
+                const bool finest = part + 1 == levels;
+                (finest ? cutFinest_ : cutGroups_).dispatch(batch, {count, 1, 1}, [&](rhi::ShaderCursor cursor) {
+                    cursor["cells"].setBinding(level.cells.rhi());
+                    cursor["selected"].setBinding(frame.selected[part].rhi());
+                    if (finest) {
+                        cursor["starts"].setBinding(lod.starts.rhi());
+                        cursor["residentChunks"].setBinding(lod.resident.rhi());
+                        cursor["state"].setBinding(frame.state.rhi());
+                    }
+                    setCut(cursor["params"], count, level.level, part == 0);
+                });
+            }
+            for (size_t part = levels; part < parts; ++part) {
+                const Run& run = runs[part - levels];
+                cutSplats_.dispatch(batch, {run.count, 1, 1}, [&](rhi::ShaderCursor cursor) {
+                    cursor["groups"].setBinding(lod.groups.rhi());
+                    cursor["state"].setBinding(frame.state.rhi());
+                    cursor["selected"].setBinding(frame.selected[part].rhi());
+                    cursor["params"]["count"].setData(run.count);
+                    cursor["params"]["offset"].setData(run.offset);
+                });
+            }
+            if (lod.streamed) {
+                chunkNeeds_.dispatch(batch, {chunks, 1, 1}, [&](rhi::ShaderCursor cursor) {
+                    cursor["starts"].setBinding(lod.starts.rhi());
+                    cursor["state"].setBinding(frame.state.rhi());
+                    cursor["selected"].setBinding(frame.needs.rhi());
+                    setCut(cursor["params"], finestGroups, lod.levels.back().level, false);
+                });
+            }
             for (size_t part = 0; part < parts; ++part) {
-                const uint32_t count = countOf(part);
-                if (part < lod.levels.size()) {
-                    const LodLevel& level = lod.levels[part];
-                    cutGroups_.dispatch(batch, {count, 1, 1}, [&](rhi::ShaderCursor cursor) {
-                        cursor["cells"].setBinding(level.cells.rhi());
-                        cursor["selected"].setBinding(frame.selected[part].rhi());
-                        setCut(cursor["params"], count, level.level, part == 0);
-                    });
-                } else {
-                    const uint32_t finest = lod.levels.empty() ? 1 : lod.levels.back().level;
-                    cutSplats_.dispatch(batch, {count, 1, 1}, [&](rhi::ShaderCursor cursor) {
-                        cursor["cells"].setBinding(lod.keys.rhi());
-                        cursor["selected"].setBinding(frame.selected[part].rhi());
-                        // No merged level at all: nothing can stand in for a splat.
-                        setCut(cursor["params"], count, finest, false);
-                        if (lod.levels.empty()) {
-                            cursor["params"]["threshold"].setData(0.0F);
-                        }
-                    });
-                }
-                LRT_TRY(prefix_.apply(batch, frame.selected[part], frame.dest[part], frame.totals[part], count));
+                LRT_TRY(prefix_.apply(batch, frame.selected[part], frame.dest[part], frame.totals[part],
+                                      countOf(part)));
             }
             // Every count into one buffer, so they come back in one read and
-            // not one read a level (that was most of the cut's time).
-            if (frame.allTotals.count() < parts) {
-                auto made = buffer(device, parts, 4, "cut.allTotals");
-                if (!made) return std::move(made).error();
-                frame.allTotals = std::move(*made);
-            }
+            // not one read a part (that was most of the cut's time).
             for (size_t part = 0; part < parts; ++part) {
-                batch.encoder()->copyBuffer(frame.allTotals.rhi(), part * sizeof(uint32_t), frame.totals[part].rhi(), 0,
-                                            sizeof(uint32_t));
+                batch.encoder()->copyBuffer(frame.readback.rhi(), part * sizeof(uint32_t), frame.totals[part].rhi(),
+                                            0, sizeof(uint32_t));
+            }
+            if (lod.streamed) {
+                batch.encoder()->copyBuffer(frame.readback.rhi(), parts * sizeof(uint32_t), frame.needs.rhi(), 0,
+                                            chunks * sizeof(uint32_t));
             }
             batch.markDirty();
             LRT_TRY(batch.submit(true));
         }
-        std::vector<uint32_t> totals(parts, 0);
-        LRT_TRY(frame.allTotals.read(device, 0, parts * sizeof(uint32_t), totals.data()));
+        std::vector<uint32_t> read(wanted, 0);
+        LRT_TRY(frame.readback.read(device, 0, wanted * sizeof(uint32_t), read.data()));
         uint32_t drawn = 0;
-        for (const uint32_t t : totals) {
-            drawn += t;
+        uint32_t splatsDrawn = 0;
+        for (size_t part = 0; part < parts; ++part) {
+            drawn += read[part];
+            splatsDrawn += part < levels ? 0 : read[part];
         }
         if (frame.capacity < drawn || frame.cloud.restPerColour != lod.splats.restPerColour ||
             frame.cloud.shWords != lod.splats.shWords || !frame.cloud.positions.valid()) {
@@ -414,16 +492,17 @@ Result<std::vector<render::SplatInstance>> CutSelector::select(const render::Pro
         }
         frame.cloud.source = lod.splats.source;
         frame.cloud.count = drawn;
-        frame.cloud.declared = lod.splats.count;
+        frame.cloud.declared = lod.count;
         frame.cloud.bounds = lod.splats.bounds;
         {
             gpu::CommandBatch batch(device);
             uint32_t base = 0;
             for (size_t part = 0; part < parts; ++part) {
-                if (totals[part] == 0) {
+                if (read[part] == 0) {
                     continue;
                 }
-                const scene::GpuSplats& source = part < lod.levels.size() ? lod.levels[part].gaussians : lod.splats;
+                const bool merged = part < levels;
+                const scene::GpuSplats& source = merged ? lod.levels[part].gaussians : lod.splats;
                 gather_.dispatch(batch, {countOf(part), 1, 1}, [&](rhi::ShaderCursor cursor) {
                     cursor["selected"].setBinding(frame.selected[part].rhi());
                     cursor["dest"].setBinding(frame.dest[part].rhi());
@@ -435,18 +514,25 @@ Result<std::vector<render::SplatInstance>> CutSelector::select(const render::Pro
                     cursor["sh"].setBinding(frame.cloud.sh.rhi());
                     cursor["params"]["count"].setData(countOf(part));
                     cursor["params"]["base"].setData(base);
+                    cursor["params"]["offset"].setData(merged ? 0u : runs[part - levels].offset);
                     cursor["params"]["shWords"].setData(lod.splats.shWords);
                 });
-                base += totals[part];
+                base += read[part];
             }
             LRT_TRY(batch.submit(true));
         }
         if (stats != nullptr) {
             CutStats s;
-            s.splats = totals.back();
-            s.merged = drawn - totals.back();
-            s.available = lod.splats.count;
-            stats->push_back(s);
+            s.splats = splatsDrawn;
+            s.merged = drawn - splatsDrawn;
+            s.available = lod.count;
+            if (lod.streamed) {
+                s.needs.resize(chunks);
+                for (uint32_t c = 0; c < chunks; ++c) {
+                    s.needs[c] = read[parts + c] != 0 ? 1 : 0;
+                }
+            }
+            stats->push_back(std::move(s));
         }
         if (drawn > 0) {
             out.push_back({&frame.cloud, instance.objectToWorld, instance.edit});

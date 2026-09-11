@@ -40,7 +40,42 @@ void lodCutGroups(uint3 tid: SV_DispatchThreadID) {
     selected[g] = (here && !above) ? 1u : 0u;
 }
 
-/// Splats: drawn unless the finest merged level's cell holding them is small.
+// The finest merged level decides for the splats under it. Its per-group
+// state: bit 0 when the cell wants its splats (it is not small), bit 1 when
+// they are drawn -- wanted, and every chunk holding them on the device.
+StructuredBuffer<uint>   starts;           // finest level: each group's first splat
+StructuredBuffer<uint>   residentChunks;   // per chunk: 1 when on the device
+RWStructuredBuffer<uint> state;            // finest level, per group
+StructuredBuffer<uint>   groups;           // per splat in the store: its finest-level group
+
+static const uint kWanted = 1;
+static const uint kDrawn = 2;
+
+/// The finest merged level: drawn as any level is, and also wherever its cell
+/// wants splats that are not all on the device yet.
+[shader("compute")]
+[numthreads(256, 1, 1)]
+void lodCutFinest(uint3 tid: SV_DispatchThreadID) {
+    const uint g = tid.x;
+    if (g >= params.count) {
+        return;
+    }
+    const uint cell = cells[g];
+    const bool here = small(cell, params.level);
+    const bool above = params.coarsest == 0 && small(cell >> 3, params.level - 1);
+    bool resident = true;
+    if (!here) {
+        const uint end = g + 1 < params.count ? starts[g + 1] : params.splats;
+        const uint last = (end - 1) / params.chunkSplats;
+        for (uint c = starts[g] / params.chunkSplats; c <= last; ++c) {
+            resident = resident && residentChunks[c] != 0;
+        }
+    }
+    selected[g] = ((here && !above) || (!here && !resident)) ? 1u : 0u;
+    state[g] = (here ? 0u : kWanted) | ((!here && resident) ? kDrawn : 0u);
+}
+
+/// Splats of a run of the store, from `offset`: drawn when their group says.
 [shader("compute")]
 [numthreads(256, 1, 1)]
 void lodCutSplats(uint3 tid: SV_DispatchThreadID) {
@@ -48,5 +83,33 @@ void lodCutSplats(uint3 tid: SV_DispatchThreadID) {
     if (i >= params.count) {
         return;
     }
-    selected[i] = small(cells[i] >> levelShift(params.level), params.level) ? 0u : 1u;
+    selected[i] = (state[groups[params.offset + i]] & kDrawn) != 0 ? 1u : 0u;
+}
+
+/// Per chunk: 1 when any finest-level group with splats in it wants them.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void lodChunkNeeds(uint3 tid: SV_DispatchThreadID) {
+    const uint c = tid.x;
+    if (c >= params.chunks) {
+        return;
+    }
+    const uint lo = c * params.chunkSplats;
+    const uint hi = lo + params.chunkSplats;
+    // The group holding the chunk's first splat: the last starting at or before it.
+    uint first = 0;
+    uint last = params.count;
+    while (last - first > 1) {
+        const uint middle = (first + last) / 2;
+        if (starts[middle] <= lo) {
+            first = middle;
+        } else {
+            last = middle;
+        }
+    }
+    bool needed = false;
+    for (uint g = first; g < params.count && starts[g] < hi && !needed; ++g) {
+        needed = (state[g] & kWanted) != 0;
+    }
+    selected[c] = needed ? 1u : 0u;
 }
