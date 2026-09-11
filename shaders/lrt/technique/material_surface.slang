@@ -45,7 +45,8 @@ public MaterialInputs materialInputsAt(CameraParams camera, ViewToWorld toWorld,
     // where the geometry itself faces away (a backface).
     const bool backface = dot(s.geometricNormal, s.viewDirection) > 0.0;
     inputs.inside = backface;
-    inputs.normalWorld = normalize(applyRows(toWorld, s.normal, 0.0));
+    const float3 facing = backface ? -s.normal : s.normal;
+    inputs.normalWorld = normalize(applyRows(toWorld, facing, 0.0));
     inputs.normalObject = normalize(cross(objectB - objectA, objectC - objectA));
 
     // Texture coordinates at the corners and across the pixel.

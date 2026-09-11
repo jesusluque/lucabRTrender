@@ -59,6 +59,7 @@ set_target_properties(lrt_material_tests PROPERTIES CXX_VISIBILITY_PRESET defaul
 
 lrt_test(lrt_technique_tests
     SOURCES technique/test_visibility.cpp technique/test_display.cpp technique/test_materials.cpp
+            technique/test_lights.cpp
     LIBS lrt::technique)
 target_compile_definitions(lrt_technique_tests PRIVATE LRT_MATERIALX_ROOT="${LRT_USD_ROOT}")
 
