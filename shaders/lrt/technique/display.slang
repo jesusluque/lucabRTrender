@@ -1,0 +1,136 @@
+// Copyright (c) 2026 lucabRTrender contributors.
+//
+// An engine image onto a display: what lrt view shows, on the device, with no
+// readback. Engine images are bottom row first; a window's are top row first.
+//
+//   colour   linear premultiplied Rec.709 over a background, times 2^exposure,
+//            through a view transform, into the display's gamut and its
+//            transfer function
+//   depth    view z, grey on a log scale from near (white) to far (black)
+//   ids      a colour per id, from a hash; -1 (nothing) is the background
+//   vector   float4 entries shown as rgb * scale + bias (normals, primvars)
+//
+// View transforms: Standard (the display clips), and AgX -- Troy Sobotka's,
+// in the analytic form Benjamin Wrensch fitted ("Minimal AgX", 2023): an inset
+// matrix, a log2 encoding of [-12.47, 4.03] stops, a sixth-order polynomial
+// for the sigmoid, the outset, and 2.2 back to linear.
+// Displays: sRGB (IEC 61966-2-1), Rec.709 (BT.1886, a pure 2.4 power), Display
+// P3 (P3-D65 primaries, sRGB's transfer).
+module display;
+
+struct DisplayParams {
+    uint  width;
+    uint  height;
+    uint  mode;          // 0 colour, 1 depth, 2 ids, 3 vector, 4 nothing (the background)
+    uint  stride;        // entries per pixel in the source
+    uint  offset;        // which entry
+    uint  view;          // 0 Standard, 1 AgX
+    uint  display;       // 0 sRGB, 1 Rec.709 (BT.1886), 2 Display P3
+    uint  flipRows;      // 1: the output's row 0 is the source's top row
+    float exposure;      // stops
+    float nearZ;         // depth: white at this view z
+    float farZ;          // depth: black at this one
+    float vectorScale;
+    float vectorBias;
+    float backgroundR; float backgroundG; float backgroundB;   // display-referred linear
+};
+
+StructuredBuffer<float4>     colour;   // modes 0 and 3
+StructuredBuffer<float>      depth;    // mode 1
+StructuredBuffer<uint>       ids;      // mode 2
+RWTexture2D<float4>          output;
+ConstantBuffer<DisplayParams> params;
+
+float srgbEncode(float x) {
+    return x <= 0.0031308 ? 12.92 * x : 1.055 * pow(x, 1.0 / 2.4) - 0.055;
+}
+
+public float3 transferEncode(float3 c, uint display) {
+    c = saturate(c);
+    if (display == 1) {
+        return pow(c, float3(1.0 / 2.4));
+    }
+    return float3(srgbEncode(c.r), srgbEncode(c.g), srgbEncode(c.b));
+}
+
+/// Linear Rec.709 to linear P3-D65 (both D65 white).
+public static const float3x3 kRec709ToP3 = float3x3(
+    0.8224621, 0.1775380, 0.0000000,
+    0.0331941, 0.9668058, 0.0000000,
+    0.0170827, 0.0723974, 0.9105199);
+
+public float3 agx(float3 c) {
+    // Wrensch's matrices are GLSL column-major applied as M * v: row vectors here.
+    static const float3x3 kInset = float3x3(
+        0.842479062253094, 0.0423282422610123, 0.0423756549057051,
+        0.0784335999999992, 0.878468636469772, 0.0784336,
+        0.0792237451477643, 0.0791661274605434, 0.879142973793104);
+    static const float3x3 kOutset = float3x3(
+        1.19687900512017, -0.0528968517574562, -0.0529716355144438,
+        -0.0980208811401368, 1.15190312990417, -0.0980434501171241,
+        -0.0990297440797205, -0.0989611768448433, 1.15107367264116);
+    const float minEv = -12.47393;
+    const float maxEv = 4.026069;
+    c = mul(max(c, float3(0.0)), kInset);
+    c = clamp(log2(max(c, float3(1e-10))), float3(minEv), float3(maxEv));
+    c = (c - minEv) / (maxEv - minEv);
+    // The sigmoid, by Horner.
+    float3 y = 15.5 * c - 40.14;
+    y = y * c + 31.96;
+    y = y * c - 6.868;
+    y = y * c + 0.4298;
+    y = y * c + 0.1191;
+    y = y * c - 0.00232;
+    y = mul(y, kOutset);
+    return pow(max(y, float3(0.0)), float3(2.2));
+}
+
+public float3 displayColour(float4 premultiplied, float3 background, float exposure, uint view, uint display) {
+    float3 c = premultiplied.rgb + background * (1.0 - saturate(premultiplied.a));
+    c *= pow(2.0, exposure);
+    if (view == 1) {
+        c = agx(c);
+    }
+    if (display == 2) {
+        c = mul(kRec709ToP3, c);
+    }
+    return transferEncode(c, display);
+}
+
+float3 idColour(uint id) {
+    uint h = id * 2654435761u;
+    h ^= h >> 15;
+    h *= 2246822519u;
+    h ^= h >> 13;
+    return float3(float(h & 255u), float((h >> 8) & 255u), float((h >> 16) & 255u)) / 255.0 * 0.8 + 0.2;
+}
+
+[shader("compute")]
+[numthreads(16, 16, 1)]
+void displayTransform(uint3 tid: SV_DispatchThreadID) {
+    if (tid.x >= params.width || tid.y >= params.height) {
+        return;
+    }
+    const uint row = params.flipRows != 0 ? params.height - 1 - tid.y : tid.y;
+    const uint pixel = row * params.width + tid.x;
+    const float3 background = float3(params.backgroundR, params.backgroundG, params.backgroundB);
+    float3 shown = transferEncode(background, params.display);
+    if (params.mode == 0) {
+        shown = displayColour(colour[pixel * params.stride + params.offset], background, params.exposure, params.view,
+                              params.display);
+    } else if (params.mode == 1) {
+        const float z = depth[pixel];
+        if (z > 0.0) {
+            const float t = saturate(log(z / params.nearZ) / log(params.farZ / params.nearZ));
+            shown = float3(1.0 - t);
+        }
+    } else if (params.mode == 2) {
+        const uint id = ids[pixel * params.stride + params.offset];
+        if (id != 0xFFFFFFFFu) {
+            shown = idColour(id);
+        }
+    } else if (params.mode == 3) {
+        shown = saturate(colour[pixel * params.stride + params.offset].rgb * params.vectorScale + params.vectorBias);
+    }   // any other mode: the background (an AOV nothing drew)
+    output[tid.xy] = float4(shown, 1.0);
+}

@@ -49,7 +49,7 @@ lrt_test(lrt_geom_tests
     LIBS lrt::geom)
 
 lrt_test(lrt_technique_tests
-    SOURCES technique/test_visibility.cpp
+    SOURCES technique/test_visibility.cpp technique/test_display.cpp
     LIBS lrt::technique)
 
 lrt_test(lrt_lod_tests

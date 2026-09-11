@@ -3,6 +3,7 @@
 lrt_add_module(technique
     SOURCES
         src/Denoiser.cpp
+        src/DisplayTransform.cpp
         src/Visibility.cpp
     PUBLIC_LIBS
         lrt::core
