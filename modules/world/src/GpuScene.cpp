@@ -12,7 +12,9 @@ namespace lrt::world {
 namespace {
 
 struct MeshRecord {
-    uint32_t firstPoint, points, firstTriangle, triangles, hasNormals, pad0, pad1, pad2;
+    uint32_t firstPoint, points, firstTriangle, triangles, hasNormals, nodeBase, pad1, pad2;
+    float    lo[4];
+    float    hi[4];
 };
 
 struct InstanceRecord {
@@ -22,7 +24,7 @@ struct InstanceRecord {
     float    colour[4];
     uint32_t mesh, primId, instanceId, flags;
 };
-static_assert(sizeof(MeshRecord) == 32);
+static_assert(sizeof(MeshRecord) == 64);
 static_assert(sizeof(InstanceRecord) == 176);
 
 Result<gpu::Buffer> deviceBuffer(gpu::Device& device, uint64_t count, uint32_t element, const char* label,
@@ -80,6 +82,7 @@ Result<void> GpuScene::repack() {
     LRT_TRY(make(triangleCorners_, triangles * 3, 4, "scene.triangleCorners"));
     LRT_TRY(make(triangleFaces_, triangles, 4, "scene.triangleFaces"));
     std::vector<MeshRecord> records(meshes_.size());
+    uint32_t nodes = 0;
     gpu::CommandBatch batch(device);
     for (size_t k = 0; k < meshes_.size(); ++k) {
         const geom::GpuMesh& m = *meshes_[k];
@@ -97,7 +100,10 @@ Result<void> GpuScene::repack() {
             e->copyBuffer(triangleFaces_.rhi(), uint64_t{r.firstTriangle} * 4, m.triangleFaces.rhi(), 0,
                           uint64_t{m.triangles} * 4);
         }
-        records[k] = {r.firstPoint, m.points, r.firstTriangle, m.triangles, m.normals.valid() ? 1u : 0u, 0, 0, 0};
+        records[k] = {r.firstPoint, m.points, r.firstTriangle, m.triangles, m.normals.valid() ? 1u : 0u, nodes, 0, 0,
+                      {m.bounds.min[0], m.bounds.min[1], m.bounds.min[2], 0.0F},
+                      {m.bounds.max[0], m.bounds.max[1], m.bounds.max[2], 0.0F}};
+        nodes += std::max<uint32_t>(m.triangles, 1) - 1;   // a mesh's LBVH has triangles - 1 internal nodes
     }
     batch.markDirty();
     LRT_TRY(batch.submit(true));

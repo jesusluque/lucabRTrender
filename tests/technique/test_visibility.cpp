@@ -354,26 +354,41 @@ TEST_CASE("rays see the triangles the rasteriser sees", "[technique][visibility]
         REQUIRE(trace->render(batch, *rt, projection, w, h, traced));
         REQUIRE(batch.submit(true));
     }
+    // And through the compute BVHs, the route for devices without the hardware.
+    auto bvh = world::BvhScene::create(*gpu->library);
+    auto walk = technique::VisibilityBvh::create(*gpu->library);
+    if (!bvh) FAIL(bvh.error().toString());
+    if (!walk) FAIL(walk.error().toString());
+    technique::VisibilityTargets walked;
+    REQUIRE(bvh->build(r->scene));
+    {
+        gpu::CommandBatch batch(*gpu->device);
+        REQUIRE(walk->render(batch, r->scene, *bvh, projection, w, h, walked));
+        REQUIRE(batch.submit(true));
+    }
     auto compare = gpu::ComputeKernel::create(*gpu->library, "lrt/test/ids_compare", "idsCompare");
     if (!compare) FAIL(compare.error().toString());
-    gpu::Buffer out = test::uintBuffer(*gpu->device, 4, "ids.counts");
-    auto viewA = rastered.ids.view(0);
-    auto viewB = traced.ids.view(0);
-    REQUIRE(viewA);
-    REQUIRE(viewB);
-    gpu::CommandBatch batch(*gpu->device);
-    compare->dispatch(batch, {1, 1, 1}, [&](rhi::ShaderCursor cursor) {
-        cursor["a"].setBinding((*viewA).get());
-        cursor["b"].setBinding((*viewB).get());
-        cursor["counts"].setBinding(out.rhi());
-        cursor["params"]["width"].setData(w);
-        cursor["params"]["height"].setData(h);
-    });
-    REQUIRE(batch.submit(true));
-    uint32_t c[4] = {0, 0, 0, 0};
-    REQUIRE(out.read(*gpu->device, 0, sizeof(c), c));
-    std::printf("  raster against rays: %u of %u interior pixels differ; covered %u / %u\n", c[0], c[1], c[2], c[3]);
-    CHECK(c[1] > 1000);
-    CHECK(c[0] == 0);
-    CHECK(std::abs(static_cast<int>(c[2]) - static_cast<int>(c[3])) <= static_cast<int>(c[2] / 50));
+    for (const auto& [name, other] : {std::pair{"rays", &traced}, std::pair{"compute BVH", &walked}}) {
+        gpu::Buffer out = test::uintBuffer(*gpu->device, 4, "ids.counts");
+        auto viewA = rastered.ids.view(0);
+        auto viewB = other->ids.view(0);
+        REQUIRE(viewA);
+        REQUIRE(viewB);
+        gpu::CommandBatch batch(*gpu->device);
+        compare->dispatch(batch, {1, 1, 1}, [&](rhi::ShaderCursor cursor) {
+            cursor["a"].setBinding((*viewA).get());
+            cursor["b"].setBinding((*viewB).get());
+            cursor["counts"].setBinding(out.rhi());
+            cursor["params"]["width"].setData(w);
+            cursor["params"]["height"].setData(h);
+        });
+        REQUIRE(batch.submit(true));
+        uint32_t c[4] = {0, 0, 0, 0};
+        REQUIRE(out.read(*gpu->device, 0, sizeof(c), c));
+        std::printf("  raster against %s: %u of %u interior pixels differ; covered %u / %u\n", name, c[0], c[1],
+                    c[2], c[3]);
+        CHECK(c[1] > 1000);
+        CHECK(c[0] == 0);
+        CHECK(std::abs(static_cast<int>(c[2]) - static_cast<int>(c[3])) <= static_cast<int>(c[2] / 50));
+    }
 }

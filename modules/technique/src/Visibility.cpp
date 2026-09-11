@@ -144,6 +144,65 @@ Result<void> VisibilityTrace::render(gpu::CommandBatch& batch, const world::RayT
     return ok();
 }
 
+namespace {
+
+/// A storage-writable id texture of the frame's size.
+Result<void> writableIds(gpu::Device& device, uint32_t width, uint32_t height, VisibilityTargets& targets) {
+    if (targets.width == width && targets.height == height && targets.ids.valid() &&
+        (targets.ids.desc().usage & rhi::TextureUsage::UnorderedAccess) != rhi::TextureUsage::None) {
+        return ok();
+    }
+    gpu::TextureDesc ids;
+    ids.width = width;
+    ids.height = height;
+    ids.format = rhi::Format::RGBA32Uint;
+    ids.usage = rhi::TextureUsage::UnorderedAccess | rhi::TextureUsage::ShaderResource |
+                rhi::TextureUsage::RenderTarget;
+    ids.label = "visibility.ids";
+    auto made = gpu::Texture::create(device, ids);
+    if (!made) return std::move(made).error();
+    targets.ids = std::move(*made);
+    targets.depth = {};
+    targets.width = width;
+    targets.height = height;
+    return ok();
+}
+
+}   // namespace
+
+Result<VisibilityBvh> VisibilityBvh::create(gpu::ShaderLibrary& library) {
+    auto kernel = gpu::ComputeKernel::create(library, "lrt/technique/visibility_bvh", "visibilityBvh");
+    if (!kernel) return std::move(kernel).error();
+    VisibilityBvh v;
+    v.device_ = &library.device();
+    v.traverse_ = std::move(*kernel);
+    return v;
+}
+
+Result<void> VisibilityBvh::render(gpu::CommandBatch& batch, const world::GpuScene& scene,
+                                   const world::BvhScene& bvh, const render::Projection& projection, uint32_t width,
+                                   uint32_t height, VisibilityTargets& targets) {
+    LRT_TRY(writableIds(*device_, width, height, targets));
+    auto view = targets.ids.view(0);
+    if (!view) return std::move(view).error();
+    traverse_.dispatch(batch, {width, height, 1}, [&](rhi::ShaderCursor cursor) {
+        cursor["positions"].setBinding(scene.positions().rhi());
+        cursor["indices"].setBinding(scene.indices().rhi());
+        cursor["meshes"].setBinding(scene.meshRecords().rhi());
+        cursor["instanceRecords"].setBinding(scene.instanceRecords().rhi());
+        cursor["topBoxes"].setBinding(bvh.topBoxes().rhi());
+        cursor["topChildren"].setBinding(bvh.topChildren().rhi());
+        cursor["topLeaves"].setBinding(bvh.topLeaves().rhi());
+        cursor["meshBoxes"].setBinding(bvh.meshBoxes().rhi());
+        cursor["meshChildren"].setBinding(bvh.meshChildren().rhi());
+        cursor["meshLeaves"].setBinding(bvh.meshLeaves().rhi());
+        cursor["ids"].setBinding((*view).get());
+        setCamera(cursor["camera"], projection, width, height);
+        cursor["scene"]["instances"].setData(scene.instanceCount());
+    });
+    return ok();
+}
+
 Result<HeadlightShading> HeadlightShading::create(gpu::ShaderLibrary& library) {
     auto kernel = gpu::ComputeKernel::create(library, "lrt/technique/shade_headlight", "shadeHeadlight");
     if (!kernel) return std::move(kernel).error();

@@ -12,7 +12,10 @@ public struct MeshRecord {
     public uint firstTriangle;   // indices (3 per triangle), triangle corners, triangle faces
     public uint triangles;
     public uint hasNormals;      // 0: shade with the geometric normal
-    public uint pad0; public uint pad1; public uint pad2;
+    public uint nodeBase;        // compute BVH: the mesh's first internal node
+    public uint pad1; public uint pad2;
+    public float4 boundsLo;      // object space
+    public float4 boundsHi;
 };
 
 /// One drawn copy of a mesh. Rows of 3x4 matrices; `view` is object to view

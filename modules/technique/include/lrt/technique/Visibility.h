@@ -16,6 +16,7 @@
 #include "lrt/render/Camera.h"
 #include "lrt/render/TileRasterizer.h"
 #include "lrt/world/GpuScene.h"
+#include "lrt/world/BvhScene.h"
 #include "lrt/world/RayTracingScene.h"
 
 namespace lrt::gpu {
@@ -63,6 +64,21 @@ public:
 private:
     gpu::Device*       device_ = nullptr;
     gpu::ComputeKernel trace_;
+};
+
+/// Visibility by rays through a scene's compute BVHs: for a device with no ray
+/// tracing hardware, and the second route that checks the first.
+class VisibilityBvh {
+public:
+    [[nodiscard]] static Result<VisibilityBvh> create(gpu::ShaderLibrary& library);
+
+    [[nodiscard]] Result<void> render(gpu::CommandBatch& batch, const world::GpuScene& scene,
+                                      const world::BvhScene& bvh, const render::Projection& projection,
+                                      uint32_t width, uint32_t height, VisibilityTargets& targets);
+
+private:
+    gpu::Device*       device_ = nullptr;
+    gpu::ComputeKernel traverse_;
 };
 
 /// Lit from the eye: displayColor times the cosine to the eye, the smooth
