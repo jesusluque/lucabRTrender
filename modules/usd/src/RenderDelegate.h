@@ -45,6 +45,7 @@ public:
 
     /// `lrt:technique`: "raster" (default) or "rt".
     HdRenderSettingDescriptorList GetRenderSettingDescriptors() const override;
+    TfTokenVector GetMaterialRenderContexts() const override;
     [[nodiscard]] lrt::usd::Technique GetTechnique() const;
     /// `lrt:settleStreams`: false (default) for a viewport, which lets streamed
     /// assets fill in over frames; true for an image that must be complete.

@@ -89,3 +89,26 @@ void materialTableProbe(uint3 tid: SV_DispatchThreadID) {
         sampled[i] = float4(value.rgb, found ? 1.0 : 0.0);
     }
 }
+
+/// The two ways a target may filter one footprint: the gradients, which a
+/// compute entry point can ask for here but not on every target, and the
+/// level footprintLod picks from them. Isotropic, where they must agree.
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void materialFootprint(uint3 tid: SV_DispatchThreadID) {
+    uint differ = 0;
+    for (uint i = 0; i < params.count; ++i) {
+        const uint id = uint(probes[i].z);
+        const float scale = probes[i].w;
+        const float2 dx = float2(scale, 0.0);
+        const float2 dy = float2(0.0, scale);
+        bool found;
+        const float4 graded = sampleTexture(table, id, 0, probes[i].xy, dx, dy, found);
+        const TextureRecord record = table.records[id];
+        const float lod = footprintLod(record, dx, dy);
+        const float4 levelled = table.textures[record.slot].SampleLevel(table.samplers[0], probes[i].xy, lod);
+        sampled[i] = float4(levelled.rgb, lod);
+        differ += any(abs(graded.rgb - levelled.rgb) > params.tolerance) ? 1u : 0u;
+    }
+    counts[0] = differ;
+}

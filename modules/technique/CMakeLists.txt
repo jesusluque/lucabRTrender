@@ -4,11 +4,14 @@ lrt_add_module(technique
     SOURCES
         src/Denoiser.cpp
         src/DisplayTransform.cpp
+        src/MaterialPrograms.cpp
+        src/MaterialShading.cpp
         src/Visibility.cpp
     PUBLIC_LIBS
         lrt::core
         lrt::gpu
         lrt::world
+        lrt::material
         lrt::render)
 
 # OIDN, GPU devices only (scripts/build-oidn.sh). Without it the engine has no

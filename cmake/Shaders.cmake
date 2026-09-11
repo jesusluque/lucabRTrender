@@ -14,7 +14,9 @@ function(lrt_shader_copy_target)
         return()
     endif()
     file(GLOB_RECURSE _shaders CONFIGURE_DEPENDS
-        "${LRT_SHADER_SOURCE_DIR}/*.slang" "${LRT_SHADER_SOURCE_DIR}/*.slangh")
+        "${LRT_SHADER_SOURCE_DIR}/*.slang" "${LRT_SHADER_SOURCE_DIR}/*.slangh"
+        # MaterialX node implementations (lrt/material/mx) travel with the shaders they name.
+        "${LRT_SHADER_SOURCE_DIR}/*.mtlx")
     set(_outputs)
     foreach(_src IN LISTS _shaders)
         file(RELATIVE_PATH _rel "${LRT_SHADER_SOURCE_DIR}" "${_src}")

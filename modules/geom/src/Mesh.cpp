@@ -58,6 +58,9 @@ Result<MeshBuilder> MeshBuilder::create(gpu::ShaderLibrary& library) {
     LRT_TRY(make(b.boundsChunks_, "lrt/scene/bounds_chunks", "boundsChunks"));
     LRT_TRY(make(b.boundsReduce_, "lrt/scene/bounds_reduce", "boundsReduce"));
     LRT_TRY(make(b.expand_, "lrt/geom/primvar_expand", "primvarExpand"));
+    LRT_TRY(make(b.subsetClear_, "lrt/geom/mesh_subsets", "subsetClear"));
+    LRT_TRY(make(b.subsetScatter_, "lrt/geom/mesh_subsets", "subsetScatter"));
+    LRT_TRY(make(b.subsetTriangles_, "lrt/geom/mesh_subsets", "subsetTriangles"));
     return b;
 }
 
@@ -171,6 +174,50 @@ Result<GpuMesh> MeshBuilder::build(const MeshInput& in) {
             topologyParams(cursor["params"]);
         });
         LRT_TRY(batch.submit(true));
+    }
+
+    // GeomSubsets: faces to subsets, then triangles to their faces' subsets.
+    if (!in.subsets.empty() && mesh.triangles > 0) {
+        std::vector<uint32_t> pairs;
+        for (size_t k = 0; k < in.subsets.size(); ++k) {
+            for (const int32_t face : in.subsets[k]) {
+                pairs.push_back(static_cast<uint32_t>(face));
+                pairs.push_back(static_cast<uint32_t>(k + 1));
+            }
+        }
+        const uint32_t entries = static_cast<uint32_t>(pairs.size() / 2);
+        if (pairs.empty()) {
+            pairs = {0xFFFFFFFFu, 0u};
+        }
+        auto subsetFaces = gpu::Buffer::fromSpan<uint32_t>(device, pairs, "mesh.subsetFaces");
+        if (!subsetFaces) return std::move(subsetFaces).error();
+        auto faceSubsets = deviceBuffer(device, mesh.faces, 4, "mesh.faceSubsets");
+        if (!faceSubsets) return std::move(faceSubsets).error();
+        auto triangleSubsets = deviceBuffer(device, mesh.triangles, 4, "mesh.triangleSubsets");
+        if (!triangleSubsets) return std::move(triangleSubsets).error();
+        gpu::CommandBatch batch(device);
+        subsetClear_.dispatch(batch, {mesh.faces, 1, 1}, [&](rhi::ShaderCursor cursor) {
+            cursor["cleared"].setBinding(faceSubsets->rhi());
+            cursor["params"]["count"].setData(mesh.faces);
+            cursor["params"]["value"].setData(uint32_t{0});
+        });
+        if (entries > 0) {
+            subsetScatter_.dispatch(batch, {entries, 1, 1}, [&](rhi::ShaderCursor cursor) {
+                cursor["subsetFaces"].setBinding(subsetFaces->rhi());
+                cursor["faceSubsets"].setBinding(faceSubsets->rhi());
+                cursor["params"]["count"].setData(entries);
+                cursor["params"]["faces"].setData(mesh.faces);
+            });
+        }
+        subsetTriangles_.dispatch(batch, {mesh.triangles, 1, 1}, [&](rhi::ShaderCursor cursor) {
+            cursor["faceSubsets"].setBinding(faceSubsets->rhi());
+            cursor["triangleFaces"].setBinding(mesh.triangleFaces.rhi());
+            cursor["triangleSubsets"].setBinding(triangleSubsets->rhi());
+            cursor["params"]["count"].setData(mesh.triangles);
+        });
+        LRT_TRY(batch.submit(true));
+        mesh.subsets = static_cast<uint32_t>(in.subsets.size());
+        mesh.triangleSubsets = std::move(*triangleSubsets);
     }
 
     // Primvars, their indices resolved on the device.

@@ -48,6 +48,12 @@ struct PrimvarArrays {
 [[nodiscard]] scene::FloatStream primvarStreamOf(const pxr::VtValue& value, uint32_t* components);
 
 /// A mesh's topology and points as Hydra holds them (all reference counted).
+/// A GeomSubset of a mesh (materialBind family): its faces and its material.
+struct MeshSubset {
+    pxr::VtArray<int> faces;
+    pxr::SdfPath      material;
+};
+
 struct MeshArrays {
     pxr::VtValue           points;              ///< VtVec3fArray or VtVec3hArray
     pxr::VtArray<int>      faceVertexCounts;
@@ -56,6 +62,7 @@ struct MeshArrays {
     bool                   leftHanded = false;
     bool                   smoothNormals = true;
     std::vector<PrimvarArrays> primvars;
+    std::vector<MeshSubset>    subsets;
 };
 
 /// An instancer's primvars as Hydra holds them.
@@ -79,6 +86,7 @@ struct MeshLook {
     std::array<float, 3> displayColor{0.18F, 0.18F, 0.18F};
     float                displayOpacity = 1.0F;
     bool                 doubleSided = false;
+    pxr::SdfPath         material;   ///< the bound material; empty: displayColor
 };
 
 /// The bytes of a float array a VtValue holds (float or half, any tuple

@@ -55,7 +55,7 @@ HdDirtyBits HdLrtMesh::GetInitialDirtyBitsMask() const {
            HdChangeTracker::DirtyTopology | HdChangeTracker::DirtyTransform | HdChangeTracker::DirtyVisibility |
            HdChangeTracker::DirtyPrimvar | HdChangeTracker::DirtyNormals | HdChangeTracker::DirtyDoubleSided |
            HdChangeTracker::DirtyDisplayStyle | HdChangeTracker::DirtyRenderTag |
-           HdChangeTracker::DirtyInstancer | HdChangeTracker::DirtyInstanceIndex;
+           HdChangeTracker::DirtyInstancer | HdChangeTracker::DirtyInstanceIndex | HdChangeTracker::DirtyMaterialId;
 }
 
 void HdLrtMesh::Sync(HdSceneDelegate* delegate, HdRenderParam* renderParam, HdDirtyBits* dirtyBits,
@@ -94,6 +94,11 @@ void HdLrtMesh::Sync(HdSceneDelegate* delegate, HdRenderParam* renderParam, HdDi
         a.faceVertexIndices = topology.GetFaceVertexIndices();
         a.holeIndices = topology.GetHoleIndices();
         a.leftHanded = topology.GetOrientation() != HdTokens->rightHanded;
+        for (const HdGeomSubset& subset : topology.GetGeomSubsets()) {
+            if (subset.type == HdGeomSubset::TypeFaceSet) {
+                a.subsets.push_back({subset.indices, subset.materialId});
+            }
+        }
         a.points = delegate->Get(id, HdTokens->points);
         // Smooth normals where Storm computes them: a subdivision scheme that
         // is not none or bilinear, and no flat shading asked for.
@@ -123,8 +128,13 @@ void HdLrtMesh::Sync(HdSceneDelegate* delegate, HdRenderParam* renderParam, HdDi
         arrays = std::move(a);
     }
     std::optional<lrt::usd::MeshLook> look;
-    if ((*dirtyBits & (HdChangeTracker::DirtyPrimvar | HdChangeTracker::DirtyDoubleSided)) != 0) {
+    if (*dirtyBits & HdChangeTracker::DirtyMaterialId) {
+        SetMaterialId(delegate->GetMaterialId(id));
+    }
+    if ((*dirtyBits & (HdChangeTracker::DirtyPrimvar | HdChangeTracker::DirtyDoubleSided |
+                       HdChangeTracker::DirtyMaterialId)) != 0) {
         lrt::usd::MeshLook l;
+        l.material = GetMaterialId();
         GfVec3f colour;
         if (firstVec3(delegate->Get(id, HdTokens->displayColor), &colour)) {
             l.displayColor = {colour[0], colour[1], colour[2]};

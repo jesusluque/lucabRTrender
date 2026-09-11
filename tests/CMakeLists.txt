@@ -49,16 +49,18 @@ lrt_test(lrt_geom_tests
     LIBS lrt::geom)
 
 lrt_test(lrt_material_tests
-    SOURCES material/test_texture_store.cpp material/test_lobes.cpp
+    SOURCES material/test_texture_store.cpp material/test_lobes.cpp material/test_material_compiler.cpp
     LIBS lrt::material hio)
 target_compile_options(lrt_material_tests PRIVATE -Wno-old-style-cast -Wno-shadow -Wno-deprecated-declarations
                        -Wno-double-promotion -Wno-cast-align)
+target_compile_definitions(lrt_material_tests PRIVATE LRT_MATERIALX_ROOT="${LRT_USD_ROOT}")
 set_target_properties(lrt_material_tests PROPERTIES CXX_VISIBILITY_PRESET default VISIBILITY_INLINES_HIDDEN OFF
                       BUILD_RPATH "${SLANG_ROOT}/lib;${LRT_USD_ROOT}/lib")
 
 lrt_test(lrt_technique_tests
-    SOURCES technique/test_visibility.cpp technique/test_display.cpp
+    SOURCES technique/test_visibility.cpp technique/test_display.cpp technique/test_materials.cpp
     LIBS lrt::technique)
+target_compile_definitions(lrt_technique_tests PRIVATE LRT_MATERIALX_ROOT="${LRT_USD_ROOT}")
 
 lrt_test(lrt_lod_tests
     SOURCES lod/test_lod.cpp
@@ -78,10 +80,11 @@ set_target_properties(lrt_usd_tests PROPERTIES CXX_VISIBILITY_PRESET default VIS
 # single-sampled (OpenUSD reads the setting as its libraries load).
 lrt_test(lrt_storm_oracle_tests
     SOURCES usd/test_storm_oracle.cpp
-    LIBS lrt::usd hgi
+    LIBS lrt::usd hgi glf MaterialXCore MaterialXFormat
     ENVIRONMENT_MODIFICATION "HDX_MSAA_SAMPLE_COUNT=set:1")
 add_dependencies(lrt_storm_oracle_tests hdLrt)
-target_compile_definitions(lrt_storm_oracle_tests PRIVATE LRT_HYDRA_PLUGIN_DIR="${LRT_HYDRA_PLUGIN_DIR}")
+target_compile_definitions(lrt_storm_oracle_tests PRIVATE LRT_HYDRA_PLUGIN_DIR="${LRT_HYDRA_PLUGIN_DIR}"
+                           LRT_USD_ROOT="${LRT_USD_ROOT}")
 target_compile_options(lrt_storm_oracle_tests PRIVATE -Wno-old-style-cast -Wno-shadow -Wno-deprecated-declarations
                        -Wno-double-promotion -Wno-cast-align)
 set_target_properties(lrt_storm_oracle_tests PROPERTIES CXX_VISIBILITY_PRESET default VISIBILITY_INLINES_HIDDEN OFF

@@ -1,0 +1,20 @@
+<?xml version="1.0"?>
+<!-- Copyright (c) 2026 lucabRTrender contributors.
+     The engine's BSDF nodes for the genslang target: they push lobes
+     (lrt/material/material_runtime.slang) where genglsl computes responses. -->
+<materialx version="1.39">
+  <implementation name="IM_oren_nayar_diffuse_bsdf_genslang" nodedef="ND_oren_nayar_diffuse_bsdf" file="lrt/material/mx/lrt_oren_nayar_diffuse_bsdf.slang" function="lrt_oren_nayar_diffuse_bsdf" target="genslang" />
+  <implementation name="IM_burley_diffuse_bsdf_genslang" nodedef="ND_burley_diffuse_bsdf" file="lrt/material/mx/lrt_burley_diffuse_bsdf.slang" function="lrt_burley_diffuse_bsdf" target="genslang" />
+  <implementation name="IM_translucent_bsdf_genslang" nodedef="ND_translucent_bsdf" file="lrt/material/mx/lrt_translucent_bsdf.slang" function="lrt_translucent_bsdf" target="genslang" />
+  <implementation name="IM_subsurface_bsdf_genslang" nodedef="ND_subsurface_bsdf" file="lrt/material/mx/lrt_subsurface_bsdf.slang" function="lrt_subsurface_bsdf" target="genslang" />
+  <implementation name="IM_dielectric_bsdf_genslang" nodedef="ND_dielectric_bsdf" file="lrt/material/mx/lrt_dielectric_bsdf.slang" function="lrt_dielectric_bsdf" target="genslang" />
+  <implementation name="IM_conductor_bsdf_genslang" nodedef="ND_conductor_bsdf" file="lrt/material/mx/lrt_conductor_bsdf.slang" function="lrt_conductor_bsdf" target="genslang" />
+  <implementation name="IM_generalized_schlick_bsdf_genslang" nodedef="ND_generalized_schlick_bsdf" file="lrt/material/mx/lrt_generalized_schlick_bsdf.slang" function="lrt_generalized_schlick_bsdf" target="genslang" />
+  <implementation name="IM_sheen_bsdf_genslang" nodedef="ND_sheen_bsdf" file="lrt/material/mx/lrt_sheen_bsdf.slang" function="lrt_sheen_bsdf" target="genslang" />
+  <implementation name="IM_layer_bsdf_genslang" nodedef="ND_layer_bsdf" file="lrt/material/mx/lrt_layer_bsdf.slang" function="lrt_layer_bsdf" target="genslang" />
+  <implementation name="IM_mix_bsdf_genslang" nodedef="ND_mix_bsdf" file="lrt/material/mx/lrt_mix_bsdf.slang" function="lrt_mix_bsdf" target="genslang" />
+  <implementation name="IM_add_bsdf_genslang" nodedef="ND_add_bsdf" file="lrt/material/mx/lrt_add_bsdf.slang" function="lrt_add_bsdf" target="genslang" />
+  <implementation name="IM_multiply_bsdf_color3_genslang" nodedef="ND_multiply_bsdfC" file="lrt/material/mx/lrt_multiply_bsdf_color3.slang" function="lrt_multiply_bsdf_color3" target="genslang" />
+  <implementation name="IM_multiply_bsdf_float_genslang" nodedef="ND_multiply_bsdfF" file="lrt/material/mx/lrt_multiply_bsdf_float.slang" function="lrt_multiply_bsdf_float" target="genslang" />
+  <implementation name="IM_layer_vdf_genslang" nodedef="ND_layer_vdf" file="lrt/material/mx/lrt_layer_vdf.slang" function="lrt_layer_vdf" target="genslang" />
+</materialx>

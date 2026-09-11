@@ -59,6 +59,8 @@ struct MeshInput {
     /// is given; they become the "normals" vertex primvar.
     bool                       smoothNormals = true;
     std::span<const PrimvarInput> primvars;
+    /// GeomSubsets of one family (materialBind): each one's authored face indices.
+    std::vector<std::span<const int32_t>> subsets;
 };
 
 struct GpuMesh {
@@ -71,6 +73,8 @@ struct GpuMesh {
     gpu::Buffer   indices;          ///< uint, 3 per triangle: points
     gpu::Buffer   triangleCorners;  ///< uint, 3 per triangle: face-vertex indices
     gpu::Buffer   triangleFaces;    ///< uint per triangle: authored face
+    uint32_t      subsets = 0;      ///< GeomSubsets given
+    gpu::Buffer   triangleSubsets;  ///< uint per triangle: 0, or k + 1 for the k-th subset (when subsets > 0)
     std::vector<GpuPrimvar> primvars;   ///< authored, and "normals" when computed
     scene::Bounds bounds;
 
@@ -98,6 +102,7 @@ private:
     gpu::ComputeKernel cornerKeys_, clearRuns_, pointRuns_, pointNormals_;
     gpu::ComputeKernel boundsChunks_, boundsReduce_;
     gpu::ComputeKernel expand_;
+    gpu::ComputeKernel subsetClear_, subsetScatter_, subsetTriangles_;
 };
 
 }   // namespace lrt::geom

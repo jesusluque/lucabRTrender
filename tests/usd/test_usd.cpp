@@ -11,10 +11,12 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <sstream>
 #include <memory>
 #include <optional>
 
 #include <pxr/base/plug/registry.h>
+#include <pxr/imaging/hio/image.h>
 #include <pxr/imaging/hd/pluginRenderDelegateUniqueHandle.h>
 #include <pxr/imaging/hd/rendererPluginRegistry.h>
 #include <pxr/usd/usd/primDefinition.h>
@@ -401,6 +403,481 @@ TEST_CASE("a UsdGeomMesh draws through Hydra where, how deep and how lit it anal
     CHECK(c[0] == 0);
     CHECK(c[1] == 0);
     CHECK(depthError < 1e-3F);
+}
+
+namespace {
+
+/// A stage's /Camera image against the analytic headlit square at z = -5
+/// (visibility_check.slang's planeCheck): coverage, depth and colour mismatches.
+std::array<uint32_t, 3> squareMismatches(test::Gpu& gpu, const usd::StageImage& image, std::array<float, 3> colour,
+                                         float z = 5.0F, float half = 1.0F) {
+    const uint32_t w = image.width;
+    const uint32_t h = image.height;
+    render::Camera camera;
+    camera.lens.focal = 35.0;
+    camera.lens.haperture = 24.576;
+    camera.lens.nearZ = 0.1;
+    camera.lens.farZ = 1000.0;
+    const render::Projection projection = render::projectionFor(camera, w, h);
+    gpu::BufferDesc colourDesc;
+    colourDesc.bytes = image.rgba.size() * sizeof(float);
+    colourDesc.elementBytes = 16;
+    auto colours = gpu::Buffer::create(*gpu.device, colourDesc, image.rgba.data());
+    auto depth = gpu::Buffer::fromSpan<float>(*gpu.device, image.depth, "depth");
+    REQUIRE(colours);
+    REQUIRE(depth);
+    auto check = gpu::ComputeKernel::create(*gpu.library, "lrt/test/visibility_check", "planeCheck");
+    if (!check) FAIL(check.error().toString());
+    gpu::Buffer counts = test::uintBuffer(*gpu.device, 3, "counts");
+    gpu::Buffer worst = test::uintBuffer(*gpu.device, 1, "worst");
+    gpu::CommandBatch batch(*gpu.device);
+    check->dispatch(batch, {1, 1, 1}, [&](rhi::ShaderCursor cursor) {
+        cursor["colour"].setBinding(colours->rhi());
+        cursor["depth"].setBinding(depth->rhi());
+        cursor["counts"].setBinding(counts.rhi());
+        cursor["worst"].setBinding(worst.rhi());
+        rhi::ShaderCursor c = cursor["camera"];
+        c["width"].setData(w);
+        c["height"].setData(h);
+        c["focalX"].setData(static_cast<float>(projection.focalX));
+        c["focalY"].setData(static_cast<float>(projection.focalY));
+        c["centreX"].setData(static_cast<float>(projection.centreX));
+        c["centreY"].setData(static_cast<float>(projection.centreY));
+        c["nearZ"].setData(0.1F);
+        c["farZ"].setData(1000.0F);
+        c["orthographic"].setData(uint32_t{0});
+        cursor["plane"]["z"].setData(z);
+        cursor["plane"]["half"].setData(half);
+        cursor["plane"]["colourR"].setData(colour[0]);
+        cursor["plane"]["colourG"].setData(colour[1]);
+        cursor["plane"]["colourB"].setData(colour[2]);
+    });
+    REQUIRE(batch.submit(true));
+    std::array<uint32_t, 3> c{};
+    REQUIRE(counts.read(*gpu.device, 0, sizeof(c), c.data()));
+    return c;
+}
+
+const char* kSquareStage = R"(#usda 1.0
+(
+    upAxis = "Y"
+)
+def Mesh "Square" (
+    prepend apiSchemas = ["MaterialBindingAPI"]
+)
+{
+    int[] faceVertexCounts = [4]
+    int[] faceVertexIndices = [0, 1, 2, 3]
+    point3f[] points = [(-1, -1, -5), (1, -1, -5), (1, 1, -5), (-1, 1, -5)]
+    texCoord2f[] primvars:st = [(0, 0), (1, 0), (1, 1), (0, 1)] (
+        interpolation = "vertex"
+    )
+    uniform token subdivisionScheme = "none"
+    color3f[] primvars:displayColor = [(0.1, 0.9, 0.1)] (
+        interpolation = "constant"
+    )
+    rel material:binding = </Materials/Mat>
+}
+def Camera "Camera"
+{
+    float focalLength = 35
+    float horizontalAperture = 24.576
+    float verticalAperture = 18.432
+    float2 clippingRange = (0.1, 1000)
+}
+)";
+
+}   // namespace
+
+TEST_CASE("materials bound in USD shade a mesh: MaterialX with a texture, and UsdPreviewSurface",
+          "[usd][gpu][mesh][materials]") {
+    LRT_REQUIRE_GPU(gpu);
+    if (!gpu->device->caps().rasterization) {
+        SKIP("no rasterisation on this device");
+    }
+    // A texture of one colour, exactly representable in 8 bits.
+    const fs::path png = scratch("orange.png");
+    {
+        fs::remove(png);
+        std::vector<uint32_t> texels(16 * 16, 0xFF3399CCu);   // ABGR: r 0xCC, g 0x99, b 0x33
+        HioImageSharedPtr image = HioImage::OpenForWriting(png.string());
+        REQUIRE(image);
+        HioImage::StorageSpec spec;
+        spec.width = 16;
+        spec.height = 16;
+        spec.depth = 1;
+        spec.format = HioFormatUNorm8Vec4;
+        spec.data = texels.data();
+        REQUIRE(image->Write(spec));
+    }
+    const std::array<float, 3> textureColour{0xCC / 255.0F, 0x99 / 255.0F, 0x33 / 255.0F};
+    SECTION("MaterialX: oren_nayar coloured by an image") {
+        const fs::path path = scratch("material_mtlx.usda");
+        {
+            std::ofstream out(path);
+            out << kSquareStage
+                << "def Scope \"Materials\"\n{\n"
+                   "    def Material \"Mat\"\n    {\n"
+                   "        token outputs:mtlx:surface.connect = </Materials/Mat/Surface.outputs:out>\n"
+                   "        def Shader \"Surface\"\n        {\n"
+                   "            uniform token info:id = \"ND_surface\"\n"
+                   "            token inputs:bsdf.connect = </Materials/Mat/Diffuse.outputs:out>\n"
+                   "            token outputs:out\n        }\n"
+                   "        def Shader \"Diffuse\"\n        {\n"
+                   "            uniform token info:id = \"ND_oren_nayar_diffuse_bsdf\"\n"
+                   "            color3f inputs:color.connect = </Materials/Mat/Texture.outputs:out>\n"
+                   "            token outputs:out\n        }\n"
+                   "        def Shader \"Texture\"\n        {\n"
+                   "            uniform token info:id = \"ND_image_color3\"\n"
+                   "            asset inputs:file = @" << png.string() << "@ ( colorSpace = \"lin_rec709\" )\n"
+                   "            color3f outputs:out\n        }\n    }\n}\n";
+        }
+        auto renderer = usd::StageRenderer::open(path);
+        if (!renderer) FAIL(renderer.error().toString());
+        auto image = (*renderer)->render("/Camera", 0.0, 160, 120);
+        if (!image) FAIL(image.error().toString());
+        const auto c = squareMismatches(*gpu, *image, textureColour);
+        // The same material seen by rays instead of the rasteriser: shading
+        // reads the visibility buffer, whichever route filled it.
+        if (gpu->device->caps().rayQuery && gpu->device->caps().accelerationStructure) {
+            REQUIRE((*renderer)->setMeshVisibility("rays"));
+            auto traced = (*renderer)->render("/Camera", 0.0, 160, 120);
+            REQUIRE((*renderer)->setMeshVisibility("raster"));
+            if (!traced) FAIL(traced.error().toString());
+            gpu::BufferDesc desc;
+            desc.bytes = image->rgba.size() * sizeof(float);
+            desc.elementBytes = 16;
+            auto a = gpu::Buffer::create(*gpu->device, desc, image->rgba.data());
+            auto b = gpu::Buffer::create(*gpu->device, desc, traced->rgba.data());
+            REQUIRE(a);
+            REQUIRE(b);
+            auto diff = render::compareImages(*gpu->library, *a, *b, 160, 120);
+            REQUIRE(diff);
+            std::printf("  raster against rays, textured material: p99 %u, max %u, %llu pixels beyond 2\n", diff->p99,
+                        diff->max, static_cast<unsigned long long>(diff->over2));
+            CHECK(diff->max == 0);
+        }
+        const float* centre = image->rgba.data() + (60 * 160 + 80) * 4;
+        std::printf("  MaterialX image material: %u covered, %u coverage and %u colour mismatches; centre %.4f %.4f "
+                    "%.4f (texture %.4f %.4f %.4f)\n",
+                    c[2], c[0], c[1], double(centre[0]), double(centre[1]), double(centre[2]),
+                    double(textureColour[0]), double(textureColour[1]), double(textureColour[2]));
+        CHECK(c[2] > 800);
+        CHECK(c[0] == 0);
+        CHECK(c[1] == 0);
+    }
+    SECTION("UsdPreviewSurface with a UsdUVTexture read through UsdPrimvarReader") {
+        const fs::path path = scratch("material_preview_texture.usda");
+        {
+            std::ofstream out(path);
+            out << kSquareStage
+                << "def Scope \"Materials\"\n{\n"
+                   "    def Material \"Mat\"\n    {\n"
+                   "        token outputs:surface.connect = </Materials/Mat/Preview.outputs:surface>\n"
+                   "        def Shader \"Preview\"\n        {\n"
+                   "            uniform token info:id = \"UsdPreviewSurface\"\n"
+                   "            color3f inputs:diffuseColor.connect = </Materials/Mat/Texture.outputs:rgb>\n"
+                   "            int inputs:useSpecularWorkflow = 1\n"
+                   "            color3f inputs:specularColor = (0, 0, 0)\n"
+                   "            float inputs:roughness = 1\n"
+                   "            token outputs:surface\n        }\n"
+                   "        def Shader \"Texture\"\n        {\n"
+                   "            uniform token info:id = \"UsdUVTexture\"\n"
+                   "            asset inputs:file = @" << png.string() << "@\n"
+                   "            token inputs:sourceColorSpace = \"raw\"\n"
+                   "            float2 inputs:st.connect = </Materials/Mat/Reader.outputs:result>\n"
+                   "            color3f outputs:rgb\n        }\n"
+                   "        def Shader \"Reader\"\n        {\n"
+                   "            uniform token info:id = \"UsdPrimvarReader_float2\"\n"
+                   "            string inputs:varname = \"st\"\n"
+                   "            float2 outputs:result\n        }\n    }\n}\n";
+        }
+        auto renderer = usd::StageRenderer::open(path);
+        if (!renderer) FAIL(renderer.error().toString());
+        auto image = (*renderer)->render("/Camera", 0.0, 160, 120);
+        if (!image) FAIL(image.error().toString());
+        const float* centre = image->rgba.data() + (60 * 160 + 80) * 4;
+        std::printf("  UsdPreviewSurface textured centre: %.4f %.4f %.4f (texture %.4f %.4f %.4f)\n",
+                    double(centre[0]), double(centre[1]), double(centre[2]), double(textureColour[0]),
+                    double(textureColour[1]), double(textureColour[2]));
+        for (int k = 0; k < 3; ++k) {
+            CHECK(centre[k] == Catch::Approx(textureColour[size_t(k)]).epsilon(0.01));
+        }
+    }
+    SECTION("UsdPreviewSurface, rough, specular workflow without specular") {
+        const fs::path path = scratch("material_preview.usda");
+        {
+            std::ofstream out(path);
+            out << kSquareStage
+                << "def Scope \"Materials\"\n{\n"
+                   "    def Material \"Mat\"\n    {\n"
+                   "        token outputs:surface.connect = </Materials/Mat/Preview.outputs:surface>\n"
+                   "        def Shader \"Preview\"\n        {\n"
+                   "            uniform token info:id = \"UsdPreviewSurface\"\n"
+                   "            color3f inputs:diffuseColor = (0.8, 0.4, 0.2)\n"
+                   "            int inputs:useSpecularWorkflow = 1\n"
+                   "            color3f inputs:specularColor = (0, 0, 0)\n"
+                   "            float inputs:roughness = 1\n"
+                   "            token outputs:surface\n        }\n    }\n}\n";
+        }
+        auto renderer = usd::StageRenderer::open(path);
+        if (!renderer) FAIL(renderer.error().toString());
+        auto image = (*renderer)->render("/Camera", 0.0, 160, 120);
+        if (!image) FAIL(image.error().toString());
+        // Not the displayColor fallback: the material's colour, less what the
+        // (black) specular layer's albedo fit keeps of it.
+        const float* centre = image->rgba.data() + (60 * 160 + 80) * 4;
+        std::printf("  UsdPreviewSurface centre: %.4f %.4f %.4f\n", double(centre[0]), double(centre[1]),
+                    double(centre[2]));
+        CHECK(centre[0] == Catch::Approx(0.8F).margin(0.08F));
+        CHECK(centre[1] == Catch::Approx(0.4F).margin(0.04F));
+        CHECK(centre[2] == Catch::Approx(0.2F).margin(0.02F));
+    }
+}
+
+namespace {
+
+/// Two squares, one in front of the other, each with its own material: the
+/// front one's is a UsdPreviewSurface whose opacity `opacity` is cut at
+/// `threshold`, the back one's a MaterialX diffuse of a known colour. With
+/// `alpha` the opacity is that texture's alpha channel instead.
+std::string cutoutStage(const std::string& opacity, float threshold, const std::array<float, 3>& back,
+                        const std::string& extra = {}) {
+    std::ostringstream out;
+    out << "#usda 1.0\n(\n    upAxis = \"Y\"\n)\n"
+           "def Mesh \"Front\" (\n    prepend apiSchemas = [\"MaterialBindingAPI\"]\n)\n{\n"
+           "    int[] faceVertexCounts = [4]\n    int[] faceVertexIndices = [0, 1, 2, 3]\n"
+           "    point3f[] points = [(-1, -1, -3), (1, -1, -3), (1, 1, -3), (-1, 1, -3)]\n"
+           "    texCoord2f[] primvars:st = [(0, 0), (1, 0), (1, 1), (0, 1)] (\n        interpolation = \"vertex\"\n    )\n"
+           "    uniform token subdivisionScheme = \"none\"\n"
+           "    rel material:binding = </Materials/Cut>\n}\n"
+           "def Mesh \"Back\" (\n    prepend apiSchemas = [\"MaterialBindingAPI\"]\n)\n{\n"
+           "    int[] faceVertexCounts = [4]\n    int[] faceVertexIndices = [0, 1, 2, 3]\n"
+           "    point3f[] points = [(-1, -1, -5), (1, -1, -5), (1, 1, -5), (-1, 1, -5)]\n"
+           "    uniform token subdivisionScheme = \"none\"\n"
+           "    rel material:binding = </Materials/Back>\n}\n"
+           "def Camera \"Camera\"\n{\n    float focalLength = 35\n"
+           "    float horizontalAperture = 24.576\n    float verticalAperture = 18.432\n"
+           "    float2 clippingRange = (0.1, 1000)\n}\n"
+           "def Scope \"Materials\"\n{\n"
+           "    def Material \"Cut\"\n    {\n"
+           "        token outputs:surface.connect = </Materials/Cut/Preview.outputs:surface>\n"
+           "        def Shader \"Preview\"\n        {\n"
+           "            uniform token info:id = \"UsdPreviewSurface\"\n"
+           "            color3f inputs:diffuseColor = (0.2, 0.4, 0.8)\n"
+           "            int inputs:useSpecularWorkflow = 1\n"
+           "            color3f inputs:specularColor = (0, 0, 0)\n"
+           "            float inputs:roughness = 1\n"
+        << "            " << opacity << "\n"
+        << "            float inputs:opacityThreshold = " << threshold << "\n"
+           "            token outputs:surface\n        }\n"
+        << extra
+        << "    }\n"
+           "    def Material \"Back\"\n    {\n"
+           "        token outputs:mtlx:surface.connect = </Materials/Back/Surface.outputs:out>\n"
+           "        def Shader \"Surface\"\n        {\n"
+           "            uniform token info:id = \"ND_surface\"\n"
+           "            token inputs:bsdf.connect = </Materials/Back/Diffuse.outputs:out>\n"
+           "            token outputs:out\n        }\n"
+           "        def Shader \"Diffuse\"\n        {\n"
+           "            uniform token info:id = \"ND_oren_nayar_diffuse_bsdf\"\n"
+        << "            color3f inputs:color = (" << back[0] << ", " << back[1] << ", " << back[2] << ")\n"
+        << "            token outputs:out\n        }\n    }\n}\n";
+    return out.str();
+}
+
+}   // namespace
+
+TEST_CASE("a material's opacityThreshold cuts its samples out of visibility itself, in every route",
+          "[usd][gpu][mesh][materials][cutout]") {
+    LRT_REQUIRE_GPU(gpu);
+    const gpu::Caps& caps = gpu->device->caps();
+    if (!caps.rasterization) {
+        SKIP("no rasterisation on this device");
+    }
+    const bool rays = caps.rayQuery && caps.accelerationStructure;
+    std::vector<const char*> routes{"raster", "bvh"};
+    if (rays) {
+        routes.insert(routes.begin() + 1, "rays");
+    }
+    const std::array<float, 3> backColour{0.8F, 0.4F, 0.2F};
+    const uint32_t w = 160;
+    const uint32_t h = 120;
+
+    SECTION("cut away, what is behind shows exactly as if it were alone") {
+        const fs::path path = scratch("cutout_all.usda");
+        {
+            std::ofstream out(path);
+            out << cutoutStage("float inputs:opacity = 0.2", 0.5F, backColour);
+        }
+        auto renderer = usd::StageRenderer::open(path);
+        if (!renderer) FAIL(renderer.error().toString());
+        for (const char* route : routes) {
+            REQUIRE((*renderer)->setMeshVisibility(route));
+            auto image = (*renderer)->render("/Camera", 0.0, w, h);
+            if (!image) FAIL(image.error().toString());
+            // The back square at z = -5, analytically: the front one is gone,
+            // and nothing of it is left in the depth either.
+            const auto c = squareMismatches(*gpu, *image, backColour);
+            std::printf("  cutout by %s: %u covered, %u coverage and %u colour mismatches against the square behind\n",
+                        route, c[2], c[0], c[1]);
+            CHECK(c[2] > 800);
+            CHECK(c[0] == 0);
+            CHECK(c[1] == 0);
+        }
+    }
+
+    SECTION("an opacity above the threshold is not cut") {
+        const fs::path path = scratch("cutout_none.usda");
+        {
+            std::ofstream out(path);
+            out << cutoutStage("float inputs:opacity = 0.2", 0.1F, backColour);
+        }
+        auto renderer = usd::StageRenderer::open(path);
+        if (!renderer) FAIL(renderer.error().toString());
+        for (const char* route : routes) {
+            REQUIRE((*renderer)->setMeshVisibility(route));
+            auto image = (*renderer)->render("/Camera", 0.0, w, h);
+            if (!image) FAIL(image.error().toString());
+            // The front square at z = -3 covers the back one: its coverage and
+            // depth, not the colour, which is the preview surface's.
+            const auto c = squareMismatches(*gpu, *image, {0.2F, 0.4F, 0.8F}, 3.0F);
+            std::printf("  kept by %s: %u covered, %u coverage mismatches against the square in front (%u colour)\n",
+                        route, c[2], c[0], c[1]);
+            CHECK(c[2] > 2000);
+            CHECK(c[0] == 0);
+        }
+    }
+
+    SECTION("half a square cut by a texture's alpha, the same in every route") {
+        // Alpha 0 on the left half of the texture, 1 on the right.
+        const fs::path png = scratch("cutout_alpha.png");
+        {
+            fs::remove(png);
+            std::vector<uint32_t> texels(size_t{16} * 16, 0u);
+            for (size_t y = 0; y < 16; ++y) {
+                for (size_t x = 0; x < 16; ++x) {
+                    texels[y * 16 + x] = x < 8 ? 0x00FFFFFFu : 0xFFFFFFFFu;   // ABGR
+                }
+            }
+            HioImageSharedPtr made = HioImage::OpenForWriting(png.string());
+            REQUIRE(made);
+            HioImage::StorageSpec spec;
+            spec.width = 16;
+            spec.height = 16;
+            spec.depth = 1;
+            spec.format = HioFormatUNorm8Vec4;
+            spec.data = texels.data();
+            REQUIRE(made->Write(spec));
+        }
+        const fs::path path = scratch("cutout_texture.usda");
+        {
+            const std::string alpha =
+                "        def Shader \"Alpha\"\n        {\n"
+                "            uniform token info:id = \"UsdUVTexture\"\n"
+                "            asset inputs:file = @" + png.string() + "@\n"
+                "            token inputs:sourceColorSpace = \"raw\"\n"
+                "            float2 inputs:st.connect = </Materials/Cut/Reader.outputs:result>\n"
+                "            float outputs:a\n        }\n"
+                "        def Shader \"Reader\"\n        {\n"
+                "            uniform token info:id = \"UsdPrimvarReader_float2\"\n"
+                "            string inputs:varname = \"st\"\n"
+                "            float2 outputs:result\n        }\n";
+            std::ofstream out(path);
+            out << cutoutStage("float inputs:opacity.connect = </Materials/Cut/Alpha.outputs:a>", 0.5F, backColour,
+                               alpha);
+        }
+        auto renderer = usd::StageRenderer::open(path);
+        if (!renderer) FAIL(renderer.error().toString());
+        std::vector<gpu::Buffer> images;
+        for (const char* route : routes) {
+            REQUIRE((*renderer)->setMeshVisibility(route));
+            auto image = (*renderer)->render("/Camera", 0.0, w, h);
+            if (!image) FAIL(image.error().toString());
+            // Left of the square: the back one shows through the hole. Right:
+            // the front one, nearer, is kept.
+            const float* left = image->rgba.data() + (size_t{h} / 2 * w + w / 2 - 20) * 4;
+            const float* right = image->rgba.data() + (size_t{h} / 2 * w + w / 2 + 20) * 4;
+            std::printf("  half cut by %s: left %.3f %.3f %.3f, right %.3f %.3f %.3f\n", route, double(left[0]),
+                        double(left[1]), double(left[2]), double(right[0]), double(right[1]), double(right[2]));
+            CHECK(left[0] > left[2]);    // the back square's orange
+            CHECK(right[2] > right[0]);  // the front square's blue
+            gpu::BufferDesc desc;
+            desc.bytes = image->rgba.size() * sizeof(float);
+            desc.elementBytes = 16;
+            auto buffer = gpu::Buffer::create(*gpu->device, desc, image->rgba.data());
+            REQUIRE(buffer);
+            images.push_back(std::move(*buffer));
+        }
+        for (size_t k = 1; k < images.size(); ++k) {
+            auto diff = render::compareImages(*gpu->library, images[0], images[k], w, h);
+            REQUIRE(diff);
+            std::printf("  raster against %s: p99 %u, max %u, %llu pixels beyond 2\n", routes[k], diff->p99, diff->max,
+                        static_cast<unsigned long long>(diff->over2));
+            // The cut is decided at the pixel's centre by the same material in
+            // every route, as the silhouettes are: a few edge pixels apart.
+            CHECK(diff->over2 * 100 <= uint64_t{w} * h);
+        }
+    }
+}
+
+TEST_CASE("a GeomSubset's material shades its faces; the mesh's the rest", "[usd][gpu][mesh][materials]") {
+    LRT_REQUIRE_GPU(gpu);
+    if (!gpu->device->caps().rasterization) {
+        SKIP("no rasterisation on this device");
+    }
+    const auto diffuse = [](const std::string& name, const std::string& colour) {
+        return "    def Material \"" + name + "\"\n    {\n"
+               "        token outputs:mtlx:surface.connect = </Materials/" + name + "/Surface.outputs:out>\n"
+               "        def Shader \"Surface\"\n        {\n"
+               "            uniform token info:id = \"ND_surface\"\n"
+               "            token inputs:bsdf.connect = </Materials/" + name + "/Diffuse.outputs:out>\n"
+               "            token outputs:out\n        }\n"
+               "        def Shader \"Diffuse\"\n        {\n"
+               "            uniform token info:id = \"ND_oren_nayar_diffuse_bsdf\"\n"
+               "            color3f inputs:color = (" + colour + ")\n"
+               "            token outputs:out\n        }\n    }\n";
+    };
+    const fs::path path = scratch("subsets.usda");
+    {
+        std::ofstream out(path);
+        out << "#usda 1.0\n(\n    upAxis = \"Y\"\n)\n"
+               "def Mesh \"Faces\" (\n    prepend apiSchemas = [\"MaterialBindingAPI\"]\n)\n{\n"
+               "    int[] faceVertexCounts = [4, 4]\n"
+               "    int[] faceVertexIndices = [0, 1, 4, 3, 1, 2, 5, 4]\n"
+               "    point3f[] points = [(-2, -1, -5), (0, -1, -5), (2, -1, -5), (-2, 1, -5), (0, 1, -5), (2, 1, -5)]\n"
+               "    uniform token subdivisionScheme = \"none\"\n"
+               "    uniform token subsetFamily:materialBind:familyType = \"nonOverlapping\"\n"
+               "    rel material:binding = </Materials/Green>\n"
+               "    def GeomSubset \"Left\" (\n        prepend apiSchemas = [\"MaterialBindingAPI\"]\n    )\n    {\n"
+               "        uniform token elementType = \"face\"\n"
+               "        uniform token familyName = \"materialBind\"\n"
+               "        int[] indices = [0]\n"
+               "        rel material:binding = </Materials/Red>\n    }\n}\n"
+               "def Scope \"Materials\"\n{\n" << diffuse("Red", "0.9, 0.1, 0.1") << diffuse("Green", "0.1, 0.9, 0.1")
+            << "}\n"
+               "def Camera \"Camera\"\n{\n"
+               "    float focalLength = 20\n"
+               "    float horizontalAperture = 24.576\n    float verticalAperture = 18.432\n}\n";
+    }
+    auto renderer = usd::StageRenderer::open(path);
+    if (!renderer) FAIL(renderer.error().toString());
+    const uint32_t w = 160;
+    const uint32_t h = 120;
+    auto image = (*renderer)->render("/Camera", 0.0, w, h);
+    if (!image) FAIL(image.error().toString());
+    const auto pixel = [&](uint32_t x, uint32_t y) {
+        const float* p = image->rgba.data() + (size_t{y} * w + x) * 4;
+        return std::array<float, 3>{p[0], p[1], p[2]};
+    };
+    const auto left = pixel(w / 2 - 20, h / 2);
+    const auto right = pixel(w / 2 + 20, h / 2);
+    std::printf("  subset face: %.3f %.3f %.3f; the rest: %.3f %.3f %.3f\n", double(left[0]), double(left[1]),
+                double(left[2]), double(right[0]), double(right[1]), double(right[2]));
+    CHECK(left[0] > 0.8F);
+    CHECK(left[1] < 0.15F);
+    CHECK(right[1] > 0.8F);
+    CHECK(right[0] < 0.15F);
 }
 
 TEST_CASE("displayColor reaches the pixels per face and per indexed face-vertex", "[usd][gpu][mesh][primvars]") {

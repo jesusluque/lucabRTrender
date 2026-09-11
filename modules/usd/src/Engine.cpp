@@ -3,6 +3,10 @@
 
 #include <algorithm>
 #include <cmath>
+#include <filesystem>
+
+#include <MaterialXFormat/File.h>
+#include <pxr/imaging/hdMtlx/hdMtlx.h>
 
 #include "lrt/core/Log.h"
 #include "lrt/gpu/CommandBatch.h"
@@ -93,6 +97,10 @@ void Engine::setMesh(const pxr::SdfPath& id, int32_t primId, const pxr::TfToken&
     entry.primId = static_cast<uint32_t>(primId);
     entry.renderTag = renderTag;
     if (arrays.has_value()) {
+        entry.subsetMaterials.clear();
+        for (const MeshSubset& subset : arrays->subsets) {
+            entry.subsetMaterials.push_back(subset.material);
+        }
         entry.pending = std::move(arrays);
     }
     if (transform != nullptr) {
@@ -119,6 +127,20 @@ void Engine::removeInstancer(const pxr::SdfPath& id) {
     instancers_.erase(id);
 }
 
+void Engine::setMaterial(const pxr::SdfPath& id, std::shared_ptr<void> mtlxDocument) {
+    const std::lock_guard<std::mutex> held(guard_);
+    MaterialEntry& entry = materials_[id];
+    entry.document = std::move(mtlxDocument);
+    entry.cutout = material::MaterialCompiler::cutsOut(entry.document);
+    entry.pending = true;
+}
+
+void Engine::removeMaterial(const pxr::SdfPath& id) {
+    const std::lock_guard<std::mutex> held(guard_);
+    materials_.erase(id);
+    materialsChanged_ = true;
+}
+
 void Engine::remove(const pxr::SdfPath& id) {
     const std::lock_guard<std::mutex> held(guard_);
     splats_.erase(id);
@@ -129,6 +151,45 @@ void Engine::remove(const pxr::SdfPath& id) {
 Result<size_t> Engine::commit() {
     const std::lock_guard<std::mutex> held(guard_);
     size_t uploaded = 0;
+    for (auto& [id, entry] : materials_) {
+        if (!entry.pending) {
+            continue;
+        }
+        entry.pending = false;
+        entry.compiled.reset();
+        materialsChanged_ = true;
+        ++uploaded;
+        if (!entry.document) {
+            continue;
+        }
+        if (!compiler_ && !compilerFailed_) {
+            std::vector<std::filesystem::path> shaders;
+            for (const std::string& path : device_->shaderSearchPaths()) {
+                shaders.emplace_back(path);
+            }
+            std::vector<std::filesystem::path> sources;
+            for (const MaterialX::FilePath& path : pxr::HdMtlxSearchPaths()) {
+                sources.emplace_back(path.asString());
+                sources.emplace_back(std::filesystem::path(path.asString()).parent_path());
+            }
+            auto made = material::MaterialCompiler::create(pxr::HdMtlxStdLibraries(), sources, shaders);
+            if (made) {
+                compiler_ = std::move(*made);
+            } else {
+                compilerFailed_ = true;
+                log::warn("hdLrt: materials show displayColor: {}", made.error().toString());
+            }
+        }
+        if (!compiler_) {
+            continue;
+        }
+        auto compiled = compiler_->compileDocument(entry.document);
+        if (compiled) {
+            entry.compiled = std::move(*compiled);
+        } else {
+            log::warn("hdLrt: material {}: {}", id.GetString(), compiled.error().toString());
+        }
+    }
     for (auto& [id, entry] : meshes_) {
         if (!entry.pending.has_value()) {
             continue;
@@ -153,6 +214,9 @@ Result<size_t> Engine::commit() {
             primvars.push_back(std::move(primvar));
         }
         input.primvars = primvars;
+        for (const MeshSubset& subset : a.subsets) {
+            input.subsets.emplace_back(subset.faces.cdata(), subset.faces.size());
+        }
         entry.gpu.reset();
         if (input.points.values() >= 3 && !a.faceVertexCounts.empty()) {
             if (!meshBuilder_.has_value()) {
@@ -301,6 +365,94 @@ Result<std::optional<scene::Bounds>> Engine::bounds() {
     return all;
 }
 
+Result<void> Engine::prepareMaterials(const std::vector<std::string>& aovPrimvars) {
+    if (!scene_.has_value()) {
+        auto scene = world::GpuScene::create(*library_);
+        if (!scene) return std::move(scene).error();
+        scene_.emplace(std::move(*scene));
+    }
+    if (!textures_) {
+        auto made = material::TextureStore::create(*library_);
+        if (!made) return std::move(made).error();
+        textures_ = std::move(*made);
+    }
+    if (!materialPrograms_.has_value()) {
+        auto made = technique::MaterialPrograms::create(*library_);
+        if (!made) return std::move(made).error();
+        materialPrograms_.emplace(std::move(*made));
+    }
+    if (!materialShading_.has_value()) {
+        auto made = technique::MaterialShading::create(*library_);
+        if (!made) return std::move(made).error();
+        materialShading_.emplace(std::move(*made));
+    }
+    // Primvar slots: the AOVs' and every primvar a material reads.
+    std::vector<std::string> names = aovPrimvars;
+    const auto fixed = [](const std::string& name) {
+        return name == "displayColor" || name == "displayOpacity" || name == "normals" || name == "st";
+    };
+    for (const auto& [id, entry] : materials_) {
+        if (!entry.compiled) {
+            continue;
+        }
+        for (const material::MaterialSlot& slot : entry.compiled->slots) {
+            if (slot.kind == material::MaterialSlot::Kind::Primvar && !fixed(slot.name) &&
+                std::find(names.begin(), names.end(), slot.name) == names.end()) {
+                names.push_back(slot.name);
+            }
+        }
+    }
+    scene_->setExtraPrimvarSlots(names);
+    if (!materialsChanged_ && names == materialSlotNames_ && materialRecords_.valid()) {
+        return ok();
+    }
+    // One module per distinct structure; a row and blob words per material.
+    std::vector<material::CompiledMaterial> modules;
+    std::vector<technique::MaterialRecord> rows{{0, 0, 0, 0}};
+    std::vector<float> blob;
+    materialRows_.clear();
+    materialCutouts_ = false;
+    for (const auto& [id, entry] : materials_) {
+        if (!entry.compiled) {
+            continue;
+        }
+        uint32_t function = 0;
+        for (size_t k = 0; k < modules.size(); ++k) {
+            if (modules[k].module == entry.compiled->module) {
+                function = static_cast<uint32_t>(k + 1);
+            }
+        }
+        if (function == 0) {
+            modules.push_back(*entry.compiled);
+            function = static_cast<uint32_t>(modules.size());
+        }
+        const std::vector<float> words = material::MaterialCompiler::parameters(
+            *entry.compiled, *textures_, [&](const std::string& name) { return scene_->slotOf(name); });
+        materialRows_[id] = static_cast<uint32_t>(rows.size());
+        const uint32_t flags = entry.cutout ? technique::kMaterialCutout : 0u;
+        materialCutouts_ = materialCutouts_ || entry.cutout;
+        rows.push_back({function, static_cast<uint32_t>(blob.size()), flags, 0});
+        blob.insert(blob.end(), words.begin(), words.end());
+    }
+    if (blob.empty()) {
+        blob.push_back(0.0F);
+    }
+    if (auto loaded = textures_->commit(); !loaded) {
+        return std::move(loaded).error();
+    }
+    auto records = gpu::Buffer::fromSpan<technique::MaterialRecord>(*device_, rows, "materials.records");
+    if (!records) return std::move(records).error();
+    auto words = gpu::Buffer::fromSpan<float>(*device_, blob, "materials.blob");
+    if (!words) return std::move(words).error();
+    materialRecords_ = std::move(*records);
+    materialBlob_ = std::move(*words);
+    LRT_TRY(materialPrograms_->setModules(modules));
+    LRT_TRY(materialShading_->setPrograms(*materialPrograms_));
+    materialsChanged_ = false;
+    materialSlotNames_ = std::move(names);
+    return ok();
+}
+
 AovView Engine::aovView(const render::RenderTargets& targets, AovSource aov) const {
     AovView view;
     view.ids = aov.kind == AovKind::PrimId || aov.kind == AovKind::InstanceId || aov.kind == AovKind::ElementId;
@@ -395,6 +547,28 @@ Result<void> Engine::render(const render::Projection& projection, const render::
                             MeshVisibility visibility) {
     lastTargets_ = &targets;
     aovsValid_ = false;
+    {
+        bool anyMesh = false;
+        {
+            const std::lock_guard<std::mutex> held(guard_);
+            anyMesh = !meshes_.empty();
+        }
+        if (anyMesh) {
+            LRT_TRY(prepareMaterials(aovRequest.primvars));
+        }
+    }
+    const auto rowOf = [&](const pxr::SdfPath& material) -> uint32_t {
+        const auto found = materialRows_.find(material);
+        return found != materialRows_.end() ? found->second : 0u;
+    };
+    const auto subsetRowsOf = [&](const MeshEntry& entry) {
+        std::vector<uint32_t> rows;
+        rows.reserve(entry.subsetMaterials.size());
+        for (const pxr::SdfPath& material : entry.subsetMaterials) {
+            rows.push_back(rowOf(material));
+        }
+        return rows;
+    };
     std::vector<world::MeshInstance> meshInstances;
     std::vector<world::InstanceSet> meshSets;
     std::vector<render::SplatInstance> splats;
@@ -482,6 +656,8 @@ Result<void> Engine::render(const render::Projection& projection, const render::
                 set.displayColor = entry.look.displayColor;
                 set.displayOpacity = entry.look.displayOpacity;
                 set.doubleSided = entry.look.doubleSided;
+                set.material = rowOf(entry.look.material);
+                set.subsetMaterials = subsetRowsOf(entry);
                 meshSets.push_back(std::move(set));
                 continue;
             }
@@ -492,6 +668,8 @@ Result<void> Engine::render(const render::Projection& projection, const render::
             instance.displayColor = entry.look.displayColor;
             instance.displayOpacity = entry.look.displayOpacity;
             instance.doubleSided = entry.look.doubleSided;
+            instance.material = rowOf(entry.look.material);
+            instance.subsetMaterials = subsetRowsOf(entry);
             meshInstances.push_back(std::move(instance));
         }
         for (const auto& [id, entry] : points_) {
@@ -571,17 +749,17 @@ Result<void> Engine::render(const render::Projection& projection, const render::
     }
     const bool meshLayer = drawMeshes;
     if (meshLayer) {
-        if (!scene_.has_value()) {
-            auto scene = world::GpuScene::create(*library_);
-            if (!scene) return std::move(scene).error();
-            scene_.emplace(std::move(*scene));
-            auto shading = technique::HeadlightShading::create(*library_);
-            if (!shading) return std::move(shading).error();
-            headlight_.emplace(std::move(*shading));
-        }
-        scene_->setExtraPrimvarSlots(aovRequest.primvars);
         LRT_TRY(scene_->update(meshInstances, projection, meshSets));
         gpu::CommandBatch batch(*device_);
+        // What a material needs wherever it is evaluated: shading always,
+        // visibility only where a material cuts its samples away.
+        technique::MaterialFrame frame;
+        frame.programs = &*materialPrograms_;
+        frame.scene = &*scene_;
+        frame.records = &materialRecords_;
+        frame.blob = &materialBlob_;
+        frame.textures = textures_.get();
+        const technique::MaterialFrame* cutouts = materialCutouts_ ? &frame : nullptr;
         switch (visibility) {
             case MeshVisibility::Automatic:
             case MeshVisibility::Raster:
@@ -591,7 +769,7 @@ Result<void> Engine::render(const render::Projection& projection, const render::
                     visibilityRaster_.emplace(std::move(*made));
                 }
                 LRT_TRY(visibilityRaster_->render(batch, *scene_, projection, settings.width, settings.height,
-                                                  visibility_));
+                                                  visibility_, cutouts));
                 break;
             case MeshVisibility::Rays:
                 if (!visibilityTrace_.has_value()) {
@@ -604,7 +782,7 @@ Result<void> Engine::render(const render::Projection& projection, const render::
                 }
                 LRT_TRY(rayTracingScene_->build(*scene_));
                 LRT_TRY(visibilityTrace_->render(batch, *rayTracingScene_, projection, settings.width,
-                                                 settings.height, visibility_));
+                                                 settings.height, visibility_, cutouts));
                 break;
             case MeshVisibility::Bvh:
                 if (!visibilityBvh_.has_value()) {
@@ -617,10 +795,10 @@ Result<void> Engine::render(const render::Projection& projection, const render::
                 }
                 LRT_TRY(bvhScene_->build(*scene_));
                 LRT_TRY(visibilityBvh_->render(batch, *scene_, *bvhScene_, projection, settings.width,
-                                               settings.height, visibility_));
+                                               settings.height, visibility_, cutouts));
                 break;
         }
-        LRT_TRY(headlight_->shade(batch, *scene_, visibility_, projection, meshLayer_));
+        LRT_TRY(materialShading_->shade(batch, visibility_, projection, frame, meshLayer_));
         if (aovRequest.ids || aovRequest.normals || !aovRequest.primvars.empty()) {
             if (!aovShading_.has_value()) {
                 auto made = technique::AovShading::create(*library_);

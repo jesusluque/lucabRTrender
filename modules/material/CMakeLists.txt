@@ -3,11 +3,13 @@
 lrt_add_module(material
     SOURCES
         src/TextureStore.cpp
+        src/MaterialCompiler.cpp
     PUBLIC_LIBS
         lrt::core
         lrt::gpu
     PRIVATE_LIBS
-        hio usdShade sdf ar tf)
+        hio usdShade sdf ar tf
+        MaterialXCore MaterialXFormat MaterialXGenShader MaterialXGenHw MaterialXGenSlang)
 # USD's headers predate the warnings this engine asks for.
 target_compile_options(lrt_material PRIVATE -Wno-old-style-cast -Wno-shadow -Wno-cast-align
                        -Wno-deprecated-declarations -Wno-double-promotion)

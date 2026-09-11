@@ -1,6 +1,8 @@
 // Copyright (c) 2026 lucabRTrender contributors.
 #include "RenderDelegate.h"
 
+#include "Material.h"
+
 #include <pxr/base/tf/staticTokens.h>
 #include <pxr/imaging/hd/camera.h>
 #include <pxr/imaging/hd/resourceRegistry.h>
@@ -45,8 +47,13 @@ TfTokenVector const& HdLrtRenderDelegate::GetSupportedRprimTypes() const {
 }
 
 TfTokenVector const& HdLrtRenderDelegate::GetSupportedSprimTypes() const {
-    static const TfTokenVector types{HdPrimTypeTokens->camera};
+    static const TfTokenVector types{HdPrimTypeTokens->camera, HdPrimTypeTokens->material};
     return types;
+}
+
+TfTokenVector HdLrtRenderDelegate::GetMaterialRenderContexts() const {
+    // MaterialX networks first, then UsdPreviewSurface ones, both through hdMtlx.
+    return {TfToken("mtlx"), TfToken()};
 }
 
 TfTokenVector const& HdLrtRenderDelegate::GetSupportedBprimTypes() const {
@@ -131,10 +138,16 @@ HdInstancer* HdLrtRenderDelegate::CreateInstancer(HdSceneDelegate* delegate, Sdf
 void HdLrtRenderDelegate::DestroyInstancer(HdInstancer* instancer) { delete instancer; }
 
 HdSprim* HdLrtRenderDelegate::CreateSprim(TfToken const& typeId, SdfPath const& id) {
+    if (typeId == HdPrimTypeTokens->material) {
+        return new HdLrtMaterial(id);
+    }
     return typeId == HdPrimTypeTokens->camera ? new HdCamera(id) : nullptr;
 }
 
 HdSprim* HdLrtRenderDelegate::CreateFallbackSprim(TfToken const& typeId) {
+    if (typeId == HdPrimTypeTokens->material) {
+        return new HdLrtMaterial(SdfPath::EmptyPath());
+    }
     return typeId == HdPrimTypeTokens->camera ? new HdCamera(SdfPath::EmptyPath()) : nullptr;
 }
 

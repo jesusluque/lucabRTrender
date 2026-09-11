@@ -36,6 +36,8 @@ struct MeshInstance {
     std::array<float, 3>                 displayColor{0.18F, 0.18F, 0.18F};
     float                                displayOpacity = 1.0F;
     bool                                 doubleSided = true;
+    uint32_t                             material = 0;     ///< its row in the frame's material records; 0 none
+    std::vector<uint32_t>                subsetMaterials;  ///< per GeomSubset of the mesh: its row (0: the instance's)
 };
 
 /// Many instances of one mesh whose transforms are already on the device
@@ -49,6 +51,8 @@ struct InstanceSet {
     std::array<float, 3>                 displayColor{0.18F, 0.18F, 0.18F};
     float                                displayOpacity = 1.0F;
     bool                                 doubleSided = true;
+    uint32_t                             material = 0;
+    std::vector<uint32_t>                subsetMaterials;
 };
 
 /// Consecutive instances of one mesh: one draw.
@@ -94,6 +98,10 @@ public:
     [[nodiscard]] const gpu::Buffer& indices() const noexcept { return indices_; }
     [[nodiscard]] const gpu::Buffer& triangleCorners() const noexcept { return triangleCorners_; }
     [[nodiscard]] const gpu::Buffer& triangleFaces() const noexcept { return triangleFaces_; }
+    /// Per triangle: 0, or k + 1 for its mesh's k-th GeomSubset.
+    [[nodiscard]] const gpu::Buffer& triangleSubsets() const noexcept { return triangleSubsets_; }
+    /// Per mesh (from MeshRecord.subsetBase), per subset: its material row, 0 for the instance's.
+    [[nodiscard]] const gpu::Buffer& subsetRows() const noexcept { return subsetRows_; }
     [[nodiscard]] const gpu::Buffer& meshRecords() const noexcept { return meshRecords_; }
     [[nodiscard]] const gpu::Buffer& instanceRecords() const noexcept { return instanceRecords_; }
 
@@ -107,6 +115,7 @@ private:
     gpu::Device*                                       device_ = nullptr;
     gpu::ComputeKernel                                 records_;
     gpu::ComputeKernel                                 worldBoxes_, boundsChunks_, boundsReduce_;
+    gpu::ComputeKernel                                 subsetClear_;
     std::vector<std::shared_ptr<const geom::GpuMesh>>  meshes_;
     std::vector<Range>                                 ranges_;
     std::vector<DrawRange>                             draws_;
@@ -120,6 +129,9 @@ private:
     gpu::Buffer positions_, indices_, triangleCorners_, triangleFaces_, meshRecords_, instanceRecords_;
     gpu::Buffer primvarValues_, primvarRecords_, primvarSlots_;
     gpu::Buffer setRows_, setRecords_;
+    gpu::Buffer triangleSubsets_, subsetRows_;
+    std::vector<uint32_t> subsetBases_;   ///< per mesh: its first entry in subsetRows_
+    std::vector<uint32_t> subsetRowWords_;   ///< what subsetRows_ holds
     /// The chains pooled in setRows_, in order. Held, so that a chain made
     /// later cannot take a pooled one's address.
     std::vector<std::pair<gpu::Buffer, uint32_t>>      setLayout_;
