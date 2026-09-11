@@ -127,6 +127,13 @@ Result<GpuMesh> MeshBuilder::build(const MeshInput& in) {
     };
     if (mesh.faces > 0) {
         gpu::CommandBatch batch(device);
+        // Nothing writes a zero here: meshHoles marks hole faces with a 1 and
+        // leaves every other face alone, so without this the flags start as
+        // whatever the device last left in that memory. Metal handed back
+        // zeros and CUDA did not, and a stale word reads as "this face is a
+        // hole", which silently drops the face's triangles.
+        batch.encoder()->clearBuffer(holeFlags->rhi(), 0, uint64_t{mesh.faces} * 4);
+        batch.markDirty();
         if (holeCount > 0) {
             holes_.dispatch(batch, {holeCount, 1, 1}, [&](rhi::ShaderCursor cursor) {
                 cursor["holeIndices"].setBinding(holes->rhi());
