@@ -243,38 +243,46 @@ Result<size_t> Engine::commit() {
     return uploaded;
 }
 
+AovView Engine::aovView(const render::RenderTargets& targets, AovSource aov) const {
+    AovView view;
+    view.ids = aov.kind == AovKind::PrimId || aov.kind == AovKind::InstanceId || aov.kind == AovKind::ElementId;
+    switch (aov.kind) {
+    case AovKind::Colour: view.buffer = &targets.colour; return view;
+    case AovKind::Depth: view.buffer = &targets.depth; view.source = 1; return view;
+    default: break;
+    }
+    if (!aovsValid_ || aovs_.width != targets.width || aovs_.height != targets.height ||
+        (aov.kind == AovKind::Primvar && aov.primvar >= aovs_.primvarSlots)) {
+        return view;   // nothing a mesh drew
+    }
+    switch (aov.kind) {
+    case AovKind::PrimId: view.buffer = &aovs_.ids; view.source = 2; view.stride = 3; view.offset = 0; break;
+    case AovKind::InstanceId: view.buffer = &aovs_.ids; view.source = 2; view.stride = 3; view.offset = 1; break;
+    case AovKind::ElementId: view.buffer = &aovs_.ids; view.source = 2; view.stride = 3; view.offset = 2; break;
+    case AovKind::EyeNormal: view.buffer = &aovs_.eyeNormals; break;
+    case AovKind::WorldNormal: view.buffer = &aovs_.worldNormals; break;
+    default: view.buffer = &aovs_.primvars; view.stride = aovs_.primvarSlots; view.offset = aov.primvar; break;
+    }
+    return view;
+}
+
 Result<void> Engine::writeAov(const render::RenderTargets& targets, AovSource aov, const AovLayout& layout,
                               const double* projection, std::span<uint8_t> into) {
-    const bool depth = aov.kind == AovKind::Depth;
     const uint64_t bytes = uint64_t{targets.width} * targets.height * layout.channels * layout.componentBytes;
     if (into.size() < bytes || layout.channels == 0 || layout.channels > 4 ||
         (layout.componentBytes != 1 && layout.componentBytes != 2 && layout.componentBytes != 4)) {
         return Error(ErrorCode::InvalidArgument, "a render buffer the engine cannot fill");
     }
-    // What the AOV reads, and where in each pixel.
-    const gpu::Buffer* source = depth ? &targets.depth : &targets.colour;
-    uint32_t kind = depth ? 1u : 0u;
-    uint32_t stride = 1;
-    uint32_t offset = 0;
-    const bool fromAovs = aov.kind != AovKind::Colour && aov.kind != AovKind::Depth;
-    if (fromAovs) {
-        if (!aovsValid_ || aovs_.width != targets.width || aovs_.height != targets.height ||
-            (aov.kind == AovKind::Primvar && aov.primvar >= aovs_.primvarSlots)) {
-            // Nothing a mesh drew: the clear value, -1 for ids and 0 otherwise.
-            const bool ids = aov.kind == AovKind::PrimId || aov.kind == AovKind::InstanceId ||
-                             aov.kind == AovKind::ElementId;
-            std::fill(into.begin(), into.begin() + static_cast<std::ptrdiff_t>(bytes), static_cast<uint8_t>(ids ? 0xFF : 0));
-            return ok();
-        }
-        switch (aov.kind) {
-        case AovKind::PrimId: source = &aovs_.ids; kind = 2; stride = 3; offset = 0; break;
-        case AovKind::InstanceId: source = &aovs_.ids; kind = 2; stride = 3; offset = 1; break;
-        case AovKind::ElementId: source = &aovs_.ids; kind = 2; stride = 3; offset = 2; break;
-        case AovKind::EyeNormal: source = &aovs_.eyeNormals; break;
-        case AovKind::WorldNormal: source = &aovs_.worldNormals; break;
-        default: source = &aovs_.primvars; stride = aovs_.primvarSlots; offset = aov.primvar; break;
-        }
+    const AovView view = aovView(targets, aov);
+    if (view.buffer == nullptr) {
+        // Nothing a mesh drew: the clear value, -1 for ids and 0 otherwise.
+        std::fill(into.begin(), into.begin() + static_cast<std::ptrdiff_t>(bytes), static_cast<uint8_t>(view.ids ? 0xFF : 0));
+        return ok();
     }
+    const gpu::Buffer* source = view.buffer;
+    const uint32_t kind = view.source;
+    const uint32_t stride = view.stride;
+    const uint32_t offset = view.offset;
     if (!source->valid()) {
         return Error(ErrorCode::InvalidArgument, "nothing rendered to convert");
     }

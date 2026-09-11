@@ -1,6 +1,9 @@
 // Copyright (c) 2026 lucabRTrender contributors.
 #include "RenderPass.h"
 
+#include <algorithm>
+#include <array>
+
 #include <pxr/imaging/hd/aov.h>
 #include <pxr/imaging/hd/renderPassState.h>
 
@@ -89,7 +92,7 @@ void HdLrtRenderPass::_Execute(HdRenderPassStateSharedPtr const& state, TfTokenV
     const auto visibility =
         _delegate != nullptr ? _delegate->GetMeshVisibility() : lrt::usd::MeshVisibility::Automatic;
     if (auto drawn =
-            _engine->render(projection, settings, _targets, technique, settle, &renderTags, request, visibility);
+            _engine->render(projection, settings, *_targets, technique, settle, &renderTags, request, visibility);
         !drawn) {
         lrt::log::error("hdLrt: {}", drawn.error().toString());
         return;
@@ -112,10 +115,14 @@ void HdLrtRenderPass::_Execute(HdRenderPassStateSharedPtr const& state, TfTokenV
             lrt::log::warn("hdLrt: render buffer format {} is not filled", static_cast<int>(buffer->GetFormat()));
             continue;
         }
-        if (auto written = _engine->writeAov(_targets, output.source, layout, proj.data(), buffer->Bytes());
-            !written) {
-            lrt::log::error("hdLrt: {}", written.error().toString());
-        }
+        std::array<double, 16> hostProjection{};
+        std::copy(proj.data(), proj.data() + 16, hostProjection.begin());
+        buffer->SetPendingFill([engine = _engine, targets = _targets, source = output.source, layout,
+                                hostProjection](std::span<uint8_t> into) {
+            if (auto written = engine->writeAov(*targets, source, layout, hostProjection.data(), into); !written) {
+                lrt::log::error("hdLrt: {}", written.error().toString());
+            }
+        });
     }
 }
 

@@ -1,6 +1,8 @@
 // Copyright (c) 2026 lucabRTrender contributors.
 #pragma once
 
+#include <memory>
+
 #include <pxr/imaging/hd/renderPass.h>
 
 #include "Engine.h"
@@ -24,7 +26,8 @@ protected:
 private:
     lrt::usd::Engine*             _engine = nullptr;
     const HdLrtRenderDelegate*    _delegate = nullptr;
-    lrt::render::RenderTargets    _targets;
+    /// Shared with the fills the render buffers hold until they are mapped.
+    std::shared_ptr<lrt::render::RenderTargets> _targets = std::make_shared<lrt::render::RenderTargets>();
 };
 
 PXR_NAMESPACE_CLOSE_SCOPE

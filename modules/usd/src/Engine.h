@@ -107,6 +107,16 @@ struct AovSource {
     uint32_t primvar = 0;   ///< AovKind::Primvar: its index in AovRequest::primvars
 };
 
+/// Where an AOV lives on the device, as shaders/lrt/usd/aov_convert.slang
+/// reads it.
+struct AovView {
+    const gpu::Buffer* buffer = nullptr;   ///< null: nothing drew it, so its clear value
+    uint32_t           source = 0;         ///< 0 float4 (colour, normals, primvars), 1 view z, 2 uint ids
+    uint32_t           stride = 1;         ///< entries per pixel
+    uint32_t           offset = 0;         ///< the AOV's entry within them
+    bool               ids = false;        ///< cleared to -1, not 0
+};
+
 /// What a frame should compute beyond colour and depth.
 struct AovRequest {
     bool                     ids = false;       ///< primId, instanceId, elementId
@@ -166,6 +176,10 @@ public:
 
     /// The targets the last render drew into (owned by the render pass).
     [[nodiscard]] const render::RenderTargets* lastTargets() const noexcept { return lastTargets_; }
+
+    /// The last frame's `aov` on the device, for a caller that shows it
+    /// there (lrt view) rather than reading it back.
+    [[nodiscard]] AovView aovView(const render::RenderTargets& targets, AovSource aov) const;
 
     /// A render target as a Hydra render buffer's bytes, converted on the
     /// device -- format, row order, and for depth the host projection's [0, 1]
