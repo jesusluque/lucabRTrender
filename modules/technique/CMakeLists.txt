@@ -3,9 +3,12 @@
 lrt_add_module(technique
     SOURCES
         src/Denoiser.cpp
+        src/Visibility.cpp
     PUBLIC_LIBS
         lrt::core
-        lrt::gpu)
+        lrt::gpu
+        lrt::world
+        lrt::render)
 
 # OIDN, GPU devices only (scripts/build-oidn.sh). Without it the engine has no
 # denoiser, and says so.

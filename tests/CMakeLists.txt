@@ -44,6 +44,10 @@ lrt_test(lrt_geom_tests
     SOURCES geom/test_mesh.cpp
     LIBS lrt::geom)
 
+lrt_test(lrt_technique_tests
+    SOURCES technique/test_visibility.cpp
+    LIBS lrt::technique)
+
 lrt_test(lrt_lod_tests
     SOURCES lod/test_lod.cpp
     LIBS lrt::lod)
