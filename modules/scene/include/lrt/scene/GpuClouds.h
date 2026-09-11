@@ -13,6 +13,7 @@
 #pragma once
 
 #include <array>
+#include <filesystem>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -22,6 +23,7 @@
 #include "lrt/gpu/ComputeKernel.h"
 #include "lrt/gpu/algo/PrefixSum.h"
 #include "lrt/io/RawSplats.h"
+#include "lrt/io/Sog.h"
 
 namespace lrt::gpu {
 class ShaderLibrary;
@@ -67,6 +69,12 @@ public:
 
     /// `maxDegree` caps the harmonics kept (0..3).
     [[nodiscard]] Result<GpuSplats> upload(const io::RawSplats& raw, uint32_t maxDegree = 3);
+    /// A SOG's images, decoded on the device into records that then take the
+    /// same validate and decode as any other format -- nothing crosses back.
+    [[nodiscard]] Result<GpuSplats> upload(const io::RawSog& sog, uint32_t maxDegree = 3);
+    /// The same decode, read back as float records, for what consumes records
+    /// on the host side (the USD export).
+    [[nodiscard]] Result<io::RawSplats> records(const io::RawSog& sog, uint32_t maxDegree = 3);
     /// `detail` keeps that fraction of the points, the same ones every time.
     [[nodiscard]] Result<GpuPoints> upload(const io::RawPoints& raw, float detail = 1.0F);
 
@@ -74,7 +82,17 @@ public:
     [[nodiscard]] Result<Bounds> boundsOf(const gpu::Buffer& positions, uint32_t count);
 
 private:
+    struct SogOnDevice;
+    [[nodiscard]] Result<SogOnDevice> sogOnDevice(const io::RawSog& sog, uint32_t maxDegree);
+    [[nodiscard]] Result<void> sogSlice(const SogOnDevice& on, uint32_t first, uint32_t n, const gpu::Buffer& into);
+    [[nodiscard]] Result<GpuSplats> startSplats(const std::string& source, uint32_t declared, uint32_t keep);
+    /// Validates and decodes `n` records in `raw` into `splats` after `written`.
+    [[nodiscard]] Result<uint32_t> decodeSlice(const gpu::Buffer& raw, const io::SplatEncoding& e, uint32_t n,
+                                               uint32_t written, uint32_t keep, GpuSplats& splats);
+    [[nodiscard]] Result<void> finishSplats(GpuSplats& splats, uint32_t written);
+
     gpu::Device*       device_ = nullptr;
+    gpu::ComputeKernel sogDecode_;
     gpu::PrefixSum     prefix_;
     gpu::ComputeKernel splatValidate_;
     gpu::ComputeKernel splatDecode_;
@@ -83,5 +101,18 @@ private:
     gpu::ComputeKernel boundsChunks_;
     gpu::ComputeKernel boundsReduce_;
 };
+
+/// Whether `path` names a SOG: a .sog bundle or an unbundled meta.json.
+[[nodiscard]] bool isSog(const std::filesystem::path& path);
+
+/// Any splat file onto the device: .ply, .splat, .spz through io::readSplats,
+/// SOG through io::readSog and the device decode.
+[[nodiscard]] Result<GpuSplats> loadSplatFile(CloudLoader& loader, const std::filesystem::path& path,
+                                              uint32_t maxDegree = 3);
+
+/// Any splat file as host records in the engine's float encoding, for what
+/// consumes records (the USD export). SOG is decoded on the device and read back.
+[[nodiscard]] Result<io::RawSplats> readSplatRecords(CloudLoader& loader, const std::filesystem::path& path,
+                                                     uint32_t maxDegree = 3);
 
 }   // namespace lrt::scene

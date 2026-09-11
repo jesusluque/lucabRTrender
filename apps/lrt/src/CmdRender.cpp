@@ -80,12 +80,7 @@ int run(const RenderOptions& options, bool bench) {
     scene::Bounds all;
     bool first = true;
     for (const std::string& path : options.splats) {
-        auto raw = io::readSplats(path);
-        if (!raw) {
-            std::fprintf(stderr, "%s\n", raw.error().toString().c_str());
-            return 1;
-        }
-        auto splats = loader->upload(*raw, options.degree);
+        auto splats = scene::loadSplatFile(*loader, path, options.degree);
         if (!splats) {
             std::fprintf(stderr, "%s\n", splats.error().toString().c_str());
             return 1;
@@ -298,7 +293,7 @@ int run(const RenderOptions& options, bool bench) {
 }
 
 void addOptions(CLI::App* cmd, RenderOptions& o) {
-    cmd->add_option("--splats", o.splats, ".ply / .splat files");
+    cmd->add_option("--splats", o.splats, ".ply / .splat / .spz / .sog files");
     cmd->add_option("--technique", o.technique,
                     "raster | rt (ray traced, the device's faster route) | rt-hw (hardware "
                     "BVH) | rt-bvh (compute BVH) | reference (raster's GPU ground truth) | "

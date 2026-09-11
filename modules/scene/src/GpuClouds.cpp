@@ -1,6 +1,9 @@
 // Copyright (c) 2026 lucabRTrender contributors.
 #include "lrt/scene/GpuClouds.h"
+
+#include <array>
 #include "lrt/scene/DecodeParams.h"
+#include "lrt/io/Readers.h"
 
 #include <algorithm>
 
@@ -73,6 +76,7 @@ Result<CloudLoader> CloudLoader::create(gpu::ShaderLibrary& library) {
         return ok();
     };
     LRT_TRY(make(loader.splatValidate_, "lrt/scene/splat_validate", "splatValidate"));
+    LRT_TRY(make(loader.sogDecode_, "lrt/scene/sog_decode", "sogDecode"));
     LRT_TRY(make(loader.splatDecode_, "lrt/scene/splat_decode", "splatDecode"));
     LRT_TRY(make(loader.pointsValidate_, "lrt/scene/points_validate", "pointsValidate"));
     LRT_TRY(make(loader.pointsDecode_, "lrt/scene/points_decode", "pointsDecode"));
@@ -115,6 +119,69 @@ Result<Bounds> CloudLoader::boundsOf(const gpu::Buffer& positions, uint32_t coun
     return bounds;
 }
 
+Result<GpuSplats> CloudLoader::startSplats(const std::string& source, uint32_t declared, uint32_t keep) {
+    GpuSplats splats;
+    splats.source = source;
+    splats.declared = declared;
+    splats.restPerColour = keep;
+    splats.shWords = keep == 0 ? 1 : (keep * 3 + 1) / 2;
+    auto positions = deviceBuffer(*device_, declared, 16, "splats.positions");
+    if (!positions) return std::move(positions).error();
+    auto shape = deviceBuffer(*device_, uint64_t{declared} * 4, 4, "splats.shape");
+    if (!shape) return std::move(shape).error();
+    auto sh = deviceBuffer(*device_, keep == 0 ? 1 : uint64_t{declared} * splats.shWords, 4, "splats.sh");
+    if (!sh) return std::move(sh).error();
+    splats.positions = *positions;
+    splats.shape = *shape;
+    splats.sh = *sh;
+    return splats;
+}
+
+Result<uint32_t> CloudLoader::decodeSlice(const gpu::Buffer& raw, const io::SplatEncoding& e, uint32_t n,
+                                          uint32_t written, uint32_t keep, GpuSplats& splats) {
+    auto valid = deviceBuffer(*device_, n, 4, "splats.valid");
+    if (!valid) return std::move(valid).error();
+    auto dest = deviceBuffer(*device_, n, 4, "splats.dest");
+    if (!dest) return std::move(dest).error();
+    auto total = deviceBuffer(*device_, 1, 4, "splats.total");
+    if (!total) return std::move(total).error();
+
+    gpu::CommandBatch batch(*device_);
+    splatValidate_.dispatch(batch, {n, 1, 1}, [&](rhi::ShaderCursor cursor) {
+        cursor["raw"].setBinding(raw.rhi());
+        cursor["valid"].setBinding(valid->rhi());
+        setDecodeParams(cursor, e, n, written, keep, splats.shWords);
+    });
+    LRT_TRY(prefix_.apply(batch, *valid, *dest, *total, n));
+    // The decode does not need the total, so it is queued now: `base` is
+    // this slice's start, known from the slices before it.
+    splatDecode_.dispatch(batch, {n, 1, 1}, [&](rhi::ShaderCursor cursor) {
+        cursor["raw"].setBinding(raw.rhi());
+        cursor["valid"].setBinding(valid->rhi());
+        cursor["dest"].setBinding(dest->rhi());
+        cursor["positions"].setBinding(splats.positions.rhi());
+        cursor["shape"].setBinding(splats.shape.rhi());
+        cursor["sh"].setBinding(splats.sh.rhi());
+        setDecodeParams(cursor, e, n, written, keep, splats.shWords);
+    });
+    LRT_TRY(batch.submit(true));
+    uint32_t kept = 0;
+    LRT_TRY(total->read(*device_, 0, sizeof(kept), &kept));
+    return kept;
+}
+
+Result<void> CloudLoader::finishSplats(GpuSplats& splats, uint32_t written) {
+    splats.count = written;
+    if (splats.count == 0) {
+        return Error::make(ErrorCode::InvalidArgument, "'{}': no splat survived validation", splats.source);
+    }
+    auto bounds = boundsOf(splats.positions, splats.count);
+    if (!bounds) return std::move(bounds).error();
+    splats.bounds = *bounds;
+    log::info("{}: {} splats of {} (degree {})", splats.source, splats.count, splats.declared, splats.degree());
+    return ok();
+}
+
 Result<GpuSplats> CloudLoader::upload(const io::RawSplats& raw, uint32_t maxDegree) {
     const io::SplatEncoding& e = raw.encoding;
     if (raw.count == 0 || e.floatsPerRecord == 0 ||
@@ -123,74 +190,162 @@ Result<GpuSplats> CloudLoader::upload(const io::RawSplats& raw, uint32_t maxDegr
     }
     static constexpr uint32_t kPerDegree[] = {0, 3, 8, 15};
     const uint32_t keep = std::min(e.restPerColour, kPerDegree[std::min(maxDegree, 3u)]);
-
-    GpuSplats splats;
-    splats.source = raw.source;
-    splats.declared = raw.count;
-    splats.restPerColour = keep;
-    splats.shWords = keep == 0 ? 1 : (keep * 3 + 1) / 2;
-
-    auto positions = deviceBuffer(*device_, raw.count, 16, "splats.positions");
-    if (!positions) return std::move(positions).error();
-    auto shape = deviceBuffer(*device_, uint64_t{raw.count} * 4, 4, "splats.shape");
-    if (!shape) return std::move(shape).error();
-    auto sh = deviceBuffer(*device_, keep == 0 ? 1 : uint64_t{raw.count} * splats.shWords, 4,
-                           "splats.sh");
-    if (!sh) return std::move(sh).error();
-    splats.positions = *positions;
-    splats.shape = *shape;
-    splats.sh = *sh;
+    auto splats = startSplats(raw.source, raw.count, keep);
+    if (!splats) return std::move(splats).error();
 
     const uint64_t recordBytes = uint64_t{e.floatsPerRecord} * 4;
-    const uint32_t perSlice =
-        static_cast<uint32_t>(std::max<uint64_t>(1, kSliceBytes / recordBytes));
+    const uint32_t perSlice = static_cast<uint32_t>(std::max<uint64_t>(1, kSliceBytes / recordBytes));
     uint32_t written = 0;
     for (uint32_t first = 0; first < raw.count; first += perSlice) {
         const uint32_t n = std::min(perSlice, raw.count - first);
         auto rawBuffer = deviceBuffer(*device_, uint64_t{n} * e.floatsPerRecord, 4, "splats.raw",
                                       raw.records.data() + size_t{first} * e.floatsPerRecord);
         if (!rawBuffer) return std::move(rawBuffer).error();
-        auto valid = deviceBuffer(*device_, n, 4, "splats.valid");
-        if (!valid) return std::move(valid).error();
-        auto dest = deviceBuffer(*device_, n, 4, "splats.dest");
-        if (!dest) return std::move(dest).error();
-        auto total = deviceBuffer(*device_, 1, 4, "splats.total");
-        if (!total) return std::move(total).error();
-
-        gpu::CommandBatch batch(*device_);
-        splatValidate_.dispatch(batch, {n, 1, 1}, [&](rhi::ShaderCursor cursor) {
-            cursor["raw"].setBinding(rawBuffer->rhi());
-            cursor["valid"].setBinding(valid->rhi());
-            setDecodeParams(cursor, e, n, written, keep, splats.shWords);
-        });
-        LRT_TRY(prefix_.apply(batch, *valid, *dest, *total, n));
-        // The decode does not need the total, so it is queued now: `base` is
-        // this slice's start, known from the slices before it.
-        splatDecode_.dispatch(batch, {n, 1, 1}, [&](rhi::ShaderCursor cursor) {
-            cursor["raw"].setBinding(rawBuffer->rhi());
-            cursor["valid"].setBinding(valid->rhi());
-            cursor["dest"].setBinding(dest->rhi());
-            cursor["positions"].setBinding(splats.positions.rhi());
-            cursor["shape"].setBinding(splats.shape.rhi());
-            cursor["sh"].setBinding(splats.sh.rhi());
-            setDecodeParams(cursor, e, n, written, keep, splats.shWords);
-        });
-        LRT_TRY(batch.submit(true));
-        uint32_t kept = 0;
-        LRT_TRY(total->read(*device_, 0, sizeof(kept), &kept));
-        written += kept;
+        auto kept = decodeSlice(*rawBuffer, e, n, written, keep, *splats);
+        if (!kept) return std::move(kept).error();
+        written += *kept;
     }
-    splats.count = written;
-    if (splats.count == 0) {
-        return Error::make(ErrorCode::InvalidArgument, "'{}': no splat survived validation",
-                           raw.source);
-    }
-    auto bounds = boundsOf(splats.positions, splats.count);
-    if (!bounds) return std::move(bounds).error();
-    splats.bounds = *bounds;
-    log::info("{}: {} splats of {} (degree {})", raw.source, splats.count, splats.declared,
-              splats.degree());
+    LRT_TRY(finishSplats(*splats, written));
     return splats;
+}
+
+struct CloudLoader::SogOnDevice {
+    const io::RawSog*  sog = nullptr;
+    uint32_t           keep = 0;
+    io::SplatEncoding  encoding;
+    gpu::Buffer        meansL, meansU, quats, scales, sh0, labels, centroids, codebooks;
+};
+
+Result<CloudLoader::SogOnDevice> CloudLoader::sogOnDevice(const io::RawSog& sog, uint32_t maxDegree) {
+    SogOnDevice on;
+    on.sog = &sog;
+    on.keep = std::min(sog.shCoefficients, std::array<uint32_t, 4>{0, 3, 8, 15}[std::min(maxDegree, 3u)]);
+    io::SplatEncoding& e = on.encoding;
+    e.floatsPerRecord = 14 + on.keep * 3;
+    e.x = 0; e.y = 1; e.z = 2; e.opacity = 3;
+    e.scale0 = 4; e.scale1 = 5; e.scale2 = 6;
+    e.rotW = 7; e.rotX = 8; e.rotY = 9; e.rotZ = 10;
+    e.dc0 = 11; e.dc1 = 12; e.dc2 = 13;
+    e.restBase = 14;
+    e.restPerColour = on.keep;
+    e.restColourOuter = 0;
+    e.opacity_ = io::SplatEncoding::Opacity::Linear;
+    e.scale_ = io::SplatEncoding::Scale::Log;
+    e.colour = io::SplatEncoding::Colour::ShDc;
+    e.rotation = io::SplatEncoding::Rotation::Float;
+
+    const auto image = [&](const io::SogImage& from, const char* label, gpu::Buffer& into) -> Result<void> {
+        static const uint32_t kPlaceholder = 0;
+        const bool none = from.empty();
+        auto made = deviceBuffer(*device_, none ? 1 : from.texels.size(), 4, label,
+                                 none ? &kPlaceholder : from.texels.data());
+        if (!made) return std::move(made).error();
+        into = std::move(*made);
+        return ok();
+    };
+    LRT_TRY(image(sog.meansL, "sog.meansL", on.meansL));
+    LRT_TRY(image(sog.meansU, "sog.meansU", on.meansU));
+    LRT_TRY(image(sog.quats, "sog.quats", on.quats));
+    LRT_TRY(image(sog.scales, "sog.scales", on.scales));
+    LRT_TRY(image(sog.sh0, "sog.sh0", on.sh0));
+    LRT_TRY(image(on.keep > 0 ? sog.shLabels : io::SogImage{}, "sog.shLabels", on.labels));
+    LRT_TRY(image(on.keep > 0 ? sog.shCentroids : io::SogImage{}, "sog.shCentroids", on.centroids));
+    std::vector<float> books(768, 0.0F);
+    const auto place = [&](const std::vector<float>& book, size_t at) {
+        std::copy_n(book.begin(), std::min<size_t>(book.size(), 256), books.begin() + static_cast<long>(at));
+    };
+    place(sog.scalesBook, 0);
+    place(sog.sh0Book, 256);
+    place(sog.shNBook, 512);
+    auto codebooks = deviceBuffer(*device_, books.size(), 4, "sog.codebooks", books.data());
+    if (!codebooks) return std::move(codebooks).error();
+    on.codebooks = std::move(*codebooks);
+    return on;
+}
+
+Result<void> CloudLoader::sogSlice(const SogOnDevice& on, uint32_t first, uint32_t n, const gpu::Buffer& into) {
+    const io::RawSog& sog = *on.sog;
+    gpu::CommandBatch batch(*device_);
+    sogDecode_.dispatch(batch, {n, 1, 1}, [&](rhi::ShaderCursor cursor) {
+        cursor["meansL"].setBinding(on.meansL.rhi());
+        cursor["meansU"].setBinding(on.meansU.rhi());
+        cursor["quats"].setBinding(on.quats.rhi());
+        cursor["scales"].setBinding(on.scales.rhi());
+        cursor["sh0"].setBinding(on.sh0.rhi());
+        cursor["shLabels"].setBinding(on.labels.rhi());
+        cursor["shCentroids"].setBinding(on.centroids.rhi());
+        cursor["codebooks"].setBinding(on.codebooks.rhi());
+        cursor["records"].setBinding(into.rhi());
+        rhi::ShaderCursor p = cursor["params"];
+        p["count"].setData(n);
+        p["first"].setData(first);
+        p["stride"].setData(on.encoding.floatsPerRecord);
+        p["keep"].setData(on.keep);
+        p["version"].setData(sog.version);
+        p["coefficients"].setData(sog.shCoefficients);
+        p["centroidsWidth"].setData(sog.shCentroids.width);
+        static constexpr const char* kMeans[6] = {"meansMinX", "meansMinY", "meansMinZ",
+                                                  "meansMaxX", "meansMaxY", "meansMaxZ"};
+        static constexpr const char* kScales[6] = {"scalesMinX", "scalesMinY", "scalesMinZ",
+                                                   "scalesMaxX", "scalesMaxY", "scalesMaxZ"};
+        static constexpr const char* kSh0[8] = {"sh0MinR", "sh0MinG", "sh0MinB", "sh0MinA",
+                                                "sh0MaxR", "sh0MaxG", "sh0MaxB", "sh0MaxA"};
+        for (size_t k = 0; k < 3; ++k) {
+            p[kMeans[k]].setData(sog.meansMin[k]);
+            p[kMeans[k + 3]].setData(sog.meansMax[k]);
+            p[kScales[k]].setData(sog.scalesMin[k]);
+            p[kScales[k + 3]].setData(sog.scalesMax[k]);
+        }
+        for (size_t k = 0; k < 4; ++k) {
+            p[kSh0[k]].setData(sog.sh0Min[k]);
+            p[kSh0[k + 4]].setData(sog.sh0Max[k]);
+        }
+        p["shNMin"].setData(sog.shNMin);
+        p["shNMax"].setData(sog.shNMax);
+    });
+    return batch.submit(true);
+}
+
+Result<GpuSplats> CloudLoader::upload(const io::RawSog& sog, uint32_t maxDegree) {
+    auto on = sogOnDevice(sog, maxDegree);
+    if (!on) return std::move(on).error();
+    auto splats = startSplats(sog.source, sog.count, on->keep);
+    if (!splats) return std::move(splats).error();
+    const uint64_t recordBytes = uint64_t{on->encoding.floatsPerRecord} * 4;
+    const uint32_t perSlice = static_cast<uint32_t>(std::max<uint64_t>(1, kSliceBytes / recordBytes));
+    uint32_t written = 0;
+    for (uint32_t first = 0; first < sog.count; first += perSlice) {
+        const uint32_t n = std::min(perSlice, sog.count - first);
+        auto records = deviceBuffer(*device_, uint64_t{n} * on->encoding.floatsPerRecord, 4, "sog.records");
+        if (!records) return std::move(records).error();
+        LRT_TRY(sogSlice(*on, first, n, *records));
+        auto kept = decodeSlice(*records, on->encoding, n, written, on->keep, *splats);
+        if (!kept) return std::move(kept).error();
+        written += *kept;
+    }
+    LRT_TRY(finishSplats(*splats, written));
+    return splats;
+}
+
+Result<io::RawSplats> CloudLoader::records(const io::RawSog& sog, uint32_t maxDegree) {
+    auto on = sogOnDevice(sog, maxDegree);
+    if (!on) return std::move(on).error();
+    io::RawSplats raw;
+    raw.source = sog.source;
+    raw.count = sog.count;
+    raw.encoding = on->encoding;
+    raw.records.resize(size_t{sog.count} * on->encoding.floatsPerRecord);
+    const uint64_t recordBytes = uint64_t{on->encoding.floatsPerRecord} * 4;
+    const uint32_t perSlice = static_cast<uint32_t>(std::max<uint64_t>(1, kSliceBytes / recordBytes));
+    for (uint32_t first = 0; first < sog.count; first += perSlice) {
+        const uint32_t n = std::min(perSlice, sog.count - first);
+        auto buffer = deviceBuffer(*device_, uint64_t{n} * on->encoding.floatsPerRecord, 4, "sog.records");
+        if (!buffer) return std::move(buffer).error();
+        LRT_TRY(sogSlice(*on, first, n, *buffer));
+        LRT_TRY(buffer->read(*device_, 0, uint64_t{n} * recordBytes,
+                             raw.records.data() + size_t{first} * on->encoding.floatsPerRecord));
+    }
+    return raw;
 }
 
 Result<GpuPoints> CloudLoader::upload(const io::RawPoints& raw, float detail) {
@@ -260,6 +415,30 @@ Result<GpuPoints> CloudLoader::upload(const io::RawPoints& raw, float detail) {
     points.bounds = *bounds;
     log::info("{}: {} points of {}", raw.source, points.count, points.declared);
     return points;
+}
+
+bool isSog(const std::filesystem::path& path) {
+    return path.extension() == ".sog" || path.filename() == "meta.json";
+}
+
+Result<GpuSplats> loadSplatFile(CloudLoader& loader, const std::filesystem::path& path, uint32_t maxDegree) {
+    if (isSog(path)) {
+        auto sog = io::readSog(path);
+        if (!sog) return std::move(sog).error();
+        return loader.upload(*sog, maxDegree);
+    }
+    auto raw = io::readSplats(path);
+    if (!raw) return std::move(raw).error();
+    return loader.upload(*raw, maxDegree);
+}
+
+Result<io::RawSplats> readSplatRecords(CloudLoader& loader, const std::filesystem::path& path, uint32_t maxDegree) {
+    if (isSog(path)) {
+        auto sog = io::readSog(path);
+        if (!sog) return std::move(sog).error();
+        return loader.records(*sog, maxDegree);
+    }
+    return io::readSplats(path);
 }
 
 }   // namespace lrt::scene

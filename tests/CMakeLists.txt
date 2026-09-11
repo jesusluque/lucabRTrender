@@ -32,7 +32,9 @@ endif()
 lrt_test(lrt_render_tests
     SOURCES render/test_splat_render.cpp render/test_points.cpp render/test_ray_tracing.cpp
             $<$<BOOL:${LRT_HAVE_SPZ}>:render/test_spz.cpp>
+            $<$<BOOL:${LRT_HAVE_WEBP}>:render/test_sog.cpp>
     LIBS lrt::render lrt::io)
+target_compile_definitions(lrt_render_tests PRIVATE LRT_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data")
 if(LRT_HAVE_SPZ)
     # Niantic's packer writes the fixture the SPZ reader is checked against.
     target_link_libraries(lrt_render_tests PRIVATE lrt_spz)

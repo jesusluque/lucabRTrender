@@ -40,6 +40,10 @@ Result<RawSplats> readSplats(const std::filesystem::path& path) {
     if (ext == ".spz") {
         return readSpz(path);
     }
+    if (ext == ".sog" || path.filename() == "meta.json") {
+        return Error::make(ErrorCode::Unsupported,
+                           "'{}': SOG is decoded on the device -- scene::loadSplatFile reads it", path.string());
+    }
     return Error::make(ErrorCode::Unsupported, "'{}': no splat reader for '{}'", path.string(), ext);
 }
 

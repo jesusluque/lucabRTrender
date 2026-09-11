@@ -10,6 +10,7 @@
 #include "lrt/gpu/ShaderLibrary.h"
 #include "lrt/io/Exr.h"
 #include "lrt/io/Readers.h"
+#include "lrt/scene/GpuClouds.h"
 #include "lrt/usd/Export.h"
 #include "lrt/usd/StageRenderer.h"
 
@@ -24,7 +25,7 @@ void addConvert(CLI::App& app) {
     };
     auto o = std::make_shared<Options>();
     auto* cmd = app.add_subcommand("convert", "a splat file into a USD ParticleField stage");
-    cmd->add_option("input", o->input, ".ply / .splat")->required();
+    cmd->add_option("input", o->input, ".ply / .splat / .spz / .sog / meta.json")->required();
     cmd->add_option("output", o->output, ".usda / .usdc / .usd")->required();
     cmd->add_option("--degree", o->degree, "harmonic degree cap 0..3");
     cmd->add_option("--rotate-x", o->rotateX, "turn the cloud about x (COLMAP clouds: 180)");
@@ -36,7 +37,12 @@ void addConvert(CLI::App& app) {
             throw CLI::RuntimeError(1);
         }
         gpu::ShaderLibrary library(*device);
-        auto raw = io::readSplats(o->input);
+        auto loader = scene::CloudLoader::create(library);
+        if (!loader) {
+            std::fprintf(stderr, "%s\n", loader.error().toString().c_str());
+            throw CLI::RuntimeError(1);
+        }
+        auto raw = scene::readSplatRecords(*loader, o->input, o->degree);
         if (!raw) {
             std::fprintf(stderr, "%s\n", raw.error().toString().c_str());
             throw CLI::RuntimeError(1);

@@ -201,3 +201,45 @@ deliberate control is an order of magnitude worse.
 
 Degree-4 files load with the fourth band dropped, because the engine
 evaluates up to degree 3.
+
+## SOG
+
+`io::readSog`, `shaders/lrt/scene/sog_decode.slang`, `scene::loadSplatFile`.
+
+### Who does what
+
+The CPU only unpacks:
+
+- opens the zip, stored or deflated, or the directory beside a `meta.json`;
+- decodes each WebP with libwebp to its raw RGBA bytes, never premultiplied,
+  since these channels are indices;
+- parses ranges and codebooks with nlohmann/json.
+
+The GPU does the reconstruction:
+
+- 16-bit positions in their signed log domain;
+- version 2 codebooks and version 1 ranges;
+- the smallest-three quaternion with its mode byte;
+- the higher-harmonics palette.
+
+It writes records in the engine's float encoding, which then take the same
+validate and decode as every other format. Loading a SOG sends nothing back
+to the CPU. The USD export, which consumes host records, reads them back
+(`CloudLoader::records`).
+
+### How it is checked
+
+PlayCanvas's own converter wrote the fixtures in `tests/data/splats`. The
+converter reorders splats and clusters harmonics, so the test compares
+renders against the source PLY rather than splat by splat:
+
+| Fixture | Render | p99 |
+|---|---|---|
+| `tiny`, version 2 | no harmonics | 5 (8-bit codebooks) |
+| `sh3`, 64-entry palette | no harmonics | 1 |
+| `sh3`, 64-entry palette | degree-3 harmonics | 1 |
+| `sh3`, palette red and blue exchanged | degree-3 harmonics | 170 |
+
+A first `sh3` of 200 splats had a 128-entry palette. Its k-means loss on
+random harmonics gave p99 61, which proves nothing about decoding. The
+fixture was cut to one palette entry per splat.
