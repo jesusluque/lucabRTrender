@@ -33,6 +33,9 @@ struct DisplayParams {
     float vectorScale;
     float vectorBias;
     float backgroundR; float backgroundG; float backgroundB;   // display-referred linear
+    uint  outputWidth;   // the output's size: each output pixel shows the source pixel under it
+    uint  outputHeight;
+    uint  pad0; uint pad1; uint pad2;
 };
 
 StructuredBuffer<float4>     colour;   // modes 0 and 3
@@ -108,11 +111,13 @@ float3 idColour(uint id) {
 [shader("compute")]
 [numthreads(16, 16, 1)]
 void displayTransform(uint3 tid: SV_DispatchThreadID) {
-    if (tid.x >= params.width || tid.y >= params.height) {
+    if (tid.x >= params.outputWidth || tid.y >= params.outputHeight) {
         return;
     }
-    const uint row = params.flipRows != 0 ? params.height - 1 - tid.y : tid.y;
-    const uint pixel = row * params.width + tid.x;
+    const uint x = min(uint((float(tid.x) + 0.5) * float(params.width) / float(params.outputWidth)), params.width - 1);
+    const uint y = min(uint((float(tid.y) + 0.5) * float(params.height) / float(params.outputHeight)), params.height - 1);
+    const uint row = params.flipRows != 0 ? params.height - 1 - y : y;
+    const uint pixel = row * params.width + x;
     const float3 background = float3(params.backgroundR, params.backgroundG, params.backgroundB);
     float3 shown = transferEncode(background, params.display);
     if (params.mode == 0) {

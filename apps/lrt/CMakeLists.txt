@@ -6,6 +6,13 @@ add_executable(lrt
     src/CmdAofx.cpp
     src/CmdLive.cpp)
 target_link_libraries(lrt PRIVATE lrt::usd lrt::lod lrt::sched lrt::technique lrt::aofx_host CLI11::CLI11)
+if(LRT_BUILD_VIEW)
+    target_sources(lrt PRIVATE src/CmdView.cpp)
+    target_link_libraries(lrt PRIVATE lrt::view)
+    target_compile_definitions(lrt PRIVATE LRT_HAVE_VIEW=1)
+else()
+    target_compile_definitions(lrt PRIVATE LRT_HAVE_VIEW=0)
+endif()
 if(TARGET MaterialXCore)
     target_link_libraries(lrt PRIVATE MaterialXCore)
     target_compile_definitions(lrt PRIVATE LRT_HAVE_MATERIALX=1)

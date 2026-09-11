@@ -260,6 +260,10 @@ gpu::Device& StageRenderer::device() {
     return impl_->delegate->GetEngineDevice();
 }
 
+gpu::ShaderLibrary& StageRenderer::library() {
+    return impl_->delegate->GetEngineLibrary();
+}
+
 Result<technique::DisplaySource> StageRenderer::displaySource(const std::string& aov) {
     const render::RenderTargets* targets = lastTargets();
     auto* param = static_cast<HdLrtRenderParam*>(impl_->delegate->GetRenderParam());

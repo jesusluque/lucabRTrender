@@ -50,10 +50,13 @@ class DisplayTransform {
 public:
     [[nodiscard]] static Result<DisplayTransform> create(gpu::ShaderLibrary& library);
 
-    /// `source` into `output` (a storage-writable texture of the source's size,
-    /// top row first), encoded for `settings.display`.
+    /// `source` into `output` (a storage-writable texture, top row first) of
+    /// `outputWidth` x `outputHeight` -- the source's size, or any other, each
+    /// output pixel showing the source pixel under it -- encoded for
+    /// `settings.display`. Zero sizes take the source's.
     [[nodiscard]] Result<void> run(gpu::CommandBatch& batch, const DisplaySource& source,
-                                   const DisplaySettings& settings, rhi::ITexture* output);
+                                   const DisplaySettings& settings, rhi::ITexture* output,
+                                   uint32_t outputWidth = 0, uint32_t outputHeight = 0);
 
 private:
     gpu::Device*       device_ = nullptr;

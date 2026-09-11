@@ -70,4 +70,9 @@ void sleepPrecisely(std::chrono::nanoseconds duration);
 /// `name` from the environment, or empty.
 [[nodiscard]] std::string env(const char* name);
 
+/// A window's Metal layer drawn at the window's backing scale (2 on a Retina
+/// display), so a drawable of the framebuffer's pixels maps one to one.
+/// `nsWindow` is an NSWindow*; a no-op elsewhere.
+void matchLayerToBacking(void* nsWindow);
+
 }   // namespace lrt::platform

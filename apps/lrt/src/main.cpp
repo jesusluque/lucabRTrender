@@ -1,7 +1,7 @@
 // Copyright (c) 2026 lucabRTrender contributors.
 //
-// lrt: the engine from a terminal. Headless by design -- a render node has no
-// window, and a test has no window either.
+// lrt: the engine from a terminal. Headless but for `lrt view` -- a render node
+// has no window, and nothing else here opens one.
 #include <CLI/CLI.hpp>
 
 #include "Commands.h"
@@ -25,6 +25,9 @@ int main(int argc, char** argv) {
     lrt::cli::addStage(app);
     lrt::cli::addAofx(app);
     lrt::cli::addLive(app);
+#if LRT_HAVE_VIEW
+    lrt::cli::addView(app);
+#endif
 
     CLI11_PARSE(app, argc, argv);
     return 0;

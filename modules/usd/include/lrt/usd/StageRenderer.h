@@ -21,6 +21,7 @@
 
 namespace lrt::gpu {
 class Device;
+class ShaderLibrary;
 }
 
 namespace lrt::usd {
@@ -73,6 +74,8 @@ public:
 
     /// The device the engine draws on: a window's surface is made on it.
     [[nodiscard]] gpu::Device& device();
+    /// The engine's shader library on that device, for kernels drawn beside it.
+    [[nodiscard]] gpu::ShaderLibrary& library();
 
     /// The last frame's `aov` ("color", "depth", "primId", "instanceId",
     /// "elementId", "Neye", "normal") as DisplayTransform reads it. An AOV no

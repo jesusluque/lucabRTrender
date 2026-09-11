@@ -56,6 +56,7 @@ public:
     [[nodiscard]] bool HasEngine() const { return _engine != nullptr; }
     /// The engine's device; only valid when HasEngine().
     [[nodiscard]] lrt::gpu::Device& GetEngineDevice() const { return _engine->device(); }
+    [[nodiscard]] lrt::gpu::ShaderLibrary& GetEngineLibrary() const { return _engine->library(); }
 
 private:
     void _Setup();

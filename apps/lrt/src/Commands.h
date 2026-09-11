@@ -14,5 +14,8 @@ void addConvert(CLI::App& app);
 void addStage(CLI::App& app);
 void addAofx(CLI::App& app);
 void addLive(CLI::App& app);
+#if LRT_HAVE_VIEW
+void addView(CLI::App& app);
+#endif
 
 }   // namespace lrt::cli

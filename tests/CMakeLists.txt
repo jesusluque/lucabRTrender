@@ -79,6 +79,16 @@ target_compile_options(lrt_storm_oracle_tests PRIVATE -Wno-old-style-cast -Wno-s
 set_target_properties(lrt_storm_oracle_tests PROPERTIES CXX_VISIBILITY_PRESET default VISIBILITY_INLINES_HIDDEN OFF
                       BUILD_RPATH "${SLANG_ROOT}/lib;${LRT_USD_ROOT}/lib")
 
+if(LRT_BUILD_VIEW)
+    lrt_test(lrt_view_tests
+        SOURCES view/test_view.cpp
+        LIBS lrt::view)
+    add_dependencies(lrt_view_tests hdLrt)
+    target_compile_options(lrt_view_tests PRIVATE -Wno-old-style-cast -Wno-shadow -Wno-deprecated-declarations)
+    set_target_properties(lrt_view_tests PROPERTIES CXX_VISIBILITY_PRESET default VISIBILITY_INLINES_HIDDEN OFF
+                          BUILD_RPATH "${SLANG_ROOT}/lib;${LRT_USD_ROOT}/lib")
+endif()
+
 lrt_test(lrt_gpu_host_tests
     SOURCES gpu_host/test_shared_device.cpp
     LIBS lrt::gpu_host)

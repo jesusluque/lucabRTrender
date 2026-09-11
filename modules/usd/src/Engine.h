@@ -173,6 +173,7 @@ public:
                         const AovRequest& aovs = {}, MeshVisibility visibility = MeshVisibility::Automatic);
 
     [[nodiscard]] gpu::Device& device() noexcept { return *device_; }
+    [[nodiscard]] gpu::ShaderLibrary& library() noexcept { return *library_; }
 
     /// The targets the last render drew into (owned by the render pass).
     [[nodiscard]] const render::RenderTargets* lastTargets() const noexcept { return lastTargets_; }

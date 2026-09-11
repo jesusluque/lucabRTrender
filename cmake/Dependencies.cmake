@@ -104,6 +104,48 @@ target_include_directories(lrt_tinyexr SYSTEM PUBLIC
     ${tinyexr_SOURCE_DIR} ${tinyexr_SOURCE_DIR}/deps/miniz)
 set_target_properties(lrt_tinyexr PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
+# --- GLFW and Dear ImGui: lrt view ---------------------------------------------
+#
+# The viewer's window and its panels. GLFW with no client API: slang-rhi makes
+# the surface. Dear ImGui tessellates its panels on the CPU -- chrome, not
+# scene data -- and draws through the engine's own slang-rhi backend
+# (modules/view/src/ImGuiRenderer.cpp); only its GLFW input backend is used.
+
+option(LRT_BUILD_VIEW "lrt view: a window onto a stage (GLFW, Dear ImGui)" ON)
+if(LRT_BUILD_VIEW)
+    set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
+    set(GLFW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+    set(GLFW_INSTALL OFF CACHE BOOL "" FORCE)
+    FetchContent_Declare(glfw
+        GIT_REPOSITORY https://github.com/glfw/glfw.git
+        GIT_TAG        3.4
+        GIT_SHALLOW    TRUE
+        SYSTEM)
+    FetchContent_MakeAvailable(glfw)
+
+    FetchContent_Declare(imgui
+        GIT_REPOSITORY https://github.com/ocornut/imgui.git
+        GIT_TAG        v1.92.9
+        GIT_SHALLOW    TRUE
+        SYSTEM)
+    FetchContent_GetProperties(imgui)
+    if(NOT imgui_POPULATED)
+        FetchContent_Populate(imgui)
+    endif()
+    add_library(lrt_imgui STATIC
+        ${imgui_SOURCE_DIR}/imgui.cpp
+        ${imgui_SOURCE_DIR}/imgui_draw.cpp
+        ${imgui_SOURCE_DIR}/imgui_tables.cpp
+        ${imgui_SOURCE_DIR}/imgui_widgets.cpp
+        ${imgui_SOURCE_DIR}/backends/imgui_impl_glfw.cpp)
+    target_include_directories(lrt_imgui SYSTEM PUBLIC ${imgui_SOURCE_DIR} ${imgui_SOURCE_DIR}/backends)
+    # 32-bit indices: the renderer pulls vertices through them from a buffer.
+    target_compile_definitions(lrt_imgui PUBLIC "ImDrawIdx=unsigned int" IMGUI_DISABLE_OBSOLETE_FUNCTIONS)
+    target_link_libraries(lrt_imgui PUBLIC glfw)
+    set_target_properties(lrt_imgui PROPERTIES POSITION_INDEPENDENT_CODE ON)
+endif()
+
 if(BUILD_TESTING)
     FetchContent_Declare(catch2
         GIT_REPOSITORY https://github.com/catchorg/Catch2.git

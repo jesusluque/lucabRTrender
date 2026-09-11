@@ -13,7 +13,7 @@ cmake --build build/macos-arm64-debug --target lrt_render_tests   # one test bin
 ```
 
 - **Test binaries** are `lrt_<area>_tests` (gpu, scene, render, geom,
-  technique, lod, usd, gpu_host, aofx, sched), from `tests/<area>/`.
+  technique, lod, usd, view, gpu_host, aofx, sched), from `tests/<area>/`.
   `lrt_storm_oracle_tests` compares Hydra outputs with Storm's; it needs
   `HDX_MSAA_SAMPLE_COUNT=1` in the environment, which ctest sets.
 - **Timings** come from the release preset's `lrt bench`.
@@ -75,6 +75,7 @@ the ones above it.
 | lod | `LodBuilder`, `CutSelector`; `Lrtc.h` for the `.lrtc` reader/writer and `StreamingPool` |
 | usd | `Engine`, `StageRenderer`, `Export`; the `hdLrt` plugin; codeless schemas in `modules/usd/schemas` |
 | aofx | openFXplayer's plugin SDK (ABI 22) and host |
+| view | `lrt view`: GLFW `Window`, `ImGuiRenderer` (Dear ImGui on the engine's device), `runViewer` |
 
 How the pieces fit:
 
@@ -103,4 +104,7 @@ How the pieces fit:
     that may be absent from the device, and a group whose chunks are missing
     draws its merged Gaussian.
 - **The CLI** is `apps/lrt` (CLI11): `CmdRender` (render/bench),
-  `CmdStage` (convert/stage), `CmdAofx`, `CmdLive`, `CmdInfo`.
+  `CmdStage` (convert/stage), `CmdView`, `CmdAofx`, `CmdLive`, `CmdInfo`.
+- **lrt view** keeps frames on the device: `StageRenderer::draw`, then
+  `DisplayTransform` writes the window's surface texture and ImGui draws over
+  it. Hydra render buffers are converted only when a host maps them.

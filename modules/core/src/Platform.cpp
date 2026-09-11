@@ -15,6 +15,8 @@
 
 #if defined(__APPLE__)
 #include <mach-o/dyld.h>
+#include <objc/message.h>
+#include <objc/runtime.h>
 #include <mach/mach.h>
 #include <mach/mach_time.h>
 #include <mach/thread_policy.h>
@@ -166,6 +168,28 @@ std::filesystem::path executableDir() {
 std::string env(const char* name) {
     const char* value = std::getenv(name);
     return value != nullptr ? std::string(value) : std::string();
+}
+
+void matchLayerToBacking(void* nsWindow) {
+#if defined(__APPLE__)
+    if (nsWindow == nullptr) {
+        return;
+    }
+    // Through the Objective-C runtime, so this file stays C++.
+    const auto send = [](void* receiver, const char* selector) {
+        return reinterpret_cast<void* (*)(void*, SEL)>(objc_msgSend)(receiver, sel_registerName(selector));
+    };
+    const double scale =
+        reinterpret_cast<double (*)(void*, SEL)>(objc_msgSend)(nsWindow, sel_registerName("backingScaleFactor"));
+    void* view = send(nsWindow, "contentView");
+    void* layer = view != nullptr ? send(view, "layer") : nullptr;
+    if (layer != nullptr) {
+        reinterpret_cast<void (*)(void*, SEL, double)>(objc_msgSend)(layer, sel_registerName("setContentsScale:"),
+                                                                     scale);
+    }
+#else
+    (void)nsWindow;
+#endif
 }
 
 }   // namespace lrt::platform

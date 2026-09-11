@@ -785,3 +785,100 @@ All comparisons are kernels, and the numbers are from the last run.
 - **Arrives with later milestones.** geomSubsets and materials (M4).
   Deformation and motion, which need BLAS refit (M7). Subdivision, curves
   and implicit surfaces (M8).
+
+## Complete USD: lrt view (M3)
+
+`lrt view stage.usd` is a window onto a stage through the engine's Hydra
+delegate.
+
+- **Cameras.** A free camera: orbit with the left button, pan with the
+  middle button or shift, dolly with the right button or wheel, and F to
+  frame. The stage's own cameras can be picked too.
+- **Choices in the panels.**
+  - Technique: raster or rt.
+  - Mesh visibility route.
+  - Output: colour, depth, prim, instance and element ids, Neye, normal.
+  - View transform, display, exposure and render scale.
+- **Stage.** A tree of the stage, and a click to pick the prim under the
+  mouse.
+
+### Frames stay on the device
+
+- **Drawing.** `StageRenderer::draw` executes Hydra and reads nothing back.
+- **Hydra buffers.** They are converted only when mapped: the render pass
+  leaves each one a fill that runs on its first `Map`. A host that shows an
+  output on the device never pays for it on the host. `lrt stage` and tests,
+  which map, read what they did before.
+- **Display.**
+  - `StageRenderer::displaySource` hands the frame's colour or an AOV
+    (`Engine::aovView`) to `technique::DisplayTransform`.
+  - The transform writes the window's surface texture directly: BGRA8Unorm
+    with storage usage, so `framebufferOnly` is off.
+  - Any render scale; each output pixel shows the source pixel under it.
+- **Panels.**
+  - Dear ImGui 1.92.9 (`ImGuiBackendFlags_RendererHasTextures`) draws over
+    the display through `view::ImGuiRenderer`, on the same device.
+  - Each frame its lists go up as two buffers. A draw pulls vertices through
+    32-bit indices from its start vertex and binds its texture and scissor.
+  - ImGui tessellates on the CPU. That is the one place this viewer does
+    arithmetic on the host, and it is chrome, not scene data.
+- **Picking.** `StageRenderer::pick` reads one pixel's two id words and
+  resolves the rprim to its USD prim through `HdPrimOriginSchema`.
+- **Framing.** `GpuScene::worldBounds` folds every instance's world box on
+  the device. Clouds add their decoded boxes through their prims'
+  transforms.
+- **Window.** GLFW 3.4 with no client API; slang-rhi makes the Metal surface.
+  `platform::matchLayerToBacking` sets the layer's contents scale through the
+  Objective-C runtime, so drawables map one to one on Retina screens.
+
+### Display transform
+
+- **View transforms.** Standard, and AgX in Wrensch's analytic fit of
+  Sobotka's: inset, log2 over [−12.47, 4.03] stops, a sixth-order sigmoid,
+  outset, then 2.2.
+- **Displays.** sRGB, Rec.709 (BT.1886, a pure 2.4 power) and Display P3
+  (P3-D65 primaries with sRGB's transfer).
+- **Other outputs.** Depth is a log grey from near to far, ids are hashed
+  colours (−1 is the background), and vectors are shown as rgb·½+½.
+- **Checked** (`tests/technique/test_display.cpp`).
+  - A generated ramp from 2⁻¹⁰ to 2⁶, with hues and partial coverage over a
+    background, goes through six view, display and exposure combinations.
+  - Each output is compared per pixel with the formulas written again in
+    another kernel: the P3 matrix derived from chromaticities, the sigmoid as
+    powers, exposure as exp.
+  - Worst difference 3.5e-6.
+
+### How it is checked
+
+- **Smoke test** (`lrt_view_tests`). A hidden window draws a square stage
+  for four frames. A kernel counts the snapshot's lit pixels (49538 at
+  480×320).
+  - It skips where GLFW cannot initialise or a window cannot open.
+  - A hidden window's drawables come at about 100 ms each; a shown window's
+    at the display's rate.
+- **Picking and bounds** through `StageRenderer` on the primvars stage:
+  - Pixels over each mesh pick `/PerFace` and `/PerCorner`; an empty pixel
+    picks nothing.
+  - The bounds come to (−2, −1.5, −5)–(2, 1.5, −5), the authored points.
+- **Snapshot.** `lrt view --frames N --snapshot out.exr` writes the last
+  frame as shown, panels included: a float texture read back for output.
+  Looked at for Kitchen_set.
+
+### Measured (M5 Pro, debug build)
+
+Kitchen_set in a 1600×900 window with a free camera, raster technique and
+automatic (ray) visibility: draw 8.7 ms, frame 9.1–10 ms (medians over 30
+and 120 frames).
+
+### Not done
+
+- **Display.** ACES 2.0, OCIO and EDR output (RGBA16Float with extended
+  range) are not implemented.
+- **Picking under instancing.** It names the prototype's prim and the
+  instance number, not the instance proxy's path. The viewport does not
+  highlight the selection.
+- **Stage tree.** It lists prims and marks native instances. It does not
+  walk into instance proxies.
+- **Time.** The time slider sets the stage time; animation itself is M7.
+- **Platforms.** Linux and Windows windows are untested. X11 is wired
+  through GLFW's native handle; Wayland is not.

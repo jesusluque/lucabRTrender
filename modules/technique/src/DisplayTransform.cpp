@@ -31,7 +31,8 @@ Result<DisplayTransform> DisplayTransform::create(gpu::ShaderLibrary& library) {
 }
 
 Result<void> DisplayTransform::run(gpu::CommandBatch& batch, const DisplaySource& source,
-                                   const DisplaySettings& settings, rhi::ITexture* output) {
+                                   const DisplaySettings& settings, rhi::ITexture* output, uint32_t outputWidth,
+                                   uint32_t outputHeight) {
     if (output == nullptr || source.width == 0 || source.height == 0) {
         return Error(ErrorCode::InvalidArgument, "display: nothing to show, or nowhere to show it");
     }
@@ -39,7 +40,9 @@ Result<void> DisplayTransform::run(gpu::CommandBatch& batch, const DisplaySource
     const bool valid = source.buffer != nullptr && source.buffer->valid();
     // An absent AOV shows as the background: the id mode with nothing drawn.
     const DisplaySource::Kind kind = valid ? source.kind : DisplaySource::Kind::Ids;
-    kernel_.dispatch(batch, {source.width, source.height, 1}, [&](rhi::ShaderCursor cursor) {
+    const uint32_t ow = outputWidth != 0 ? outputWidth : source.width;
+    const uint32_t oh = outputHeight != 0 ? outputHeight : source.height;
+    kernel_.dispatch(batch, {ow, oh, 1}, [&](rhi::ShaderCursor cursor) {
         cursor["colour"].setBinding(valid && floats ? source.buffer->rhi() : placeholderFloat4_.rhi());
         cursor["depth"].setBinding(valid && kind == DisplaySource::Kind::Depth ? source.buffer->rhi()
                                                                               : placeholderWord_.rhi());
@@ -63,6 +66,8 @@ Result<void> DisplayTransform::run(gpu::CommandBatch& batch, const DisplaySource
         p["backgroundR"].setData(settings.background[0]);
         p["backgroundG"].setData(settings.background[1]);
         p["backgroundB"].setData(settings.background[2]);
+        p["outputWidth"].setData(ow);
+        p["outputHeight"].setData(oh);
     });
     return ok();
 }
