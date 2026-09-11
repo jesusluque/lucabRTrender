@@ -73,6 +73,7 @@ the ones above it.
 | geom | `MeshBuilder`: Hydra meshes triangulated, smooth-normalled and their primvars expanded on the GPU, in `HdMeshUtil`'s order |
 | world | `GpuScene` (vertex/index/primvar pools, instance records), `Instancing` (Hydra instancer chains), `RayTracingScene` (BLAS/TLAS), `BvhScene` (two-level compute LBVH) |
 | material | `TextureStore` (decode, mips, UDIM, the texture table), `MaterialCompiler` (MaterialX graphs into Slang), the lobe library |
+| light | UsdLux lights on the device: a record per light, and how a shading point samples one |
 | technique | how a frame is drawn: `VisibilityRaster` / `VisibilityTrace` / `VisibilityBvh` (same ids), `HeadlightShading`, `AovShading`, `Denoiser` (OIDN on the engine's own Metal queue) |
 | lod | `LodBuilder`, `CutSelector`; `Lrtc.h` for the `.lrtc` reader/writer and `StreamingPool` |
 | usd | `Engine`, `StageRenderer`, `Export`; the `hdLrt` plugin; codeless schemas in `modules/usd/schemas` |
@@ -89,7 +90,7 @@ How the pieces fit:
   renderer takes. `CutSelector::select` turns `LodInstance`s into per-frame
   `SplatInstance`s whose clouds it owns.
 - **Shaders** mirror the modules under `shaders/lrt/`: common, algo, scene
-  (decode), splat, rt, points, reference, lod, geom, world, material,
+  (decode), splat, rt, points, reference, lod, geom, world, material, light,
   technique, usd. The ray tracer's two routes
   share `rt/rt_integrate.slang`.
 - **Hydra.** `Sync` (any thread) only hands CPU records to `Engine` under a
@@ -108,6 +109,12 @@ How the pieces fit:
   cuts it away. A kernel that evaluates materials walks its pixels in quad
   order (`lrtQuadPixel`), since bump takes its screen derivatives from the
   thread's quad.
+- **Lights.** A light is sampled where it stands -- the cone a sphere or a
+  sun subtends, the surface of a disk or a rectangle, the hemisphere above
+  the surface for a dome -- and `lightPdf` gives that density for any
+  direction, which is what a chi-square checks and what MIS will need.
+  Shading loops over every light at every pixel: `lrt:lightSamples` says how
+  many samples each one gets, and one is what an interactive frame takes.
 - **Levels of detail.**
   - Splats are sorted by Morton code, and an octree level's cells are runs of
     that order.

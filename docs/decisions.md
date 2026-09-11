@@ -1098,3 +1098,138 @@ identifier at all), so the difference comes from the thread's quad.
   material a second time rather than keeping what visibility already found.
   Both are measured above and both are worth revisiting once lights (M5)
   settle what shading needs to keep.
+
+## Complete USD: lights (M5)
+
+A mesh is lit by what the stage authored: UsdLux lights reach the engine
+through Hydra, and shading samples each one where it stands.
+
+### What a light is
+
+- **A record per light**, in world space and in the units USD authored
+  (`modules/light`). What a record becomes is derived in the shader, not on
+  the host: exposure, the blackbody of a colour temperature (Krystek's fit of
+  the Planckian locus, normalised to luminance 1), and the area a `normalize`
+  divides by.
+- **Five kinds**: distant with an angular diameter, sphere, disk, rectangle
+  and dome. A sphere of radius 0 and a sun of angle 0 are delta lights and
+  carry no density.
+- **Shaping** is the cone and its softness. IES profiles and cylinder lights
+  are not read.
+
+### How one is sampled
+
+- **The cone it subtends** for a distant light and a sphere, uniformly in
+  solid angle, which is the density a plane's closed-form irradiance is
+  written against.
+- **Its own surface** for a disk and a rectangle, uniformly in area, turned
+  into a solid-angle density by the distance and the cosine at the light.
+- **The surface being shaded** for a dome, cosine weighted: the light comes
+  from the hemisphere above the surface, and sampling the whole sphere throws
+  half the samples below the horizon -- 7.1% of noise against 0.02% on a
+  plane under a constant dome, at the same count.
+- **`lightPdf`** gives that density for any direction, not just for the
+  sample drawn. The path tracer will weigh hits by it (M6); here it is what
+  the chi-square compares against.
+
+### Shadows
+
+Where the device traces rays, a light that casts one is occluded by whatever
+lies between the point and the sample. The ray leaves along itself as well as
+along the normal, so its origin does not depend on a sign, and by a distance
+that grows with the scene -- which costs contact: an occluder within that
+offset is not seen. The structure is the scene's own, built for whatever
+route drew the frame, and read after the visibility pass rather than before,
+since the rays route rebuilds it there.
+
+### The dome
+
+A dome carries a lat-long image through the same texture table the materials
+sample, mapped around the light's own axes. It is not a layer: it has no
+depth, and giving it one would make the background read as covered, so it is
+painted where the frame drew nothing, opaque, after everything else.
+
+What a dome does not do yet is follow its image's own brightness. The warp
+the plan asks for is still to come, and a dome with a sun in it is noisy
+without it.
+
+### In Hydra
+
+The delegate takes sphere, disk, rect, distant and dome lights as sprims. A
+light's samples per pixel are a render setting, `lrt:lightSamples`, reachable
+from `StageRenderer` and from `lrt view --light-samples`: one is what an
+interactive frame takes, and a comparison against a closed form asks for
+enough that what is left is the light and not the noise.
+
+### How it is checked
+
+- **Closed forms that share no code with the renderer**
+  (`lambert_irradiance.slang`): a Lambert plane under a sphere, a disk (as a
+  512-gon), a rectangle (Lambert's formula over its edges), a sun and a dome,
+  and a point light behind a square occluder whose umbra is exactly what it
+  projects. 0 of 8281 pixels beyond 2% in each: worst 0.26% for the sphere,
+  1.6% disk, 1.3% rect, 0.02% dome, and exact for the sun and the umbra.
+- **A chi-square per light**, a million samples each, binned in the frame
+  that matches the light's support -- a cone's own solid angle, an area
+  light's own surface -- against `lightPdf` integrated over each bin: sphere
+  z -0.23, disk 0.14, rect -0.27, sun -0.29, dome -1.61, every pdf
+  integrating to 1.0000.
+  - It carries a per-sample pass too: the density a sample reports against
+    the density its own direction has. That is what MIS depends on, it needs
+    no histogram, and it is what proved the large statistics were the binning
+    rather than the sampling (worst disagreement 3e-7).
+- **Through Hydra**: a UsdLuxSphereLight over a Lambert plane, 0 of 8281
+  pixels beyond 2% with its centre at 0.03200 against the closed form's
+  0.03200; and a dome light's image lighting the same plane to 0.08%, its
+  background reading 0.6039 against the 0.6038 its PNG decodes to from sRGB.
+  Each of those renders the same stage with no light first and checks it
+  against the analytic headlight, exact to 1e-5, so the lit comparison is
+  about the light and not the material.
+
+### Bugs these found
+
+- **The shading normal never faced the viewer.** `materialInputsAt` computed
+  the backface and did not flip, so a front-facing square handed materials a
+  normal pointing away. Shading hid it, since the lobes build their frame
+  around the view direction; a shadow ray could not, and every ray hit the
+  surface it left.
+- **Shading traced against a freed structure.** It took the acceleration
+  structure's pointer while preparing the frame, and in the rays route the
+  visibility pass rebuilds it there -- releasing the one shading still
+  pointed at. Two readings were wrong before that one, and measurement killed
+  both.
+
+### Measured (M5 Pro, release)
+
+- **Method.** `lrt view --frames 200 --size 1600x900`, draw median.
+- **Scene.** Kitchen_set with four lights (a dome, a rectangle and two
+  spheres), authored beside it: the asset itself carries no UsdLux prim.
+
+| What | Draw |
+|---|---|
+| Four lights, one sample, rays | 27.77 ms |
+| The same, compute BVH | 35.14 ms |
+| The same, raster | 40.94 ms |
+| The same without shadows, rays | 26.69 ms |
+| No lights at all (the headlight), rays | 10.61 ms |
+
+- **Samples per light**, rays: 1 gives 27.79 ms, 4 gives 77.72 ms, 16 gives
+  275.40 ms. Linear in samples times lights, since every light is sampled at
+  every pixel: what a light BVH and MIS are for.
+
+### Not done, not verified
+
+- **Many lights cost what they say.** There is no light BVH and no light
+  sampling: four lights at one sample each are about 17 ms over a 10.6 ms
+  frame, and every light is visited at every pixel.
+- **No MIS.** Lights are sampled, the material is not sampled back at them.
+  That is the path tracer's, M6.
+- **A dome's image is not importance sampled**, so a dome with a sun in it is
+  noisy.
+- **No light or shadow linking**, no light instancing, no IES profiles and no
+  cylinder lights.
+- **Splats are not relit.** `LrtSplatLightingAPI` is not implemented; splats
+  carry the radiance they were baked with.
+- **Contact shadows** closer than the ray's offset are missed, and a cutout
+  material still stops a shadow ray where its opacity would have let it
+  through.
