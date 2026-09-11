@@ -115,6 +115,43 @@ TEST_CASE("the prefix sum of every size is right, checked element by element on 
 /// Four dispatches are queued into one batch, as RadixSort::sort queues them,
 /// each with its own shift; a backend that hands them all the same constants
 /// shows up here rather than as a wrong sort.
+/// Where a dispatch's buffers land. Seven buffers, each holding a marker of
+/// its own, bound by the names the kernel declares: what the kernel reads back
+/// says whether a backend put them where they were asked for. The radix
+/// scatter binds seven, and changing which buffer one of its unused names
+/// points at changed what another name read.
+TEST_CASE("a kernel's buffers land on the names they were bound to", "[gpu][algo][probe]") {
+    LRT_REQUIRE_GPU(gpu);
+    static gpu::ComputeKernel kProbe = test::kernel(*gpu, "lrt/test/binding_probe");
+    constexpr uint32_t kBuffers = 7;
+    static const char* kNames[kBuffers] = {"first", "second", "third", "fourth", "fifth", "sixth", "seventh"};
+    std::vector<gpu::Buffer> buffers;
+    for (uint32_t k = 0; k < kBuffers; ++k) {
+        gpu::Buffer buffer = test::uintBuffer(*gpu->device, 1, kNames[k]);
+        const uint32_t marker = 0x1000 + k;
+        REQUIRE(buffer.write(*gpu->device, 0, sizeof(marker), &marker));
+        buffers.push_back(std::move(buffer));
+    }
+    gpu::Buffer seen = test::uintBuffer(*gpu->device, kBuffers, "binding.seen");
+    gpu::CommandBatch batch(*gpu->device);
+    kProbe.dispatch(batch, {1, 1, 1}, [&](rhi::ShaderCursor cursor) {
+        for (uint32_t k = 0; k < kBuffers; ++k) {
+            cursor[kNames[k]].setBinding(buffers[k].rhi());
+        }
+        cursor["seen"].setBinding(seen.rhi());
+        cursor["params"]["count"].setData(kBuffers);
+    });
+    REQUIRE(batch.submit(true));
+    std::array<uint32_t, kBuffers> read{};
+    REQUIRE(seen.read(*gpu->device, 0, sizeof(read), read.data()));
+    for (uint32_t k = 0; k < kBuffers; ++k) {
+        std::printf("  %s read %#x (wanted %#x)\n", kNames[k], read[k], 0x1000 + k);
+    }
+    for (uint32_t k = 0; k < kBuffers; ++k) {
+        CHECK(read[k] == 0x1000 + k);
+    }
+}
+
 TEST_CASE("each dispatch in a batch gets its own parameters", "[gpu][algo][probe]") {
     LRT_REQUIRE_GPU(gpu);
     static gpu::ComputeKernel kProbe = test::kernel(*gpu, "lrt/test/radix_params_probe");
