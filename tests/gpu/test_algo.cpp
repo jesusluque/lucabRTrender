@@ -138,13 +138,14 @@ TEST_CASE("a scatter-shaped kernel reads and writes the words it was given", "[g
     gpu::Buffer dstVal = test::uintBuffer(*gpu->device, kPairs, "dstValues");
     gpu::Buffer starts = test::uintBuffer(*gpu->device, kDigits, "chunkStarts");
     gpu::Buffer spare = test::uintBuffer(*gpu->device, kDigits, "spare");
+    gpu::Buffer spareHi = test::uintBuffer(*gpu->device, kDigits, "spareHi");
     gpu::Buffer saw = test::uintBuffer(*gpu->device, kPairs * 3, "saw");
     REQUIRE(srcLo.write(*gpu->device, 0, sizeof(keys), keys));
     REQUIRE(srcVal.write(*gpu->device, 0, sizeof(values), values));
     gpu::CommandBatch batch(*gpu->device);
     kProbe.dispatch(batch, {1, 1, 1}, [&](rhi::ShaderCursor cursor) {
         cursor["srcKeysLo"].setBinding(srcLo.rhi());
-        cursor["srcKeysHi"].setBinding(starts.rhi());   // the stand-in, as the sort binds one
+        cursor["srcKeysHi"].setBinding(spareHi.rhi());   // its own buffer: nothing bound twice
         cursor["srcValues"].setBinding(srcVal.rhi());
         cursor["dstKeysLo"].setBinding(dstLo.rhi());
         cursor["dstKeysHi"].setBinding(spare.rhi());
