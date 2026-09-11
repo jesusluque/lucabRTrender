@@ -228,3 +228,42 @@ TEST_CASE("a quad sphere's smooth normals point away from its centre", "[geom][m
     CHECK(c.worstAngle < 1e-3F);
     CHECK(c.badCorners == 0);
 }
+
+/// A mesh must not inherit the holes of the mesh built before it. meshHoles
+/// marks a hole face with a 1 and leaves every other face alone, and nothing
+/// else writes the flags, so unless they are cleared a face is judged by
+/// whatever the device last left there. Wherever the allocator hands the same
+/// memory back, the second mesh here loses every face to the first's holes --
+/// which is green on a backend whose allocations happen to come back zeroed,
+/// and wrong on one where they do not.
+TEST_CASE("a mesh does not inherit the holes of the mesh built before it", "[geom][mesh]") {
+    LRT_REQUIRE_GPU(gpu);
+    auto builder = geom::MeshBuilder::create(*gpu->library);
+    if (!builder) FAIL(builder.error().toString());
+    constexpr int32_t kQuads = 64;
+    Authored plain;
+    for (int32_t q = 0; q < kQuads; ++q) {
+        const float x = static_cast<float>(q);
+        const float corners[4][3] = {
+            {x, 0.0F, 0.0F}, {x + 1.0F, 0.0F, 0.0F}, {x + 1.0F, 1.0F, 0.0F}, {x, 1.0F, 0.0F}};
+        for (const auto& corner : corners) {
+            plain.points.insert(plain.points.end(), {corner[0], corner[1], corner[2]});
+            plain.indices.push_back(static_cast<int32_t>(plain.indices.size()));
+        }
+        plain.counts.push_back(4);
+    }
+    Authored holey = plain;
+    for (int32_t q = 0; q < kQuads; ++q) {
+        holey.holes.push_back(q);
+    }
+    // Built and dropped, so its flags are the memory the next build is handed.
+    {
+        auto holes = builder->build(inputOf(holey));
+        if (!holes) FAIL(holes.error().toString());
+        CHECK(holes->triangles == 0u);   // every face of it is a hole
+    }
+    auto mesh = builder->build(inputOf(plain));
+    if (!mesh) FAIL(mesh.error().toString());
+    std::printf("  after a mesh that was all holes: %u triangles (authored %d)\n", mesh->triangles, kQuads * 2);
+    CHECK(mesh->triangles == static_cast<uint32_t>(kQuads * 2));
+}
