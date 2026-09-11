@@ -120,6 +120,63 @@ TEST_CASE("the prefix sum of every size is right, checked element by element on 
 /// says whether a backend put them where they were asked for. The radix
 /// scatter binds seven, and changing which buffer one of its unused names
 /// points at changed what another name read.
+/// The scatter's shape without its arithmetic: the same seven buffers, one
+/// invocation, two elements, reporting what each read returned and writing
+/// what the scatter would write. The sort is wrong on CUDA while its counts,
+/// totals and cursors are right, so this asks whether the reads or the writes
+/// are what differ.
+TEST_CASE("a scatter-shaped kernel reads and writes the words it was given", "[gpu][algo][probe]") {
+    LRT_REQUIRE_GPU(gpu);
+    static gpu::ComputeKernel kProbe = test::kernel(*gpu, "lrt/test/scatter_shape_probe");
+    constexpr uint32_t kPairs = 2;
+    constexpr uint32_t kDigits = 256;
+    const uint32_t keys[kPairs] = {0xAAAA0001u, 0xBBBB0002u};
+    const uint32_t values[kPairs] = {0x11110001u, 0x22220002u};
+    gpu::Buffer srcLo = test::uintBuffer(*gpu->device, kPairs, "srcKeysLo");
+    gpu::Buffer srcVal = test::uintBuffer(*gpu->device, kPairs, "srcValues");
+    gpu::Buffer dstLo = test::uintBuffer(*gpu->device, kPairs, "dstKeysLo");
+    gpu::Buffer dstVal = test::uintBuffer(*gpu->device, kPairs, "dstValues");
+    gpu::Buffer starts = test::uintBuffer(*gpu->device, kDigits, "chunkStarts");
+    gpu::Buffer spare = test::uintBuffer(*gpu->device, kDigits, "spare");
+    gpu::Buffer saw = test::uintBuffer(*gpu->device, kPairs * 3, "saw");
+    REQUIRE(srcLo.write(*gpu->device, 0, sizeof(keys), keys));
+    REQUIRE(srcVal.write(*gpu->device, 0, sizeof(values), values));
+    gpu::CommandBatch batch(*gpu->device);
+    kProbe.dispatch(batch, {1, 1, 1}, [&](rhi::ShaderCursor cursor) {
+        cursor["srcKeysLo"].setBinding(srcLo.rhi());
+        cursor["srcKeysHi"].setBinding(starts.rhi());   // the stand-in, as the sort binds one
+        cursor["srcValues"].setBinding(srcVal.rhi());
+        cursor["dstKeysLo"].setBinding(dstLo.rhi());
+        cursor["dstKeysHi"].setBinding(spare.rhi());
+        cursor["dstValues"].setBinding(dstVal.rhi());
+        cursor["chunkStarts"].setBinding(starts.rhi());
+        cursor["saw"].setBinding(saw.rhi());
+        rhi::ShaderCursor p = cursor["params"];
+        p["count"].setData(kPairs);
+        p["chunkSize"].setData(uint32_t{256});
+        p["chunkCount"].setData(uint32_t{1});
+        p["shift"].setData(uint32_t{0});
+        p["wide"].setData(uint32_t{0});
+    });
+    REQUIRE(batch.submit(true));
+    std::array<uint32_t, kPairs * 3> read{};
+    std::array<uint32_t, kPairs> wroteKeys{};
+    std::array<uint32_t, kPairs> wroteValues{};
+    REQUIRE(saw.read(*gpu->device, 0, sizeof(read), read.data()));
+    REQUIRE(dstLo.read(*gpu->device, 0, sizeof(wroteKeys), wroteKeys.data()));
+    REQUIRE(dstVal.read(*gpu->device, 0, sizeof(wroteValues), wroteValues.data()));
+    for (uint32_t k = 0; k < kPairs; ++k) {
+        std::printf("  element %u saw key %#x value %#x; wrote key %#x value %#x\n", k, read[k * 3], read[k * 3 + 2],
+                    wroteKeys[k], wroteValues[k]);
+    }
+    for (uint32_t k = 0; k < kPairs; ++k) {
+        CHECK(read[k * 3] == keys[k]);          // the reads gave the words that were written
+        CHECK(read[k * 3 + 2] == values[k]);
+        CHECK(wroteKeys[k] == keys[k]);         // and the writes landed where the cursor said
+        CHECK(wroteValues[k] == values[k]);
+    }
+}
+
 TEST_CASE("a kernel's buffers land on the names they were bound to", "[gpu][algo][probe]") {
     LRT_REQUIRE_GPU(gpu);
     static gpu::ComputeKernel kProbe = test::kernel(*gpu, "lrt/test/binding_probe");
