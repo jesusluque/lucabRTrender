@@ -885,3 +885,179 @@ delegate.
 - **Time.** The time slider sets the stage time; animation itself is M7.
 - **Platforms.** Linux and Windows windows are untested. X11 is wired
   through GLFW's native handle; Wayland is not.
+
+## Complete USD: textures and materials (M4)
+
+A mesh no longer shows its displayColor: it shows the material bound to it,
+compiled from MaterialX into Slang and evaluated on the device.
+
+### Textures
+
+- **Reading.** Hio decodes a file's bytes on the CPU and nothing else: the
+  bytes are uploaded raw and a kernel decodes them (v up, since Hydra's rows
+  run the other way).
+- **Mips** are a kernel, since slang-rhi generates none. An sRGB texture is
+  decoded, filtered and encoded again, so a mip's mean is the mean of the
+  level above it in light, not in code values. Views are made with the sRGB
+  format its samplers want (a slang-rhi patch: a full-range view ignored the
+  format it was asked for).
+- **UDIM** is an indirection table: a tile that is missing leaves the node's
+  default, and the graph says so rather than sampling black.
+- **The table.** One `ParameterBlock` of 1024 texture slots and its
+  samplers, deduplicated. Metal takes it as an argument buffer; a device
+  with bindless will take the same interface.
+- **Colour spaces.** MaterialX `srgb_texture` is sRGB and anything else is
+  raw; `UsdUVTexture`'s `sourceColorSpace` is auto, raw or sRGB, auto
+  meaning sRGB for 8-bit images.
+- **Checked** (`tests/material/test_texture_store.cpp`): a decoded texture
+  is the file to the last bit (0 of 3404 components differ), a mip chain's
+  1x1 mean is the level 0 mean (0.49616 against 0.49804 raw, 0.30570
+  against 0.30499 through sRGB), and UDIM tiles resolve or report missing.
+
+### The lobe library
+
+- **Lobes.** Oren-Nayar and its energy-compensated form (EON), Burley,
+  translucent, dielectric (reflection, transmission, both), conductor,
+  generalized Schlick with an F82 tint, and sheen in both the Imageworks and
+  the Zeltner forms. Each has `eval`, `sample` and `pdf`; microfacets sample
+  the visible normal distribution, transmission follows Walter, and sheen's
+  albedo comes from an LTC fit.
+- **The stack.** A material's lobes are built into a `LobeStack` and
+  sampled with one-sample MIS, so a graph of any depth costs one sample.
+- **Checked** (`tests/material/test_lobes.cpp`), all on the device: a
+  chi-squared of sampled directions against the pdf (393.2 on 399 degrees of
+  freedom for the diffuse lobes, 379.0 to 461.0 elsewhere), the pdf's
+  integral against the fraction of samples drawn, and a white furnace where
+  the albedo sampled and the albedo integrated uniformly agree to 3%.
+
+### MaterialX into Slang
+
+- **The generator** derives from MaterialX's own `SlangShaderGenerator`.
+  Every node keeps its genglsl or genslang implementation except the ones
+  that cannot mean here what they mean in a rasteriser:
+  - the **surface** node, which has no light loop: its BSDF graph runs once,
+    pushing lobes, and what it weights them by becomes the material's stack;
+  - the **BSDF and EDF** nodes, which push lobes instead of responding to a
+    light (`shaders/lrt/material/mx/`, declared in
+    `lrt_genslang_closures.mtlx`);
+  - the **image** nodes, which sample the texture table;
+  - **heighttonormal**, which needs a screen derivative (below).
+- **A BSDF value is a weight per built lobe**, not a response: `mix`,
+  `layer`, `add` and `multiply` combine those weights the way genglsl
+  combines responses, so a value used twice is two weightings of one lobe,
+  not two lobes.
+- **Uniforms are not baked in.** Every input is read from a float blob, and
+  the module is named by a hash of its source: materials that differ only in
+  values share one compiled module. `MaterialCompiler::parameters` lays a
+  material's values, its textures' ids and its primvars' scene slots into
+  that blob.
+- **Sizes.** UsdPreviewSurface 580 lines and 23 blob words, standard_surface
+  821 and 59, OpenPBR 945 and 55, glTF PBR 575 and 36, an unlit texture
+  graph 242 and 22 (one texture, one primvar).
+- **Checked against MaterialX itself.** The same graphs compile a second
+  time in a reference variant whose closures are MaterialX's own genglsl
+  responses; a kernel evaluates both for 65536 light directions. Worst
+  component difference 3.2e-5 over eleven graphs, from a single
+  `oren_nayar_diffuse_bsdf` to standard_surface with metalness, coat and
+  sheen.
+  - One difference is deliberate and aligned in the test: genglsl's layering
+    scales the base by the top's Fresnel at the half vector, the lobes by
+    the Fresnel at the view direction, which is what a sampler can carry.
+  - A transmission-only scatter leaves the throughput at 1 in genglsl.
+
+### Shading a frame, and who else evaluates a material
+
+- **One generated module** (`technique::MaterialPrograms`) imports every
+  compiled material and dispatches on a material row's function. Shading
+  imports it to build a lobe stack; the visibility passes import it to ask
+  whether a sample is there at all. It is named after the set it dispatches
+  to, so a frame that shows the same materials compiles nothing.
+- **The row** is the instance's (`InstanceRecord.flags >> 8`), unless the
+  triangle is in a GeomSubset that binds one of its own
+  (`triangleSubsets`, `subsetRows`).
+- **The light** is still the headlight: a unit light from the eye, as
+  `HeadlightShading` drew unshaded meshes. Scene lights are M5.
+
+### Cutouts
+
+MaterialX resolves `opacityThreshold` itself, so a UsdPreviewSurface that
+has one leaves opacity at 0 or 1; what is left is deciding who evaluates it.
+Shading cannot, because a sample cut away has to let what is behind it
+through, so visibility does:
+
+- the rasteriser draws with a generated fragment shader that discards;
+- the two ray routes carry the ray on past the sample, up to sixteen times;
+- only rows flagged as cutouts pay for the evaluation, and a frame with none
+  runs the plain passes.
+
+### Bump
+
+`heighttonormal` -- and so `bump`, which is `heighttonormal` into
+`normalmap` -- differences the height in screen space. A material here is
+evaluated in a compute kernel, which has no `dFdx` (Slang has no such
+identifier at all), so the difference comes from the thread's quad.
+
+- **Which threads a quad holds was measured.** On this device the lanes are
+  handed out along the group's rows, so four consecutive lanes were four
+  pixels of one row and every vertical derivative was wrong -- all 15939
+  threads of a test dispatch.
+- **So the kernels walk their pixels in quad order** (`lrtQuadPixel`): each
+  quad of four lanes covers a 2x2 block, and then bit 0 of the lane is x and
+  bit 1 is y.
+- **The limit is the quad.** Where one of its four threads shades something
+  else -- a silhouette -- or leaves early, the derivative is of whatever it
+  did evaluate. Measured: one pixel of a square's 360-pixel edge ring.
+- `normalmap` needed nothing: the tangent frame (dP/du orthonormalised
+  against the normal) was already in `MaterialInputs`.
+
+### In Hydra
+
+- The delegate has a material sprim, and asks for the `mtlx` and the
+  universal render contexts.
+- A `HdMaterialNetwork2` becomes a MaterialX document through `hdMtlx`,
+  after two rewrites: the USD shading nodes are renamed to their nodedefs
+  (`UsdPreviewSurface` to `ND_UsdPreviewSurface_surfaceshader`, and so on),
+  and `UsdPrimvarReader` nodes become `geompropvalue` (varname to geomprop,
+  fallback to default, result to out), whose primvar the generator needs as
+  a constant.
+- Materials compile when the render thread commits, and the primvars a
+  material reads are added to the scene's primvar slots.
+
+### How it is checked
+
+- **Through USD** (`tests/usd/test_usd.cpp`): a MaterialX graph textured by
+  an image, a UsdPreviewSurface with a UsdUVTexture read through a
+  UsdPrimvarReader, a UsdPreviewSurface without specular, and a GeomSubset
+  whose material shades its faces and the mesh's the rest. The analytic
+  square (coverage, depth and colour) has 0 mismatches.
+- **Raster against rays, materials included**: max 0.
+- **Cutouts**: a square cut away shows the square behind it exactly as if it
+  were alone (8464 pixels, 0 coverage and 0 colour mismatches) in all three
+  routes; the same opacity above its threshold is not cut; and a square half
+  cut by a texture's alpha is the same image whichever route drew it (max
+  0).
+- **Bump**: a height linear in u gives MaterialX's normal,
+  (-k * scale / 16, 0, 1) normalised, over all 7921 interior pixels of a
+  square; and the quad derivatives of a field linear in the pixel are its
+  gradient for every thread of a 161 x 99 dispatch.
+
+### Not done, not verified
+
+- **Storm as an oracle for materials is not possible on this Mac.** Storm's
+  own MaterialX shaders fail to compile in this build (undeclared `u_env*`
+  in the generated MSL, with a lighting state and a dome light present), so
+  the MaterialX TestSuite comparison is written but hidden
+  (`[.][usd][gpu][oracle][storm-materialx]`).
+- **Compiling is synchronous.** A material compiles when the render thread
+  commits it, which stalls the first frame that shows it; the plan's
+  placeholder and background compile are not done.
+- **Transparency is not blended.** An opacity below 1 without a threshold
+  weights the sample's colour but does not let what is behind it through:
+  that is the path tracer's, M6.
+- **Nodes whose genglsl uses a screen derivative do not compile** unless
+  they have a genslang implementation here, which only `heighttonormal` has:
+  `aastep` and the hextile nodes would fail on `dFdx`.
+- **Displacement and volume terminals** are read and ignored.
+- **Layering** uses the top's throughput at the view direction; directional
+  albedo tables are not computed.
+- **No timings.** Materials have no `lrt bench` numbers yet.
