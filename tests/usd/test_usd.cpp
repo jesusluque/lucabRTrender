@@ -535,6 +535,26 @@ TEST_CASE("materials bound in USD shade a mesh: MaterialX with a texture, and Us
         auto image = (*renderer)->render("/Camera", 0.0, 160, 120);
         if (!image) FAIL(image.error().toString());
         const auto c = squareMismatches(*gpu, *image, textureColour);
+        // The same material seen by rays instead of the rasteriser: shading
+        // reads the visibility buffer, whichever route filled it.
+        if (gpu->device->caps().rayQuery && gpu->device->caps().accelerationStructure) {
+            REQUIRE((*renderer)->setMeshVisibility("rays"));
+            auto traced = (*renderer)->render("/Camera", 0.0, 160, 120);
+            REQUIRE((*renderer)->setMeshVisibility("raster"));
+            if (!traced) FAIL(traced.error().toString());
+            gpu::BufferDesc desc;
+            desc.bytes = image->rgba.size() * sizeof(float);
+            desc.elementBytes = 16;
+            auto a = gpu::Buffer::create(*gpu->device, desc, image->rgba.data());
+            auto b = gpu::Buffer::create(*gpu->device, desc, traced->rgba.data());
+            REQUIRE(a);
+            REQUIRE(b);
+            auto diff = render::compareImages(*gpu->library, *a, *b, 160, 120);
+            REQUIRE(diff);
+            std::printf("  raster against rays, textured material: p99 %u, max %u, %llu pixels beyond 2\n", diff->p99,
+                        diff->max, static_cast<unsigned long long>(diff->over2));
+            CHECK(diff->max == 0);
+        }
         const float* centre = image->rgba.data() + (60 * 160 + 80) * 4;
         std::printf("  MaterialX image material: %u covered, %u coverage and %u colour mismatches; centre %.4f %.4f "
                     "%.4f (texture %.4f %.4f %.4f)\n",

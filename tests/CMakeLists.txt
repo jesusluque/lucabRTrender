@@ -80,10 +80,11 @@ set_target_properties(lrt_usd_tests PROPERTIES CXX_VISIBILITY_PRESET default VIS
 # single-sampled (OpenUSD reads the setting as its libraries load).
 lrt_test(lrt_storm_oracle_tests
     SOURCES usd/test_storm_oracle.cpp
-    LIBS lrt::usd hgi
+    LIBS lrt::usd hgi glf MaterialXCore MaterialXFormat
     ENVIRONMENT_MODIFICATION "HDX_MSAA_SAMPLE_COUNT=set:1")
 add_dependencies(lrt_storm_oracle_tests hdLrt)
-target_compile_definitions(lrt_storm_oracle_tests PRIVATE LRT_HYDRA_PLUGIN_DIR="${LRT_HYDRA_PLUGIN_DIR}")
+target_compile_definitions(lrt_storm_oracle_tests PRIVATE LRT_HYDRA_PLUGIN_DIR="${LRT_HYDRA_PLUGIN_DIR}"
+                           LRT_USD_ROOT="${LRT_USD_ROOT}")
 target_compile_options(lrt_storm_oracle_tests PRIVATE -Wno-old-style-cast -Wno-shadow -Wno-deprecated-declarations
                        -Wno-double-promotion -Wno-cast-align)
 set_target_properties(lrt_storm_oracle_tests PROPERTIES CXX_VISIBILITY_PRESET default VISIBILITY_INLINES_HIDDEN OFF
