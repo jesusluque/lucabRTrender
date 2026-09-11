@@ -7,11 +7,16 @@
 #include <catch2/catch_approx.hpp>
 
 #include <cmath>
+#include <cstring>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <limits>
 #include <vector>
+
+#ifdef LRT_TEST_SPZ
+#include <zlib.h>
+#endif
 
 #include "lrt/io/Readers.h"
 #include "lrt/scene/GpuClouds.h"
@@ -186,6 +191,127 @@ TEST_CASE("a .splat file decodes byte-encoded opacity, colour and rotation", "[s
     CHECK(v[11] == Approx(1.0).margin(1e-3));
     CHECK(v[13] == Approx(0.2).margin(1e-3));
 }
+
+#ifdef LRT_TEST_SPZ
+namespace {
+
+/// A legacy SPZ (v2/v3): a 16-byte header and the attribute streams, gzipped
+/// together -- written here byte by byte, so the test knows every value.
+void writeSpz(const fs::path& path, uint32_t version, uint32_t points, uint8_t shDegree,
+              uint8_t fractionalBits, const std::vector<uint8_t>& streams) {
+    std::vector<uint8_t> bytes(16, 0);
+    const uint32_t magic = 0x5053474e;
+    std::memcpy(bytes.data(), &magic, 4);
+    std::memcpy(bytes.data() + 4, &version, 4);
+    std::memcpy(bytes.data() + 8, &points, 4);
+    bytes[12] = shDegree;
+    bytes[13] = fractionalBits;
+    bytes.insert(bytes.end(), streams.begin(), streams.end());
+    gzFile out = gzopen(path.string().c_str(), "wb");
+    REQUIRE(out != nullptr);
+    REQUIRE(gzwrite(out, bytes.data(), static_cast<unsigned>(bytes.size())) == static_cast<int>(bytes.size()));
+    gzclose(out);
+}
+
+void appendInt24(std::vector<uint8_t>& out, int32_t v) {
+    const auto u = static_cast<uint32_t>(v);
+    out.push_back(static_cast<uint8_t>(u & 0xFF));
+    out.push_back(static_cast<uint8_t>((u >> 8) & 0xFF));
+    out.push_back(static_cast<uint8_t>((u >> 16) & 0xFF));
+}
+
+}   // namespace
+
+TEST_CASE("an SPZ file dequantises on the GPU and turns right-up-back into the PLY's axes",
+          "[scene][io][gpu]") {
+    LRT_REQUIRE_GPU(gpu);
+    auto loader = scene::CloudLoader::create(*gpu->library);
+    REQUIRE(loader);
+
+    SECTION("version 3: smallest-three rotation, degree-1 harmonics") {
+        // Two points; the second is transparent (alpha byte 0) and dropped.
+        std::vector<uint8_t> s;
+        appendInt24(s, 4096); appendInt24(s, 8192); appendInt24(s, -2048);   // (1, 2, -0.5) at 12 bits
+        appendInt24(s, 0); appendInt24(s, 0); appendInt24(s, 0);
+        s.push_back(191); s.push_back(0);                                  // alphas
+        s.insert(s.end(), {255, 128, 0, 128, 128, 128});                   // colours
+        s.insert(s.end(), {160, 176, 144, 160, 160, 160});                 // log scales 0, 1, -1
+        // Largest component w (index 3), y = +1/sqrt2, x = z = 0.
+        const uint32_t comp = (3u << 30) | (511u << 10);
+        for (int k = 0; k < 2; ++k) {
+            for (int b = 0; b < 4; ++b) {
+                s.push_back(static_cast<uint8_t>((comp >> (8 * b)) & 0xFF));
+            }
+        }
+        // Harmonics, rgb per basis: basis 0 (y) +0.5, basis 1 (z) -0.5, basis 2 (x) mixed.
+        const std::vector<uint8_t> sh{192, 192, 192, 64, 64, 64, 192, 64, 128};
+        s.insert(s.end(), sh.begin(), sh.end());
+        s.insert(s.end(), sh.begin(), sh.end());
+        const fs::path path = scratchFile("decode-v3.spz");
+        writeSpz(path, 3, 2, 1, 12, s);
+
+        auto raw = io::readSplats(path);
+        if (!raw) {
+            FAIL(raw.error().toString());
+        }
+        auto splats = loader->upload(*raw, 3);
+        REQUIRE(splats);
+        REQUIRE(splats->count == 1);
+        CHECK(splats->degree() == 1);
+        const auto v = inspect(*gpu, *splats, 0);
+        // Right-up-back (1, 2, -0.5) is right-down-front (1, -2, 0.5).
+        CHECK(v[0] == 1.0F);
+        CHECK(v[1] == -2.0F);
+        CHECK(v[2] == 0.5F);
+        CHECK(v[3] == Approx(191.0 / 255.0).margin(1e-6));
+        CHECK(v[4] == Approx(1.0).epsilon(2e-3));
+        CHECK(v[5] == Approx(std::exp(1.0)).epsilon(2e-3));
+        CHECK(v[6] == Approx(std::exp(-1.0)).epsilon(2e-3));
+        // A quarter turn about y becomes one about -y: y and w of opposite
+        // sign (the packing may negate the whole quaternion).
+        CHECK(std::abs(v[8]) == Approx(0.70710678).margin(3e-3));
+        CHECK(std::abs(v[10]) == Approx(0.70710678).margin(3e-3));
+        CHECK(v[8] * v[10] < 0.0F);
+        CHECK(std::abs(v[7]) < 3e-3F);
+        CHECK(std::abs(v[9]) < 3e-3F);
+        // Colour through SPZ's DC scale (0.15), then 0.5 + SH0 * dc.
+        const auto base = [](double byte) { return 0.5 + 0.28209479 * ((byte / 255.0 - 0.5) / 0.15); };
+        CHECK(v[11] == Approx(base(255)).margin(1e-3));
+        CHECK(v[12] == Approx(base(128)).margin(1e-3));
+        CHECK(v[13] == Approx(base(0)).margin(1e-3));
+        // Basis 0 is odd in y and basis 1 in z: both change sign.
+        CHECK(v[14] == Approx(-0.5).margin(1e-3));
+        CHECK(v[15] == Approx(-0.5).margin(1e-3));
+        CHECK(v[17] == Approx(0.5).margin(1e-3));
+        CHECK(v[19] == Approx(0.5).margin(1e-3));
+    }
+
+    SECTION("version 2: first-three rotation, no harmonics") {
+        std::vector<uint8_t> s;
+        appendInt24(s, -256); appendInt24(s, 256); appendInt24(s, 512);   // (-1, 1, 2) at 8 bits
+        s.push_back(255);
+        s.insert(s.end(), {128, 128, 128});
+        s.insert(s.end(), {160, 160, 160});
+        s.insert(s.end(), {128, 128, 255});   // x, y ~ 0, z = 1: a half turn about z
+        const fs::path path = scratchFile("decode-v2.spz");
+        writeSpz(path, 2, 1, 0, 8, s);
+        auto raw = io::readSplats(path);
+        if (!raw) {
+            FAIL(raw.error().toString());
+        }
+        auto splats = loader->upload(*raw, 3);
+        REQUIRE(splats);
+        REQUIRE(splats->count == 1);
+        CHECK(splats->degree() == 0);
+        const auto v = inspect(*gpu, *splats, 0);
+        CHECK(v[0] == -1.0F);
+        CHECK(v[1] == -1.0F);
+        CHECK(v[2] == -2.0F);
+        CHECK(v[3] == Approx(1.0).margin(1e-6));
+        CHECK(std::abs(v[9]) == Approx(1.0).margin(1e-2));
+    }
+}
+#endif
 
 TEST_CASE("point files of every kind load, with 8-bit colour linearised on the GPU",
           "[scene][io][gpu]") {

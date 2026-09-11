@@ -1,6 +1,8 @@
 // Copyright (c) 2026 lucabRTrender contributors.
 #include "lrt/usd/Export.h"
 
+#include "lrt/scene/DecodeParams.h"
+
 #include <algorithm>
 #include <cmath>
 
@@ -81,22 +83,7 @@ Result<void> writeParticleFieldStage(gpu::ShaderLibrary& library, const io::RawS
             cursor["rotation"].setBinding(rotation->rhi());
             cursor["scaleValid"].setBinding(scaleValid->rhi());
             cursor["coefficients"].setBinding(coeff->rhi());
-            rhi::ShaderCursor p = cursor["params"];
-            p["count"].setData(n);
-            p["stride"].setData(e.floatsPerRecord);
-            p["keepPerColour"].setData(keep);
-            p["x"].setData(e.x); p["y"].setData(e.y); p["z"].setData(e.z);
-            p["opacity"].setData(e.opacity);
-            p["scale0"].setData(e.scale0); p["scale1"].setData(e.scale1); p["scale2"].setData(e.scale2);
-            p["rotW"].setData(e.rotW); p["rotX"].setData(e.rotX); p["rotY"].setData(e.rotY); p["rotZ"].setData(e.rotZ);
-            p["dc0"].setData(e.dc0); p["dc1"].setData(e.dc1); p["dc2"].setData(e.dc2);
-            p["restBase"].setData(e.restBase);
-            p["filePerColour"].setData(e.restPerColour);
-            p["restColourOuter"].setData(e.restColourOuter);
-            p["opacityMode"].setData(static_cast<uint32_t>(e.opacity_));
-            p["scaleMode"].setData(static_cast<uint32_t>(e.scale_));
-            p["colourMode"].setData(static_cast<uint32_t>(e.colour));
-            p["rotationMode"].setData(static_cast<uint32_t>(e.rotation));
+            scene::setDecodeParams(cursor, e, n, 0, keep, 1);
         });
         LRT_TRY(batch.submit(true));
         auto po = posOpacity->readAll<float>(device);

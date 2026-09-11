@@ -23,10 +23,20 @@ lrt_test(lrt_gpu_tests
 lrt_test(lrt_scene_tests
     SOURCES scene/test_loading.cpp
     LIBS lrt::scene)
+if(LRT_HAVE_SPZ)
+    # The SPZ test writes its fixtures with zlib.
+    target_compile_definitions(lrt_scene_tests PRIVATE LRT_TEST_SPZ=1)
+    target_link_libraries(lrt_scene_tests PRIVATE $<IF:$<BOOL:${APPLE}>,z,ZLIB::ZLIB>)
+endif()
 
 lrt_test(lrt_render_tests
     SOURCES render/test_splat_render.cpp render/test_points.cpp render/test_ray_tracing.cpp
+            $<$<BOOL:${LRT_HAVE_SPZ}>:render/test_spz.cpp>
     LIBS lrt::render lrt::io)
+if(LRT_HAVE_SPZ)
+    # Niantic's packer writes the fixture the SPZ reader is checked against.
+    target_link_libraries(lrt_render_tests PRIVATE lrt_spz)
+endif()
 
 lrt_test(lrt_usd_tests
     SOURCES usd/test_usd.cpp

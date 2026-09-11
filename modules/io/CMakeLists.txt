@@ -10,3 +10,7 @@ lrt_add_module(io
     PRIVATE_LIBS
         TBB::tbb
         lrt_tinyexr)
+if(LRT_HAVE_SPZ)
+    target_link_libraries(lrt_io PRIVATE lrt_spz)
+    target_compile_definitions(lrt_io PRIVATE LRT_HAVE_SPZ=1)
+endif()

@@ -1,5 +1,6 @@
 // Copyright (c) 2026 lucabRTrender contributors.
 #include "lrt/scene/GpuClouds.h"
+#include "lrt/scene/DecodeParams.h"
 
 #include <algorithm>
 
@@ -22,7 +23,8 @@ Result<gpu::Buffer> deviceBuffer(gpu::Device& device, uint64_t count, uint32_t e
     return gpu::Buffer::create(device, desc, data);
 }
 
-/// Sets DecodeParams (shaders/lrt/scene/splat_encoding.slang) by name.
+}   // namespace
+
 void setDecodeParams(rhi::ShaderCursor cursor, const io::SplatEncoding& e, uint32_t count,
                      uint32_t base, uint32_t keepPerColour, uint32_t shWords) {
     rhi::ShaderCursor p = cursor["params"];
@@ -51,10 +53,12 @@ void setDecodeParams(rhi::ShaderCursor cursor, const io::SplatEncoding& e, uint3
     p["scaleMode"].setData(static_cast<uint32_t>(e.scale_));
     p["colourMode"].setData(static_cast<uint32_t>(e.colour));
     p["rotationMode"].setData(static_cast<uint32_t>(e.rotation));
+    p["restMode"].setData(static_cast<uint32_t>(e.rest));
+    p["flipYZ"].setData(uint32_t{e.flipYZ ? 1u : 0u});
+    p["positionScale"].setData(e.positionScale);
     p["shWords"].setData(shWords);
 }
 
-}   // namespace
 
 Result<CloudLoader> CloudLoader::create(gpu::ShaderLibrary& library) {
     CloudLoader loader;

@@ -23,17 +23,13 @@ void splatExport(uint3 tid: SV_DispatchThreadID) {
         return;
     }
     const uint s = params.stride;
-    const float3 p = float3(fieldOf(raw, i, s, params.x), fieldOf(raw, i, s, params.y),
-                            fieldOf(raw, i, s, params.z));
+    const float3 p = decodePosition(raw, i, params);
     const float a = decodeOpacity(fieldOf(raw, i, s, params.opacity), params.opacityMode);
     const float3 ls = float3(decodeLogScale(fieldOf(raw, i, s, params.scale0), params.scaleMode),
                              decodeLogScale(fieldOf(raw, i, s, params.scale1), params.scaleMode),
                              decodeLogScale(fieldOf(raw, i, s, params.scale2), params.scaleMode));
     const bool valid = all(isfinite(p)) && all(isfinite(ls)) && all(abs(ls) < 60.0) && a >= 1.0 / 255.0;
-    float4 q = float4(decodeRotation(fieldOf(raw, i, s, params.rotX), params.rotationMode),
-                      decodeRotation(fieldOf(raw, i, s, params.rotY), params.rotationMode),
-                      decodeRotation(fieldOf(raw, i, s, params.rotZ), params.rotationMode),
-                      decodeRotation(fieldOf(raw, i, s, params.rotW), params.rotationMode));
+    float4 q = decodeQuaternion(raw, i, params);
     const float qLength = length(q);
     q = qLength > 1e-8 ? q / qLength : float4(0, 0, 0, 1);
 
@@ -48,6 +44,8 @@ void splatExport(uint3 tid: SV_DispatchThreadID) {
         dc = (dc - 0.5) / kSH0;
     } else if (params.colourMode == 2) {
         dc = (dc / 255.0 - 0.5) / kSH0;
+    } else if (params.colourMode == 3) {
+        dc = (dc / 255.0 - 0.5) / 0.15;   // SPZ's DC scale
     }
     coefficients[row] = float4(dc, 0.0);
     for (uint basis = 0; basis < params.keepPerColour; ++basis) {
@@ -56,7 +54,8 @@ void splatExport(uint3 tid: SV_DispatchThreadID) {
             const uint field = params.restColourOuter != 0
                                    ? params.restBase + colour * params.filePerColour + basis
                                    : params.restBase + basis * 3 + colour;
-            c[colour] = fieldOf(raw, i, s, field);
+            c[colour] = decodeRest(fieldOf(raw, i, s, field), params.restMode) *
+                        (params.flipYZ != 0 ? restFlipSign(basis) : 1.0);
         }
         coefficients[row + 1 + basis] = float4(c, 0.0);
     }

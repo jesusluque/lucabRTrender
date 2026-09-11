@@ -150,3 +150,54 @@ or in the engine:
 - Vulkan and CUDA runs of either route. These need the Linux host.
 - Rays that are not primary rays: shadows and reflections. The integrator
   takes any `RayDesc`, but nothing traces secondary rays yet.
+
+## SPZ
+
+`io::readSpz`, `third_party/spz`, `shaders/lrt/scene/splat_encoding.slang`.
+
+### Who does what
+
+Niantic's reference reader (MIT, vendored as openFXplayer vendors it) only
+decompresses. Version 2 and 3 files are gzip; version 4 is zstd.
+
+The CPU arranges the quantised bytes into float records:
+
+- A 24-bit fixed-point position is parsed into its integer.
+- A smallest-three quaternion is split into two 16-bit halves, because a
+  float holds 16 bits exactly and not 32.
+
+The GPU decode does the rest:
+
+- the fixed-point scale;
+- `byte / 16 - 10` log scales;
+- the DC term at SPZ's 0.15 scale;
+- both quaternion packings;
+- `(byte - 128) / 128` harmonics;
+- the turn from SPZ's right-up-back to the right-down-front a 3DGS PLY is in:
+  y and z of positions and rotations negate, and each harmonic basis takes
+  the sign of its parity in y and z.
+
+### How it is checked
+
+Two tests check it:
+
+- **Hand-written files** with exact decoded values: version 3 with degree-1
+  harmonics, and version 2.
+- **Niantic's packer against the PLY it packed.** A degree-3 cloud goes
+  through Niantic's packer (versions 3 and 4) and is rendered against the
+  same cloud read as a PLY.
+
+Results of the second test, p99 in 8-bit sRGB code values:
+
+| Harmonics rendered | p99 | Same comparison with bands 2 and 3 signs wrong |
+|---|---|---|
+| None | 3 | |
+| Degree 1 (5-bit) | 4 | |
+| Degree 2 (4-bit) | 10 | 136 |
+| Degree 3 (4-bit) | 13 | 234 |
+
+The difference that remains is quantisation. Sign errors are ruled out: the
+deliberate control is an order of magnitude worse.
+
+Degree-4 files load with the fourth band dropped, because the engine
+evaluates up to degree 3.

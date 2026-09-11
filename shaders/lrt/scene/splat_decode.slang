@@ -25,16 +25,11 @@ void splatDecode(uint3 tid: SV_DispatchThreadID) {
     const uint j = params.base + dest[i];
 
     const float a = decodeOpacity(fieldOf(raw, i, s, params.opacity), params.opacityMode);
-    positions[j] = float4(fieldOf(raw, i, s, params.x), fieldOf(raw, i, s, params.y),
-                          fieldOf(raw, i, s, params.z), saturate(a));
+    positions[j] = float4(decodePosition(raw, i, params), saturate(a));
 
-    // Stored as (w, x, y, z); packed as (x, y, z, w). Normalised on encode:
-    // a trainer never constrained it, and an unnormalised quaternion scales
-    // as well as rotates.
-    const float4 q = float4(decodeRotation(fieldOf(raw, i, s, params.rotX), params.rotationMode),
-                            decodeRotation(fieldOf(raw, i, s, params.rotY), params.rotationMode),
-                            decodeRotation(fieldOf(raw, i, s, params.rotZ), params.rotationMode),
-                            decodeRotation(fieldOf(raw, i, s, params.rotW), params.rotationMode));
+    // Packed as (x, y, z, w). Normalised on encode: a trainer never
+    // constrained it, and an unnormalised quaternion scales as well as rotates.
+    const float4 q = decodeQuaternion(raw, i, params);
     const float qLength = length(q);
     const uint rotation = encodeQuaternion(qLength > 1e-8 ? q : float4(0, 0, 0, 1));
 
@@ -65,7 +60,11 @@ void splatDecode(uint3 tid: SV_DispatchThreadID) {
             const uint field = params.restColourOuter != 0
                                    ? params.restBase + colour * params.filePerColour + basis
                                    : params.restBase + basis * 3 + colour;
-            const uint h = f32tof16(halfSafe(fieldOf(raw, i, s, field))) & 0xFFFFu;
+            float value = decodeRest(fieldOf(raw, i, s, field), params.restMode);
+            if (params.flipYZ != 0) {
+                value *= restFlipSign(basis);
+            }
+            const uint h = f32tof16(halfSafe(value)) & 0xFFFFu;
             word |= h << (filled * 16);
             filled += 1;
             if (filled == 2) {

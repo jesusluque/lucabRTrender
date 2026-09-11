@@ -98,6 +98,7 @@ endif()
 
 # --- the engine -----------------------------------------------------------------
 
+add_subdirectory(third_party/spz)
 add_subdirectory(modules)
 add_subdirectory(plugins)
 add_subdirectory(apps)

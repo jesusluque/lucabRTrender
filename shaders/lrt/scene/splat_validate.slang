@@ -19,8 +19,7 @@ void splatValidate(uint3 tid: SV_DispatchThreadID) {
         return;
     }
     const uint s = params.stride;
-    const float3 p = float3(fieldOf(raw, i, s, params.x), fieldOf(raw, i, s, params.y),
-                            fieldOf(raw, i, s, params.z));
+    const float3 p = decodePosition(raw, i, params);
     const float a = decodeOpacity(fieldOf(raw, i, s, params.opacity), params.opacityMode);
     const float3 ls = float3(decodeLogScale(fieldOf(raw, i, s, params.scale0), params.scaleMode),
                              decodeLogScale(fieldOf(raw, i, s, params.scale1), params.scaleMode),
