@@ -107,7 +107,8 @@ void shadeMaterials(uint3 group: SV_GroupID, uint index: SV_GroupIndex) {
             const bool shadow = (light.flags & kLightShadow) != 0;
             float3 sum = float3(0.0);
             for (uint i = 0; i < samples; ++i) {
-                const LightSample ls = sampleLight(light, inputs.positionWorld, sampleAt(tid, k, i));
+                const LightSample ls =
+                    sampleLight(light, inputs.positionWorld, inputs.normalWorld, sampleAt(tid, k, i));
                 if (!ls.valid) {
                     continue;
                 }

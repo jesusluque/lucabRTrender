@@ -776,6 +776,29 @@ Result<void> Engine::render(const render::Projection& projection, const render::
             if (!made) return std::move(made).error();
             lightTable_.emplace(std::move(*made));
         }
+        // A dome's image goes through the same texture table the materials
+        // sample, so it is requested here and committed before the frame's
+        // records are uploaded.
+        if (!textures_) {
+            auto made = material::TextureStore::create(*library_);
+            if (!made) return std::move(made).error();
+            textures_ = std::move(*made);
+        }
+        bool domeTextures = false;
+        for (light::Light& lamp : lamps) {
+            if (lamp.texture.empty()) {
+                continue;
+            }
+            lamp.textureId = textures_->request(lamp.texture, material::ColourSpace::Auto);
+            // Lat-long: around in u, clamped at the poles.
+            lamp.sampler = textures_->sampler(material::Wrap::Repeat, material::Wrap::Clamp);
+            domeTextures = true;
+        }
+        if (domeTextures) {
+            if (auto loaded = textures_->commit(); !loaded) {
+                return std::move(loaded).error();
+            }
+        }
         LRT_TRY(lightTable_->set(lamps));
         rhi::IAccelerationStructure* shadows = nullptr;
         if (lightTable_->anyShadow() && caps.rayQuery && caps.accelerationStructure) {

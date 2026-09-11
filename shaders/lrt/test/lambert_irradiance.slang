@@ -14,6 +14,7 @@ static const uint kDisk    = 1;
 static const uint kRect    = 2;
 static const uint kDistant = 3;
 static const uint kPoint   = 4;
+static const uint kDome    = 5;
 
 struct IrradianceParams {
     uint   kind;
@@ -114,7 +115,11 @@ void lambertIrradiance(uint3 tid: SV_DispatchThreadID) {
                 }
             }
             float factor = 0.0;
-            if (plane.kind == kDistant) {
+            if (plane.kind == kDome) {
+                // A hemisphere of it, unoccluded: the cosine integrates to pi
+                // whatever way the surface faces.
+                factor = 3.14159265358979;
+            } else if (plane.kind == kDistant) {
                 // A disc of angular diameter sizeX around the light's axis:
                 // its solid angle times the cosine to it.
                 const float3 towards = normalize(plane.axisY.xyz);
