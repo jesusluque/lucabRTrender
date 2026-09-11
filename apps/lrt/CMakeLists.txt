@@ -3,8 +3,9 @@ add_executable(lrt
     src/CmdInfo.cpp
     src/CmdRender.cpp
     src/CmdStage.cpp
-    src/CmdAofx.cpp)
-target_link_libraries(lrt PRIVATE lrt::usd lrt::lod lrt::aofx_host CLI11::CLI11)
+    src/CmdAofx.cpp
+    src/CmdLive.cpp)
+target_link_libraries(lrt PRIVATE lrt::usd lrt::lod lrt::sched lrt::aofx_host CLI11::CLI11)
 # Bundles built in this tree are found without a --path.
 target_compile_definitions(lrt PRIVATE LRT_AOFX_BUNDLE_DIR="${AOFX_BUNDLE_DIR}")
 add_dependencies(lrt lrt_aofx_invert)

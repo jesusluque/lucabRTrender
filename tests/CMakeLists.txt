@@ -67,3 +67,7 @@ target_compile_definitions(lrt_aofx_tests PRIVATE
     LRT_AOFX_TEST_BUNDLES="${LRT_AOFX_TEST_BUNDLES}"
     LRT_AOFX_TEST_RUN_BUNDLES="${LRT_AOFX_TEST_RUN_BUNDLES}"
     LRT_AOFX_BUNDLES="${AOFX_BUNDLE_DIR}")
+
+lrt_test(lrt_sched_tests
+    SOURCES sched/test_clock.cpp
+    LIBS lrt::sched lrt::io)

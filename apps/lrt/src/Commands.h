@@ -13,5 +13,6 @@ void addBench(CLI::App& app);
 void addConvert(CLI::App& app);
 void addStage(CLI::App& app);
 void addAofx(CLI::App& app);
+void addLive(CLI::App& app);
 
 }   // namespace lrt::cli

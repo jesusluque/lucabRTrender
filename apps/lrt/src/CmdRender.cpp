@@ -156,7 +156,7 @@ int run(const RenderOptions& options, bool bench) {
     }
     std::vector<render::SplatInstance> instances;
     for (const auto& cloud : clouds) {
-        instances.push_back({cloud.get(), model});
+        instances.push_back({cloud.get(), model, {}});
     }
     std::vector<render::PointInstance> pointInstances;
     for (const auto& cloud : pointClouds) {
@@ -300,14 +300,14 @@ int run(const RenderOptions& options, bool bench) {
         std::printf("levels of detail built in %.1f ms\n",
                     std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count());
         for (size_t k = 0; k < lodClouds.size(); ++k) {
-            lodInstances.push_back({&lodClouds[k], model});
+            lodInstances.push_back({&lodClouds[k], model, {}, std::nullopt});
         }
         for (const auto& cloud : lrtcClouds) {
-            lodInstances.push_back({cloud.get(), model, {}});
+            lodInstances.push_back({cloud.get(), model, {}, std::nullopt});
         }
         poolOf.assign(lodInstances.size(), nullptr);
         for (const auto& pool : pools) {
-            lodInstances.push_back({&pool->cloud(), model, {}});
+            lodInstances.push_back({&pool->cloud(), model, {}, std::nullopt});
             poolOf.push_back(pool.get());
         }
     }
@@ -376,8 +376,8 @@ int run(const RenderOptions& options, bool bench) {
             }
         }
         if (rasterPoints) {
-            if (auto drawn = pointRaster->render(camera, pointInstances, settings, pointLayer); !drawn) {
-                std::fprintf(stderr, "%s\n", drawn.error().toString().c_str());
+            if (auto layered = pointRaster->render(camera, pointInstances, settings, pointLayer); !layered) {
+                std::fprintf(stderr, "%s\n", layered.error().toString().c_str());
                 return 1;
             }
         }

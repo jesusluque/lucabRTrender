@@ -447,3 +447,73 @@ equal to 1e-4.
   once for the gather.
 - **LOD with the ray tracer.** A cut that changes every frame would rebuild
   the structures every frame.
+
+## Time: FrameClock and `lrt live`
+
+`modules/sched` (genlock underneath) and `apps/lrt/src/CmdLive.cpp`.
+
+### What it does
+
+- **The clock.** `FrameClock` runs free on this machine's clock, or follows a
+  PTP master as a genlock `PtpClock` slave. Frame N of a rate begins at the
+  instant ST 2059-1 gives it, computed from the TAI epoch, never summed. Two
+  nodes following one master therefore agree on it without talking to each
+  other.
+- **Timecode.**
+  - It is the UTC time of day, counted from the first frame that begins at or
+    after midnight.
+  - At 30000/1001 and 60000/1001 it is drop-frame: SMPTE 12M's labels ;00–;01
+    (;00–;03 at 59.94) are skipped every minute not a multiple of ten. Other
+    rates, 24000/1001 included, count non-drop.
+  - `framesFromTimecode` inverts the count, and a test checks the round trip.
+- **`lrt live stage.usd [--ptp host --port N] --rate R --frames N --at
+  HH:MM:SS:FF -o out.####.exr`.**
+  1. It waits for a lock.
+  2. It renders one warm-up frame, because the first render loads the stage
+     and compiles shaders.
+  3. It waits for each frame's instant, renders the stage at that frame's USD
+     time, and hands the EXR to a writer thread.
+  - **Missed frames.** Frames whose instant passes during a render are
+    skipped, not drawn late.
+  - **What each EXR carries.** `timeCode` (SMPTE 12M BCD, OpenEXR's type),
+    `framesPerSecond` (rational), `lrt:taiNs`, `lrt:frameIndex`,
+    `lrt:usdTime`, `lrt:wakeLateMs` and `lrt:clock`.
+- **`--at`.** It names the timecode at which `--start` plays. Without it,
+  each node counts USD time from when it happened to start, so two nodes
+  would draw different times for the same instant: correct frames, wrong
+  content. With the same `--at`, they draw the same time.
+
+### Waking on time
+
+`std::this_thread::sleep_for` on macOS overran by 7 ms on average and 10 ms at
+worst, measured, whatever the thread's QoS.
+
+- **macOS.** `platform::sleepPrecisely` gives the thread a time-constraint
+  (real-time) policy only while it sleeps. It must not keep it while it
+  renders, because a thread that overruns its computation budget is demoted.
+  The overrun drops to 36 µs at worst.
+- **Linux.** The thread's timer slack is set to 1 ns instead.
+- **The last 100 µs.** `FrameClock::waitFor` spends them yielding, and it
+  rereads the clock because a PTP correction may have moved it.
+
+### Measured (M5 Pro, loopback master `genlock-cli master --port 3190`)
+
+- **Tests.** Free run: the latest of 10 wakes came 9 µs after its alignment
+  point. Following the master: the clock reads 0.14–0.41 ms off it, the
+  software-timestamp error on a loaded machine.
+- **Two `lrt live` nodes on `train_7k` at 640x360 and 25 fps.**
+  - The nodes started seconds apart and shared one GPU and one `--at`.
+  - Both drew frames 44728571775 to 44728571799, from 16:07:14:00, at
+    identical USD times.
+  - 0 frames were skipped, the latest wake was 12 µs late, and renders took
+    17 ms.
+  - Writing EXRs inside the loop had cost 6 skipped frames in 15.
+
+### Not done
+
+- **Output.** It is EXR files only; nothing is sent to a video output or
+  over the network.
+- **Scanout.** Software cannot phase-lock a display (genlock's README says
+  why); an SDI card is what would.
+- **Linux PTP.** Untested here. Its kernel software timestamps should narrow
+  the error.

@@ -15,7 +15,15 @@
 
 #if defined(__APPLE__)
 #include <mach-o/dyld.h>
+#include <mach/mach.h>
+#include <mach/mach_time.h>
+#include <mach/thread_policy.h>
+#include <pthread.h>
+#elif defined(__linux__)
+#include <sys/prctl.h>
 #endif
+
+#include <thread>
 
 namespace lrt::platform {
 
@@ -70,6 +78,37 @@ MappedFile::~MappedFile() {
     if (data_ != nullptr) {
         ::munmap(data_, size_);
     }
+}
+
+void sleepPrecisely(std::chrono::nanoseconds duration) {
+    if (duration.count() <= 0) {
+        return;
+    }
+#if defined(__APPLE__)
+    const mach_port_t self = pthread_mach_thread_np(pthread_self());
+    static const double absPerNs = [] {
+        mach_timebase_info_data_t base{};
+        mach_timebase_info(&base);
+        return static_cast<double>(base.denom) / static_cast<double>(base.numer);
+    }();
+    thread_time_constraint_policy_data_t realtime{};
+    realtime.period = 0;
+    realtime.computation = static_cast<uint32_t>(1e6 * absPerNs);
+    realtime.constraint = static_cast<uint32_t>(2e6 * absPerNs);
+    realtime.preemptible = 1;
+    thread_policy_set(self, THREAD_TIME_CONSTRAINT_POLICY, reinterpret_cast<thread_policy_t>(&realtime),
+                      THREAD_TIME_CONSTRAINT_POLICY_COUNT);
+    std::this_thread::sleep_for(duration);
+    thread_standard_policy_data_t standard{};
+    thread_policy_set(self, THREAD_STANDARD_POLICY, reinterpret_cast<thread_policy_t>(&standard),
+                      THREAD_STANDARD_POLICY_COUNT);
+#elif defined(__linux__)
+    thread_local const bool slack = prctl(PR_SET_TIMERSLACK, 1UL, 0UL, 0UL, 0UL) == 0;
+    (void)slack;
+    std::this_thread::sleep_for(duration);
+#else
+    std::this_thread::sleep_for(duration);
+#endif
 }
 
 std::filesystem::path executableDir() {

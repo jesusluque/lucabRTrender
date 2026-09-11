@@ -78,6 +78,14 @@ std::vector<std::string> StageRenderer::cameras() const {
     return out;
 }
 
+double StageRenderer::timeCodesPerSecond() const {
+    return impl_->stage->GetTimeCodesPerSecond();
+}
+
+double StageRenderer::startTimeCode() const {
+    return impl_->stage->GetStartTimeCode();
+}
+
 Result<StageImage> StageRenderer::render(const std::string& camera, double time, uint32_t width,
                                          uint32_t height, const std::string& technique) {
     Impl& impl = *impl_;

@@ -24,6 +24,7 @@ int main(int argc, char** argv) {
     lrt::cli::addConvert(app);
     lrt::cli::addStage(app);
     lrt::cli::addAofx(app);
+    lrt::cli::addLive(app);
 
     CLI11_PARSE(app, argc, argv);
     return 0;

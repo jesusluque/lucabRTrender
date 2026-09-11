@@ -1,6 +1,7 @@
 // Copyright (c) 2026 lucabRTrender contributors.
 #include "lrt/io/Exr.h"
 
+#include <algorithm>
 #include <array>
 #include <cstdlib>
 #include <cstring>
@@ -12,8 +13,44 @@
 
 namespace lrt::io {
 
+namespace {
+
+void put(std::vector<uint8_t>& into, const void* data, size_t bytes) {
+    const auto* b = static_cast<const uint8_t*>(data);
+    into.insert(into.end(), b, b + bytes);
+}
+
+}   // namespace
+
+ExrAttribute ExrAttribute::timecode(std::string name, uint32_t timeAndFlags, uint32_t userData) {
+    ExrAttribute a{std::move(name), "timecode", {}};
+    put(a.value, &timeAndFlags, 4);
+    put(a.value, &userData, 4);
+    return a;
+}
+
+ExrAttribute ExrAttribute::rational(std::string name, int32_t numerator, uint32_t denominator) {
+    ExrAttribute a{std::move(name), "rational", {}};
+    put(a.value, &numerator, 4);
+    put(a.value, &denominator, 4);
+    return a;
+}
+
+ExrAttribute ExrAttribute::text(std::string name, const std::string& value) {
+    ExrAttribute a{std::move(name), "string", {}};
+    put(a.value, value.data(), value.size());
+    return a;
+}
+
+ExrAttribute ExrAttribute::float64(std::string name, double value) {
+    ExrAttribute a{std::move(name), "double", {}};
+    put(a.value, &value, 8);
+    return a;
+}
+
 Result<void> writeExr(const std::filesystem::path& path, uint32_t width, uint32_t height,
-                      std::span<const float> rgba, std::span<const float> depth, bool half) {
+                      std::span<const float> rgba, std::span<const float> depth, bool half,
+                      std::span<const ExrAttribute> attributes) {
     const size_t pixels = size_t{width} * height;
     if (rgba.size() < pixels * 4) {
         return Error(ErrorCode::InvalidArgument, "not enough pixels to write");
@@ -68,6 +105,16 @@ Result<void> writeExr(const std::filesystem::path& path, uint32_t width, uint32_
     header.pixel_types = pixelTypes.data();
     header.requested_pixel_types = requested.data();
     header.compression_type = TINYEXR_COMPRESSIONTYPE_ZIP;
+    std::vector<EXRAttribute> custom(attributes.size());
+    for (size_t k = 0; k < attributes.size(); ++k) {
+        std::strncpy(custom[k].name, attributes[k].name.c_str(), 255);
+        std::strncpy(custom[k].type, attributes[k].type.c_str(), 255);
+        // tinyexr only reads through the pointer while writing.
+        custom[k].value = const_cast<unsigned char*>(attributes[k].value.data());
+        custom[k].size = static_cast<int>(attributes[k].value.size());
+    }
+    header.num_custom_attributes = static_cast<int>(custom.size());
+    header.custom_attributes = custom.empty() ? nullptr : custom.data();
 
     const char* message = nullptr;
     const int status = SaveEXRImageToFile(&image, &header, path.string().c_str(), &message);
@@ -98,6 +145,22 @@ Result<ExrPixels> readExr(const std::filesystem::path& path) {
                     rgba + size_t{out.height - 1 - y} * out.width * 4, size_t{out.width} * 4 * sizeof(float));
     }
     std::free(rgba);
+
+    EXRVersion version;
+    EXRHeader header;
+    InitEXRHeader(&header);
+    if (ParseEXRVersionFromFile(&version, path.string().c_str()) == TINYEXR_SUCCESS &&
+        ParseEXRHeaderFromFile(&header, &version, path.string().c_str(), &message) == TINYEXR_SUCCESS) {
+        for (int k = 0; k < header.num_custom_attributes; ++k) {
+            const EXRAttribute& a = header.custom_attributes[k];
+            ExrAttribute attribute{a.name, a.type, {}};
+            put(attribute.value, a.value, static_cast<size_t>(std::max(a.size, 0)));
+            out.attributes.push_back(std::move(attribute));
+        }
+        FreeEXRHeader(&header);
+    } else if (message != nullptr) {
+        FreeEXRErrorMessage(message);
+    }
     return out;
 }
 

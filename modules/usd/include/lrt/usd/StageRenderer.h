@@ -36,6 +36,11 @@ public:
     /// Every camera prim on the stage.
     [[nodiscard]] std::vector<std::string> cameras() const;
 
+    /// The stage's timeCodesPerSecond and startTimeCode: how a frame on a
+    /// clock maps to a USD time.
+    [[nodiscard]] double timeCodesPerSecond() const;
+    [[nodiscard]] double startTimeCode() const;
+
 private:
     StageRenderer();
     struct Impl;
