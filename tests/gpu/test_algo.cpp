@@ -147,6 +147,60 @@ TEST_CASE("each dispatch in a batch gets its own parameters", "[gpu][algo][probe
     }
 }
 
+/// One pass over two pairs, with what the pass left between its stages: the
+/// digit counts, their totals and the cursors the scatter writes from. Eight
+/// key bits is one pass, so what `working` holds is that pass's own.
+TEST_CASE("one radix pass counts, totals and places its two pairs", "[gpu][algo][probe]") {
+    LRT_REQUIRE_GPU(gpu);
+    auto sort = gpu::RadixSort::create(*gpu->library);
+    if (!sort) FAIL(sort.error().toString());
+    static gpu::ComputeKernel kDump = test::kernel(*gpu, "lrt/test/sort_dump");
+    constexpr uint32_t kPairs = 2;
+    gpu::SortBuffers buffers = sortBuffers(*gpu->device, kPairs);
+    generate(*gpu, buffers, kPairs, 0, 8);
+    {
+        gpu::CommandBatch batch(*gpu->device);
+        REQUIRE(sort->sort(batch, buffers, kPairs, 8));
+        REQUIRE(batch.submit(true));
+    }
+    const gpu::RadixSort::Working working = sort->working();
+    REQUIRE(working.chunks == 1);
+    // The digits the two keys carry, and what each stage made of them.
+    std::array<uint32_t, kPairs * 3> pairs{};
+    {
+        gpu::Buffer out = test::uintBuffer(*gpu->device, kPairs * 3, "sort.dump");
+        gpu::CommandBatch batch(*gpu->device);
+        kDump.dispatch(batch, {kPairs, 1, 1}, [&](rhi::ShaderCursor cursor) {
+            cursor["keysLo"].setBinding(buffers.keysLo.rhi());
+            cursor["keysHi"].setBinding(buffers.keysHi.rhi());
+            cursor["values"].setBinding(buffers.values.rhi());
+            cursor["dump"].setBinding(out.rhi());
+            cursor["params"]["count"].setData(kPairs);
+        });
+        REQUIRE(batch.submit(true));
+        REQUIRE(out.read(*gpu->device, 0, sizeof(pairs), pairs.data()));
+    }
+    std::vector<uint32_t> histogram(256);
+    std::vector<uint32_t> totals(256);
+    std::vector<uint32_t> starts(256);
+    REQUIRE(working.histogram->read(*gpu->device, 0, histogram.size() * 4, histogram.data()));
+    REQUIRE(working.digitTotals->read(*gpu->device, 0, totals.size() * 4, totals.data()));
+    REQUIRE(working.chunkStarts->read(*gpu->device, 0, starts.size() * 4, starts.data()));
+    uint32_t counted = 0;
+    uint32_t totalled = 0;
+    uint32_t cursorsPastZero = 0;
+    for (uint32_t d = 0; d < 256; ++d) {
+        counted += histogram[d];
+        totalled += totals[d];
+        cursorsPastZero += starts[d] > 0 ? 1u : 0u;
+    }
+    std::printf("  sorted keys %u and %u; histogram counts %u, totals %u, cursors past zero %u\n", pairs[0],
+                pairs[3], counted, totalled, cursorsPastZero);
+    CHECK(counted == kPairs);     // the histogram saw both pairs
+    CHECK(totalled == kPairs);    // and the totals agree
+    CHECK(pairs[0] <= pairs[3]);  // and the pass placed them in order
+}
+
 TEST_CASE("two pairs sort into one order, and are the pairs that went in", "[gpu][algo][probe]") {
     LRT_REQUIRE_GPU(gpu);
     auto sort = gpu::RadixSort::create(*gpu->library);
