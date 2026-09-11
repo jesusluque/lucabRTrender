@@ -1243,6 +1243,15 @@ one at a time when one look at the emitted kernel would have said why.
   means something different on the two targets. The float and half formats go
   through the same kernel untouched, which is why the gpu texture tests, which
   build `RGBA32Float`, pass here while the material ones do not.
+
+  Measured, rather than read off the emitted code: a probe writes
+  `float4(1, 0, 64/255, 1)` through an `RWTexture2D<float4>` into one texel of
+  an `RGBA8Unorm` texture and reads that texel back, with no decoding,
+  sampling or mips in the way. Metal returns the colour written. CUDA returns
+  `(0.0, 0.0, 0.502, 0.247)` -- which is `00 00 80 3F`, the four bytes of
+  `1.0f`, sitting in the texel as bytes. The store wrote the float4's memory,
+  not its colour; the second, third and fourth components landed in the next
+  three texels along, which is also why each row runs four times past its end.
 - **gpu_host's `OutOfMemory` was never about memory.** A CUDA context is
   current per *thread*, and `CudaDevice::open` makes it current on the thread
   that creates the Context -- not on the worker `Context::run` spawns after
