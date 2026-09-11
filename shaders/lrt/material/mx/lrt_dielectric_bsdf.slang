@@ -1,7 +1,7 @@
 // Copyright (c) 2026 lucabRTrender contributors.
 //
 // <dielectric_bsdf>: the lobe, and genglsl's throughput for what lies beneath.
-#include "libraries/pbrlib/genglsl/lib/mx_closure_type.glsl"
+#include "pbrlib/genglsl/lib/mx_closure_type.glsl"
 
 void lrt_dielectric_bsdf(ClosureData closureData, float weight, float3 tint, float ior, float2 roughness,
                          bool retroreflective, float thinfilm_thickness, float thinfilm_ior, float3 N, float3 X,

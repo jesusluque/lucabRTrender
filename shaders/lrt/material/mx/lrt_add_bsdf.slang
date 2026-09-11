@@ -1,7 +1,7 @@
 // Copyright (c) 2026 lucabRTrender contributors.
 //
 // <add>
-#include "libraries/pbrlib/genglsl/lib/mx_closure_type.glsl"
+#include "pbrlib/genglsl/lib/mx_closure_type.glsl"
 
 void lrt_add_bsdf(ClosureData closureData, BSDF in1, BSDF in2, out BSDF result)
 {

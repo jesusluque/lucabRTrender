@@ -1,7 +1,7 @@
 // Copyright (c) 2026 lucabRTrender contributors.
 //
 // <subsurface_bsdf>: diffuse, until the path tracer walks inside (M6).
-#include "libraries/pbrlib/genglsl/lib/mx_closure_type.glsl"
+#include "pbrlib/genglsl/lib/mx_closure_type.glsl"
 
 void lrt_subsurface_bsdf(ClosureData closureData, float weight, float3 color, float3 radius, float anisotropy,
                          float3 N, inout BSDF bsdf)

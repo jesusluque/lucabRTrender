@@ -3,7 +3,7 @@
 // <layer> of a BSDF over a VDF: what the medium lets through scales the top's
 // lobes, as genglsl scales its response. Absorption along real paths waits
 // for the path tracer's media (M9).
-#include "libraries/pbrlib/genglsl/lib/mx_closure_type.glsl"
+#include "pbrlib/genglsl/lib/mx_closure_type.glsl"
 
 void lrt_layer_vdf(ClosureData closureData, BSDF top, VDF base, out BSDF result)
 {

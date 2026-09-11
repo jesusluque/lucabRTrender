@@ -36,6 +36,9 @@
 #include "lrt/world/GpuScene.h"
 #include "lrt/world/Instancing.h"
 #include "lrt/lod/Lrtc.h"
+#include "lrt/material/MaterialCompiler.h"
+#include "lrt/material/TextureStore.h"
+#include "lrt/technique/MaterialShading.h"
 #include "lrt/render/GaussianRayTracer.h"
 #include "lrt/render/PointRasterizer.h"
 #include "lrt/render/TileRasterizer.h"
@@ -82,6 +85,12 @@ struct MeshEntry {
     uint32_t                               primId = 0;
     pxr::TfToken                           renderTag;
     bool                                   visible = true;
+};
+
+struct MaterialEntry {
+    std::shared_ptr<void>                   document;   ///< MaterialX::DocumentPtr; null: nothing MaterialX reads
+    bool                                    pending = true;
+    std::optional<material::CompiledMaterial> compiled;
 };
 
 struct PointsEntry {
@@ -156,6 +165,10 @@ public:
                  std::optional<MeshArrays> arrays, const render::Mat4* transform, std::optional<bool> visible,
                  std::optional<MeshLook> look,
                  std::optional<std::vector<InstancerLink>> instancing = std::nullopt);
+    /// A material's network as a MaterialX document (null where hdMtlx could not
+    /// read it: its meshes show displayColor). Compiled at the next commit.
+    void setMaterial(const pxr::SdfPath& id, std::shared_ptr<void> mtlxDocument);
+    void removeMaterial(const pxr::SdfPath& id);
     void setInstancer(const pxr::SdfPath& id, const pxr::SdfPath& parent, InstancerArrays arrays);
     void removeInstancer(const pxr::SdfPath& id);
     void remove(const pxr::SdfPath& id);
@@ -222,7 +235,18 @@ private:
     std::optional<technique::VisibilityTrace>  visibilityTrace_;
     std::optional<world::BvhScene>             bvhScene_;
     std::optional<technique::VisibilityBvh>    visibilityBvh_;
-    std::optional<technique::HeadlightShading> headlight_;
+    std::optional<technique::MaterialShading> materialShading_;
+    std::map<pxr::SdfPath, MaterialEntry>     materials_;
+    bool                                      materialsChanged_ = true;
+    std::unique_ptr<material::MaterialCompiler> compiler_;
+    bool                                      compilerFailed_ = false;
+    std::unique_ptr<material::TextureStore>   textures_;
+    std::map<pxr::SdfPath, uint32_t>          materialRows_;     ///< into materialRecords_; absent: row 0, the fallback
+    std::vector<std::string>                  materialSlotNames_;   ///< the extra primvar slots the blob was written for
+    gpu::Buffer                               materialRecords_;
+    gpu::Buffer                               materialBlob_;
+    /// Row and blob for this frame's materials, primvar slots set on the scene.
+    [[nodiscard]] Result<void> prepareMaterials(const std::vector<std::string>& aovPrimvars);
     std::optional<gpu::ComputeKernel>          nearest_;
     technique::VisibilityTargets              visibility_;
     std::optional<technique::AovShading>      aovShading_;

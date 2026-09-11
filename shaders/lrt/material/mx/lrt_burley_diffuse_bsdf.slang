@@ -1,7 +1,7 @@
 // Copyright (c) 2026 lucabRTrender contributors.
 //
 // <burley_diffuse_bsdf>
-#include "libraries/pbrlib/genglsl/lib/mx_closure_type.glsl"
+#include "pbrlib/genglsl/lib/mx_closure_type.glsl"
 
 void lrt_burley_diffuse_bsdf(ClosureData closureData, float weight, float3 color, float roughness, float3 N,
                              inout BSDF bsdf)

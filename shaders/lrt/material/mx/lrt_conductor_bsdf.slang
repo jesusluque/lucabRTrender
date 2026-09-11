@@ -1,7 +1,7 @@
 // Copyright (c) 2026 lucabRTrender contributors.
 //
 // <conductor_bsdf>
-#include "libraries/pbrlib/genglsl/lib/mx_closure_type.glsl"
+#include "pbrlib/genglsl/lib/mx_closure_type.glsl"
 
 void lrt_conductor_bsdf(ClosureData closureData, float weight, float3 ior_n, float3 ior_k, float2 roughness,
                         bool retroreflective, float thinfilm_thickness, float thinfilm_ior, float3 N, float3 X,

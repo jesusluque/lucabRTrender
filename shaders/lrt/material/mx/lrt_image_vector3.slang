@@ -1,7 +1,7 @@
 // Copyright (c) 2026 lucabRTrender contributors.
 //
 // <image> (vector3): the texture table, or the default where the file or its tile is missing.
-#include "libraries/pbrlib/genglsl/lib/mx_closure_type.glsl"
+#include "pbrlib/genglsl/lib/mx_closure_type.glsl"
 
 void lrt_image_vector3(SamplerTexture2D tex_sampler, int layer, float3 defaultval, float2 texcoord, int uaddressmode,
                    int vaddressmode, int filtertype, int framerange, int frameoffset, int frameendaction,

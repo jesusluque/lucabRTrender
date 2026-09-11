@@ -1,7 +1,7 @@
 // Copyright (c) 2026 lucabRTrender contributors.
 //
 // <multiply> by a colour
-#include "libraries/pbrlib/genglsl/lib/mx_closure_type.glsl"
+#include "pbrlib/genglsl/lib/mx_closure_type.glsl"
 
 void lrt_multiply_bsdf_color3(ClosureData closureData, BSDF in1, float3 in2, out BSDF result)
 {

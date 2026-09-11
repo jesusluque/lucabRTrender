@@ -1,7 +1,7 @@
 // Copyright (c) 2026 lucabRTrender contributors.
 //
 // <generalized_schlick_bsdf>
-#include "libraries/pbrlib/genglsl/lib/mx_closure_type.glsl"
+#include "pbrlib/genglsl/lib/mx_closure_type.glsl"
 
 void lrt_generalized_schlick_bsdf(ClosureData closureData, float weight, float3 color0, float3 color82, float3 color90,
                                   float exponent, float2 roughness, bool retroreflective, float thinfilm_thickness,

@@ -371,11 +371,21 @@ private:
             if (type == mx::Type::FILENAME) {
                 MaterialSlot& slot = addSlot(MaterialSlot::Kind::Texture, variable, 2);
                 slot.name = port->getValue() ? port->getValue()->getValueString() : std::string();
-                const std::string& space = port->getColorSpace();
-                slot.space = space.empty() ? ColourSpace::Auto
-                             : space == "srgb_texture" ? ColourSpace::Srgb
-                                                       : ColourSpace::Raw;
                 const mx::ShaderNode* node = port->getNode();
+                // MaterialX reads a file in its colorspace, the document's
+                // (linear) unless it says srgb_texture; UsdUVTexture says
+                // sourceColorSpace instead: auto, raw or sRGB.
+                const std::string& space = port->getColorSpace();
+                const mx::ShaderInput* source = node != nullptr ? node->getInput("sourceColorSpace") : nullptr;
+                const std::string usd = source != nullptr && source->getValue() ? source->getValue()->getValueString()
+                                                                                : std::string();
+                if (space == "srgb_texture" || space == "g22_rec709" || usd == "sRGB") {
+                    slot.space = ColourSpace::Srgb;
+                } else if (space.empty() && source != nullptr && (usd.empty() || usd == "auto")) {
+                    slot.space = ColourSpace::Auto;
+                } else {
+                    slot.space = ColourSpace::Raw;
+                }
                 const auto wrap = [](int mode) {
                     // MaterialX address modes: 0 constant, 1 clamp, 2 periodic, 3 mirror.
                     return mode == 0 ? Wrap::Black : mode == 1 ? Wrap::Clamp : mode == 3 ? Wrap::Mirror : Wrap::Repeat;
@@ -463,21 +473,34 @@ MaterialCompiler::~MaterialCompiler() = default;
 
 Result<std::unique_ptr<MaterialCompiler>> MaterialCompiler::create(
     const std::vector<std::filesystem::path>& materialxRoots, const std::vector<std::filesystem::path>& shaderPaths) {
+    try {
+        mx::FileSearchPath libraryPaths;
+        std::vector<std::filesystem::path> searchPaths;
+        for (const auto& root : materialxRoots) {
+            libraryPaths.append(mx::FilePath(root.string()));
+            searchPaths.push_back(root);
+            searchPaths.push_back(root / "libraries");
+        }
+        mx::DocumentPtr standard = mx::createDocument();
+        mx::loadLibraries({"libraries"}, libraryPaths, standard);
+        return create(std::shared_ptr<void>(standard), searchPaths, shaderPaths);
+    } catch (const std::exception& e) {
+        return Error::make(ErrorCode::InternalError, "materials: MaterialX: {}", e.what());
+    }
+}
+
+Result<std::unique_ptr<MaterialCompiler>> MaterialCompiler::create(
+    const std::shared_ptr<void>& libraries, const std::vector<std::filesystem::path>& librarySearchPaths,
+    const std::vector<std::filesystem::path>& shaderPaths) {
     auto compiler = std::unique_ptr<MaterialCompiler>(new MaterialCompiler());
     compiler->impl_ = std::make_unique<Impl>();
     Impl& impl = *compiler->impl_;
     try {
-        mx::FileSearchPath libraryPaths;
-        for (const auto& root : materialxRoots) {
-            libraryPaths.append(mx::FilePath(root.string()));
-        }
-        impl.libraries = mx::createDocument();
-        mx::loadLibraries({"libraries"}, libraryPaths, impl.libraries);
-        if (impl.libraries->getNodeDefs().empty()) {
-            return Error(ErrorCode::NotFound, "materials: no MaterialX libraries under the given roots");
+        const mx::DocumentPtr standard = std::static_pointer_cast<mx::Document>(libraries);
+        if (!standard || standard->getNodeDefs().empty()) {
+            return Error(ErrorCode::NotFound, "materials: no MaterialX libraries");
         }
         // The engine's node implementations, found beside its shaders.
-        mx::DocumentPtr standard = impl.libraries;
         impl.libraries = mx::createDocument();
         impl.libraries->importLibrary(standard);
         impl.referenceLibraries = mx::createDocument();
@@ -502,7 +525,9 @@ Result<std::unique_ptr<MaterialCompiler>> MaterialCompiler::create(
             return Error(ErrorCode::NotFound,
                          "materials: lrt/material/mx/lrt_genslang_{images,closures}.mtlx are not in the shader paths");
         }
-        impl.sourcePaths.append(libraryPaths);
+        for (const auto& path : librarySearchPaths) {
+            impl.sourcePaths.append(mx::FilePath(path.string()));
+        }
         impl.generator = std::make_shared<LrtSlangShaderGenerator>(mx::TypeSystem::create(), ClosureVariant::Lobes);
         impl.generator->registerTypeDefs(impl.libraries);
         impl.reference =
@@ -536,7 +561,12 @@ Result<CompiledMaterial> MaterialCompiler::compileDocument(const std::shared_ptr
     const std::shared_ptr<LrtSlangShaderGenerator>& generator =
         variant == ClosureVariant::Lobes ? impl.generator : impl.reference;
     try {
-        const mx::DocumentPtr doc = std::static_pointer_cast<mx::Document>(document);
+        const mx::DocumentPtr given = std::static_pointer_cast<mx::Document>(document);
+        // A document built elsewhere (hdMtlx) knows the standard libraries but
+        // not the engine's implementations.
+        mx::DocumentPtr doc = mx::createDocument();
+        doc->copyContentFrom(given);
+        doc->importLibrary(variant == ClosureVariant::Lobes ? impl.libraries : impl.referenceLibraries);
         mx::TypedElementPtr renderable;
         if (!element.empty()) {
             renderable = doc->getDescendant(element) ? doc->getDescendant(element)->asA<mx::TypedElement>() : nullptr;

@@ -15,6 +15,7 @@
 #include <optional>
 
 #include <pxr/base/plug/registry.h>
+#include <pxr/imaging/hio/image.h>
 #include <pxr/imaging/hd/pluginRenderDelegateUniqueHandle.h>
 #include <pxr/imaging/hd/rendererPluginRegistry.h>
 #include <pxr/usd/usd/primDefinition.h>
@@ -401,6 +402,215 @@ TEST_CASE("a UsdGeomMesh draws through Hydra where, how deep and how lit it anal
     CHECK(c[0] == 0);
     CHECK(c[1] == 0);
     CHECK(depthError < 1e-3F);
+}
+
+namespace {
+
+/// A stage's /Camera image against the analytic headlit square at z = -5
+/// (visibility_check.slang's planeCheck): coverage, depth and colour mismatches.
+std::array<uint32_t, 3> squareMismatches(test::Gpu& gpu, const usd::StageImage& image, std::array<float, 3> colour) {
+    const uint32_t w = image.width;
+    const uint32_t h = image.height;
+    render::Camera camera;
+    camera.lens.focal = 35.0;
+    camera.lens.haperture = 24.576;
+    camera.lens.nearZ = 0.1;
+    camera.lens.farZ = 1000.0;
+    const render::Projection projection = render::projectionFor(camera, w, h);
+    gpu::BufferDesc colourDesc;
+    colourDesc.bytes = image.rgba.size() * sizeof(float);
+    colourDesc.elementBytes = 16;
+    auto colours = gpu::Buffer::create(*gpu.device, colourDesc, image.rgba.data());
+    auto depth = gpu::Buffer::fromSpan<float>(*gpu.device, image.depth, "depth");
+    REQUIRE(colours);
+    REQUIRE(depth);
+    auto check = gpu::ComputeKernel::create(*gpu.library, "lrt/test/visibility_check", "planeCheck");
+    if (!check) FAIL(check.error().toString());
+    gpu::Buffer counts = test::uintBuffer(*gpu.device, 3, "counts");
+    gpu::Buffer worst = test::uintBuffer(*gpu.device, 1, "worst");
+    gpu::CommandBatch batch(*gpu.device);
+    check->dispatch(batch, {1, 1, 1}, [&](rhi::ShaderCursor cursor) {
+        cursor["colour"].setBinding(colours->rhi());
+        cursor["depth"].setBinding(depth->rhi());
+        cursor["counts"].setBinding(counts.rhi());
+        cursor["worst"].setBinding(worst.rhi());
+        rhi::ShaderCursor c = cursor["camera"];
+        c["width"].setData(w);
+        c["height"].setData(h);
+        c["focalX"].setData(static_cast<float>(projection.focalX));
+        c["focalY"].setData(static_cast<float>(projection.focalY));
+        c["centreX"].setData(static_cast<float>(projection.centreX));
+        c["centreY"].setData(static_cast<float>(projection.centreY));
+        c["nearZ"].setData(0.1F);
+        c["farZ"].setData(1000.0F);
+        c["orthographic"].setData(uint32_t{0});
+        cursor["plane"]["z"].setData(5.0F);
+        cursor["plane"]["half"].setData(1.0F);
+        cursor["plane"]["colourR"].setData(colour[0]);
+        cursor["plane"]["colourG"].setData(colour[1]);
+        cursor["plane"]["colourB"].setData(colour[2]);
+    });
+    REQUIRE(batch.submit(true));
+    std::array<uint32_t, 3> c{};
+    REQUIRE(counts.read(*gpu.device, 0, sizeof(c), c.data()));
+    return c;
+}
+
+const char* kSquareStage = R"(#usda 1.0
+(
+    upAxis = "Y"
+)
+def Mesh "Square" (
+    prepend apiSchemas = ["MaterialBindingAPI"]
+)
+{
+    int[] faceVertexCounts = [4]
+    int[] faceVertexIndices = [0, 1, 2, 3]
+    point3f[] points = [(-1, -1, -5), (1, -1, -5), (1, 1, -5), (-1, 1, -5)]
+    texCoord2f[] primvars:st = [(0, 0), (1, 0), (1, 1), (0, 1)] (
+        interpolation = "vertex"
+    )
+    uniform token subdivisionScheme = "none"
+    color3f[] primvars:displayColor = [(0.1, 0.9, 0.1)] (
+        interpolation = "constant"
+    )
+    rel material:binding = </Materials/Mat>
+}
+def Camera "Camera"
+{
+    float focalLength = 35
+    float horizontalAperture = 24.576
+    float verticalAperture = 18.432
+    float2 clippingRange = (0.1, 1000)
+}
+)";
+
+}   // namespace
+
+TEST_CASE("materials bound in USD shade a mesh: MaterialX with a texture, and UsdPreviewSurface",
+          "[usd][gpu][mesh][materials]") {
+    LRT_REQUIRE_GPU(gpu);
+    if (!gpu->device->caps().rasterization) {
+        SKIP("no rasterisation on this device");
+    }
+    // A texture of one colour, exactly representable in 8 bits.
+    const fs::path png = scratch("orange.png");
+    {
+        fs::remove(png);
+        std::vector<uint32_t> texels(16 * 16, 0xFF3399CCu);   // ABGR: r 0xCC, g 0x99, b 0x33
+        HioImageSharedPtr image = HioImage::OpenForWriting(png.string());
+        REQUIRE(image);
+        HioImage::StorageSpec spec;
+        spec.width = 16;
+        spec.height = 16;
+        spec.depth = 1;
+        spec.format = HioFormatUNorm8Vec4;
+        spec.data = texels.data();
+        REQUIRE(image->Write(spec));
+    }
+    const std::array<float, 3> textureColour{0xCC / 255.0F, 0x99 / 255.0F, 0x33 / 255.0F};
+    SECTION("MaterialX: oren_nayar coloured by an image") {
+        const fs::path path = scratch("material_mtlx.usda");
+        {
+            std::ofstream out(path);
+            out << kSquareStage
+                << "def Scope \"Materials\"\n{\n"
+                   "    def Material \"Mat\"\n    {\n"
+                   "        token outputs:mtlx:surface.connect = </Materials/Mat/Surface.outputs:out>\n"
+                   "        def Shader \"Surface\"\n        {\n"
+                   "            uniform token info:id = \"ND_surface\"\n"
+                   "            token inputs:bsdf.connect = </Materials/Mat/Diffuse.outputs:out>\n"
+                   "            token outputs:out\n        }\n"
+                   "        def Shader \"Diffuse\"\n        {\n"
+                   "            uniform token info:id = \"ND_oren_nayar_diffuse_bsdf\"\n"
+                   "            color3f inputs:color.connect = </Materials/Mat/Texture.outputs:out>\n"
+                   "            token outputs:out\n        }\n"
+                   "        def Shader \"Texture\"\n        {\n"
+                   "            uniform token info:id = \"ND_image_color3\"\n"
+                   "            asset inputs:file = @" << png.string() << "@ ( colorSpace = \"lin_rec709\" )\n"
+                   "            color3f outputs:out\n        }\n    }\n}\n";
+        }
+        auto renderer = usd::StageRenderer::open(path);
+        if (!renderer) FAIL(renderer.error().toString());
+        auto image = (*renderer)->render("/Camera", 0.0, 160, 120);
+        if (!image) FAIL(image.error().toString());
+        const auto c = squareMismatches(*gpu, *image, textureColour);
+        const float* centre = image->rgba.data() + (60 * 160 + 80) * 4;
+        std::printf("  MaterialX image material: %u covered, %u coverage and %u colour mismatches; centre %.4f %.4f "
+                    "%.4f (texture %.4f %.4f %.4f)\n",
+                    c[2], c[0], c[1], double(centre[0]), double(centre[1]), double(centre[2]),
+                    double(textureColour[0]), double(textureColour[1]), double(textureColour[2]));
+        CHECK(c[2] > 800);
+        CHECK(c[0] == 0);
+        CHECK(c[1] == 0);
+    }
+    SECTION("UsdPreviewSurface with a UsdUVTexture read through UsdPrimvarReader") {
+        const fs::path path = scratch("material_preview_texture.usda");
+        {
+            std::ofstream out(path);
+            out << kSquareStage
+                << "def Scope \"Materials\"\n{\n"
+                   "    def Material \"Mat\"\n    {\n"
+                   "        token outputs:surface.connect = </Materials/Mat/Preview.outputs:surface>\n"
+                   "        def Shader \"Preview\"\n        {\n"
+                   "            uniform token info:id = \"UsdPreviewSurface\"\n"
+                   "            color3f inputs:diffuseColor.connect = </Materials/Mat/Texture.outputs:rgb>\n"
+                   "            int inputs:useSpecularWorkflow = 1\n"
+                   "            color3f inputs:specularColor = (0, 0, 0)\n"
+                   "            float inputs:roughness = 1\n"
+                   "            token outputs:surface\n        }\n"
+                   "        def Shader \"Texture\"\n        {\n"
+                   "            uniform token info:id = \"UsdUVTexture\"\n"
+                   "            asset inputs:file = @" << png.string() << "@\n"
+                   "            token inputs:sourceColorSpace = \"raw\"\n"
+                   "            float2 inputs:st.connect = </Materials/Mat/Reader.outputs:result>\n"
+                   "            color3f outputs:rgb\n        }\n"
+                   "        def Shader \"Reader\"\n        {\n"
+                   "            uniform token info:id = \"UsdPrimvarReader_float2\"\n"
+                   "            string inputs:varname = \"st\"\n"
+                   "            float2 outputs:result\n        }\n    }\n}\n";
+        }
+        auto renderer = usd::StageRenderer::open(path);
+        if (!renderer) FAIL(renderer.error().toString());
+        auto image = (*renderer)->render("/Camera", 0.0, 160, 120);
+        if (!image) FAIL(image.error().toString());
+        const float* centre = image->rgba.data() + (60 * 160 + 80) * 4;
+        std::printf("  UsdPreviewSurface textured centre: %.4f %.4f %.4f (texture %.4f %.4f %.4f)\n",
+                    double(centre[0]), double(centre[1]), double(centre[2]), double(textureColour[0]),
+                    double(textureColour[1]), double(textureColour[2]));
+        for (int k = 0; k < 3; ++k) {
+            CHECK(centre[k] == Catch::Approx(textureColour[size_t(k)]).epsilon(0.01));
+        }
+    }
+    SECTION("UsdPreviewSurface, rough, specular workflow without specular") {
+        const fs::path path = scratch("material_preview.usda");
+        {
+            std::ofstream out(path);
+            out << kSquareStage
+                << "def Scope \"Materials\"\n{\n"
+                   "    def Material \"Mat\"\n    {\n"
+                   "        token outputs:surface.connect = </Materials/Mat/Preview.outputs:surface>\n"
+                   "        def Shader \"Preview\"\n        {\n"
+                   "            uniform token info:id = \"UsdPreviewSurface\"\n"
+                   "            color3f inputs:diffuseColor = (0.8, 0.4, 0.2)\n"
+                   "            int inputs:useSpecularWorkflow = 1\n"
+                   "            color3f inputs:specularColor = (0, 0, 0)\n"
+                   "            float inputs:roughness = 1\n"
+                   "            token outputs:surface\n        }\n    }\n}\n";
+        }
+        auto renderer = usd::StageRenderer::open(path);
+        if (!renderer) FAIL(renderer.error().toString());
+        auto image = (*renderer)->render("/Camera", 0.0, 160, 120);
+        if (!image) FAIL(image.error().toString());
+        // Not the displayColor fallback: the material's colour, less what the
+        // (black) specular layer's albedo fit keeps of it.
+        const float* centre = image->rgba.data() + (60 * 160 + 80) * 4;
+        std::printf("  UsdPreviewSurface centre: %.4f %.4f %.4f\n", double(centre[0]), double(centre[1]),
+                    double(centre[2]));
+        CHECK(centre[0] == Catch::Approx(0.8F).margin(0.08F));
+        CHECK(centre[1] == Catch::Approx(0.4F).margin(0.04F));
+        CHECK(centre[2] == Catch::Approx(0.2F).margin(0.02F));
+    }
 }
 
 TEST_CASE("displayColor reaches the pixels per face and per indexed face-vertex", "[usd][gpu][mesh][primvars]") {

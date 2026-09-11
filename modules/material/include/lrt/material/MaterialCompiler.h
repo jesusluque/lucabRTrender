@@ -61,6 +61,11 @@ public:
     /// "libraries"), then the engine's shader directories.
     [[nodiscard]] static Result<std::unique_ptr<MaterialCompiler>> create(
         const std::vector<std::filesystem::path>& materialxRoots, const std::vector<std::filesystem::path>& shaderPaths);
+    /// The same with libraries already loaded (hdMtlx's HdMtlxStdLibraries(), a
+    /// MaterialX::DocumentPtr) and the folders their source files are found in.
+    [[nodiscard]] static Result<std::unique_ptr<MaterialCompiler>> create(
+        const std::shared_ptr<void>& libraries, const std::vector<std::filesystem::path>& librarySearchPaths,
+        const std::vector<std::filesystem::path>& shaderPaths);
     ~MaterialCompiler();
 
     /// The renderable element `element` (a material or shader node) of a

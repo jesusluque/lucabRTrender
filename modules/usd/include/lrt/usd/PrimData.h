@@ -79,6 +79,7 @@ struct MeshLook {
     std::array<float, 3> displayColor{0.18F, 0.18F, 0.18F};
     float                displayOpacity = 1.0F;
     bool                 doubleSided = false;
+    pxr::SdfPath         material;   ///< the bound material; empty: displayColor
 };
 
 /// The bytes of a float array a VtValue holds (float or half, any tuple
