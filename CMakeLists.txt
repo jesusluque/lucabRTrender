@@ -58,6 +58,30 @@ lrt_shader_copy_target()
 # person working on gpe and this engine at once points LRT_GPE_DIR at their
 # own checkout and edits in place.
 
+# One CUDA toolkit for everything that compiles or loads CUDA: gpe's kernels,
+# slang-rhi's CUDA device and OIDN, whose CUDA device wants 12.8 or later
+# (scripts/build-oidn.sh picks the same one). Distributions put an older
+# toolkit's nvcc first on PATH, so LRT_CUDA_ROOT, else the newest NVIDIA
+# toolkit in /usr/local, is chosen here before gpe enables the language.
+if(NOT APPLE AND NOT WIN32 AND NOT CMAKE_CUDA_COMPILER AND NOT DEFINED ENV{CUDACXX})
+    set(LRT_CUDA_ROOT "$ENV{LRT_CUDA_ROOT}" CACHE PATH "CUDA toolkit (default: the newest /usr/local/cuda-*)")
+    if(NOT LRT_CUDA_ROOT)
+        file(GLOB _lrt_cuda_roots LIST_DIRECTORIES true "/usr/local/cuda-*")
+        list(SORT _lrt_cuda_roots COMPARE NATURAL ORDER DESCENDING)
+        foreach(_root IN LISTS _lrt_cuda_roots)
+            if(EXISTS "${_root}/bin/nvcc")
+                set(LRT_CUDA_ROOT "${_root}" CACHE PATH "" FORCE)
+                break()
+            endif()
+        endforeach()
+    endif()
+    if(LRT_CUDA_ROOT AND EXISTS "${LRT_CUDA_ROOT}/bin/nvcc")
+        set(CMAKE_CUDA_COMPILER "${LRT_CUDA_ROOT}/bin/nvcc" CACHE FILEPATH "" FORCE)
+        set(CUDAToolkit_ROOT "${LRT_CUDA_ROOT}" CACHE PATH "" FORCE)
+        message(STATUS "CUDA toolkit: ${LRT_CUDA_ROOT}")
+    endif()
+endif()
+
 set(LRT_GPE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/gpe"
     CACHE PATH "Path to the gpe compute engine")
 set(LRT_GENLOCK_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/genlock"
