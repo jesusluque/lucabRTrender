@@ -94,6 +94,11 @@ void HdLrtMesh::Sync(HdSceneDelegate* delegate, HdRenderParam* renderParam, HdDi
         a.faceVertexIndices = topology.GetFaceVertexIndices();
         a.holeIndices = topology.GetHoleIndices();
         a.leftHanded = topology.GetOrientation() != HdTokens->rightHanded;
+        for (const HdGeomSubset& subset : topology.GetGeomSubsets()) {
+            if (subset.type == HdGeomSubset::TypeFaceSet) {
+                a.subsets.push_back({subset.indices, subset.materialId});
+            }
+        }
         a.points = delegate->Get(id, HdTokens->points);
         // Smooth normals where Storm computes them: a subdivision scheme that
         // is not none or bilinear, and no flat shading asked for.

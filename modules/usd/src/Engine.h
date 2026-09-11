@@ -82,6 +82,7 @@ struct MeshEntry {
     std::shared_ptr<const geom::GpuMesh>   gpu;
     render::Mat4                           objectToWorld = render::Mat4::identity();
     MeshLook                               look;
+    std::vector<pxr::SdfPath>              subsetMaterials;   ///< per GeomSubset the mesh was built with
     uint32_t                               primId = 0;
     pxr::TfToken                           renderTag;
     bool                                   visible = true;

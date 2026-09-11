@@ -97,6 +97,10 @@ void Engine::setMesh(const pxr::SdfPath& id, int32_t primId, const pxr::TfToken&
     entry.primId = static_cast<uint32_t>(primId);
     entry.renderTag = renderTag;
     if (arrays.has_value()) {
+        entry.subsetMaterials.clear();
+        for (const MeshSubset& subset : arrays->subsets) {
+            entry.subsetMaterials.push_back(subset.material);
+        }
         entry.pending = std::move(arrays);
     }
     if (transform != nullptr) {
@@ -209,6 +213,9 @@ Result<size_t> Engine::commit() {
             primvars.push_back(std::move(primvar));
         }
         input.primvars = primvars;
+        for (const MeshSubset& subset : a.subsets) {
+            input.subsets.emplace_back(subset.faces.cdata(), subset.faces.size());
+        }
         entry.gpu.reset();
         if (input.points.values() >= 3 && !a.faceVertexCounts.empty()) {
             if (!meshBuilder_.has_value()) {
@@ -544,6 +551,14 @@ Result<void> Engine::render(const render::Projection& projection, const render::
         const auto found = materialRows_.find(material);
         return found != materialRows_.end() ? found->second : 0u;
     };
+    const auto subsetRowsOf = [&](const MeshEntry& entry) {
+        std::vector<uint32_t> rows;
+        rows.reserve(entry.subsetMaterials.size());
+        for (const pxr::SdfPath& material : entry.subsetMaterials) {
+            rows.push_back(rowOf(material));
+        }
+        return rows;
+    };
     std::vector<world::MeshInstance> meshInstances;
     std::vector<world::InstanceSet> meshSets;
     std::vector<render::SplatInstance> splats;
@@ -632,6 +647,7 @@ Result<void> Engine::render(const render::Projection& projection, const render::
                 set.displayOpacity = entry.look.displayOpacity;
                 set.doubleSided = entry.look.doubleSided;
                 set.material = rowOf(entry.look.material);
+                set.subsetMaterials = subsetRowsOf(entry);
                 meshSets.push_back(std::move(set));
                 continue;
             }
@@ -643,6 +659,7 @@ Result<void> Engine::render(const render::Projection& projection, const render::
             instance.displayOpacity = entry.look.displayOpacity;
             instance.doubleSided = entry.look.doubleSided;
             instance.material = rowOf(entry.look.material);
+            instance.subsetMaterials = subsetRowsOf(entry);
             meshInstances.push_back(std::move(instance));
         }
         for (const auto& [id, entry] : points_) {

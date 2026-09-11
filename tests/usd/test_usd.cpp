@@ -613,6 +613,65 @@ TEST_CASE("materials bound in USD shade a mesh: MaterialX with a texture, and Us
     }
 }
 
+TEST_CASE("a GeomSubset's material shades its faces; the mesh's the rest", "[usd][gpu][mesh][materials]") {
+    LRT_REQUIRE_GPU(gpu);
+    if (!gpu->device->caps().rasterization) {
+        SKIP("no rasterisation on this device");
+    }
+    const auto diffuse = [](const std::string& name, const std::string& colour) {
+        return "    def Material \"" + name + "\"\n    {\n"
+               "        token outputs:mtlx:surface.connect = </Materials/" + name + "/Surface.outputs:out>\n"
+               "        def Shader \"Surface\"\n        {\n"
+               "            uniform token info:id = \"ND_surface\"\n"
+               "            token inputs:bsdf.connect = </Materials/" + name + "/Diffuse.outputs:out>\n"
+               "            token outputs:out\n        }\n"
+               "        def Shader \"Diffuse\"\n        {\n"
+               "            uniform token info:id = \"ND_oren_nayar_diffuse_bsdf\"\n"
+               "            color3f inputs:color = (" + colour + ")\n"
+               "            token outputs:out\n        }\n    }\n";
+    };
+    const fs::path path = scratch("subsets.usda");
+    {
+        std::ofstream out(path);
+        out << "#usda 1.0\n(\n    upAxis = \"Y\"\n)\n"
+               "def Mesh \"Faces\" (\n    prepend apiSchemas = [\"MaterialBindingAPI\"]\n)\n{\n"
+               "    int[] faceVertexCounts = [4, 4]\n"
+               "    int[] faceVertexIndices = [0, 1, 4, 3, 1, 2, 5, 4]\n"
+               "    point3f[] points = [(-2, -1, -5), (0, -1, -5), (2, -1, -5), (-2, 1, -5), (0, 1, -5), (2, 1, -5)]\n"
+               "    uniform token subdivisionScheme = \"none\"\n"
+               "    uniform token subsetFamily:materialBind:familyType = \"nonOverlapping\"\n"
+               "    rel material:binding = </Materials/Green>\n"
+               "    def GeomSubset \"Left\" (\n        prepend apiSchemas = [\"MaterialBindingAPI\"]\n    )\n    {\n"
+               "        uniform token elementType = \"face\"\n"
+               "        uniform token familyName = \"materialBind\"\n"
+               "        int[] indices = [0]\n"
+               "        rel material:binding = </Materials/Red>\n    }\n}\n"
+               "def Scope \"Materials\"\n{\n" << diffuse("Red", "0.9, 0.1, 0.1") << diffuse("Green", "0.1, 0.9, 0.1")
+            << "}\n"
+               "def Camera \"Camera\"\n{\n"
+               "    float focalLength = 20\n"
+               "    float horizontalAperture = 24.576\n    float verticalAperture = 18.432\n}\n";
+    }
+    auto renderer = usd::StageRenderer::open(path);
+    if (!renderer) FAIL(renderer.error().toString());
+    const uint32_t w = 160;
+    const uint32_t h = 120;
+    auto image = (*renderer)->render("/Camera", 0.0, w, h);
+    if (!image) FAIL(image.error().toString());
+    const auto pixel = [&](uint32_t x, uint32_t y) {
+        const float* p = image->rgba.data() + (size_t{y} * w + x) * 4;
+        return std::array<float, 3>{p[0], p[1], p[2]};
+    };
+    const auto left = pixel(w / 2 - 20, h / 2);
+    const auto right = pixel(w / 2 + 20, h / 2);
+    std::printf("  subset face: %.3f %.3f %.3f; the rest: %.3f %.3f %.3f\n", double(left[0]), double(left[1]),
+                double(left[2]), double(right[0]), double(right[1]), double(right[2]));
+    CHECK(left[0] > 0.8F);
+    CHECK(left[1] < 0.15F);
+    CHECK(right[1] > 0.8F);
+    CHECK(right[0] < 0.15F);
+}
+
 TEST_CASE("displayColor reaches the pixels per face and per indexed face-vertex", "[usd][gpu][mesh][primvars]") {
     LRT_REQUIRE_GPU(gpu);
     if (!gpu->device->caps().rasterization) {

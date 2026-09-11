@@ -15,7 +15,7 @@ namespace lrt::world {
 namespace {
 
 struct MeshRecord {
-    uint32_t firstPoint, points, firstTriangle, triangles, hasNormals, nodeBase, slotBase, pad2;
+    uint32_t firstPoint, points, firstTriangle, triangles, hasNormals, nodeBase, slotBase, subsetBase;
     float    lo[4];
     float    hi[4];
 };
@@ -73,6 +73,9 @@ Result<GpuScene> GpuScene::create(gpu::ShaderLibrary& library) {
     auto records = gpu::ComputeKernel::create(library, "lrt/world/instancing", "instanceRecords");
     if (!records) return std::move(records).error();
     scene.records_ = std::move(*records);
+    auto clear = gpu::ComputeKernel::create(library, "lrt/geom/mesh_subsets", "subsetClear");
+    if (!clear) return std::move(clear).error();
+    scene.subsetClear_ = std::move(*clear);
     for (auto [into, module, entry] : {std::tuple{&scene.worldBoxes_, "lrt/world/scene_bounds", "instanceWorldBoxes"},
                                        std::tuple{&scene.boundsChunks_, "lrt/scene/bounds_chunks", "boundsChunks"},
                                        std::tuple{&scene.boundsReduce_, "lrt/scene/bounds_reduce", "boundsReduce"}}) {
@@ -116,12 +119,31 @@ Result<void> GpuScene::repack() {
     LRT_TRY(make(indices_, triangles * 3, 4, "scene.indices"));
     LRT_TRY(make(triangleCorners_, triangles * 3, 4, "scene.triangleCorners"));
     LRT_TRY(make(triangleFaces_, triangles, 4, "scene.triangleFaces"));
+    LRT_TRY(make(triangleSubsets_, triangles, 4, "scene.triangleSubsets"));
+    subsetBases_.assign(meshes_.size(), 0);
+    uint32_t subsetsSoFar = 0;
+    for (size_t k = 0; k < meshes_.size(); ++k) {
+        subsetBases_[k] = subsetsSoFar;
+        subsetsSoFar += meshes_[k]->subsets;
+    }
+    subsetRowWords_.assign(std::max<uint32_t>(subsetsSoFar, 1), 0);
+    {
+        auto rows = gpu::Buffer::fromSpan<uint32_t>(device, subsetRowWords_, "scene.subsetRows");
+        if (!rows) return std::move(rows).error();
+        subsetRows_ = std::move(*rows);
+    }
     std::vector<MeshRecord> records(meshes_.size());
     std::vector<PrimvarRecord> primvars;
     firstPrimvar_.assign(meshes_.size(), 0);
     uint32_t nodes = 0;
     uint64_t valueAt = 0;
     gpu::CommandBatch batch(device);
+    subsetClear_.dispatch(batch, {static_cast<uint32_t>(std::max<uint64_t>(triangles, 1)), 1, 1},
+                          [&](rhi::ShaderCursor cursor) {
+                              cursor["cleared"].setBinding(triangleSubsets_.rhi());
+                              cursor["params"]["count"].setData(static_cast<uint32_t>(triangles));
+                              cursor["params"]["value"].setData(uint32_t{0});
+                          });
     for (size_t k = 0; k < meshes_.size(); ++k) {
         const geom::GpuMesh& m = *meshes_[k];
         const Range& r = ranges_[k];
@@ -135,6 +157,10 @@ Result<void> GpuScene::repack() {
                           uint64_t{m.triangles} * 12);
             e->copyBuffer(triangleFaces_.rhi(), uint64_t{r.firstTriangle} * 4, m.triangleFaces.rhi(), 0,
                           uint64_t{m.triangles} * 4);
+            if (m.subsets > 0 && m.triangleSubsets.valid()) {
+                e->copyBuffer(triangleSubsets_.rhi(), uint64_t{r.firstTriangle} * 4, m.triangleSubsets.rhi(), 0,
+                              uint64_t{m.triangles} * 4);
+            }
         }
         firstPrimvar_[k] = static_cast<uint32_t>(primvars.size());
         for (const geom::GpuPrimvar& p : m.primvars) {
@@ -145,7 +171,7 @@ Result<void> GpuScene::repack() {
         }
         const uint32_t slotBase = static_cast<uint32_t>(k * slotNames_.size());
         records[k] = {r.firstPoint, m.points, r.firstTriangle, m.triangles, m.primvar("normals") ? 1u : 0u, nodes,
-                      slotBase, 0,
+                      slotBase, subsetBases_[k],
                       {m.bounds.min[0], m.bounds.min[1], m.bounds.min[2], 0.0F},
                       {m.bounds.max[0], m.bounds.max[1], m.bounds.max[2], 0.0F}};
         nodes += std::max<uint32_t>(m.triangles, 1) - 1;   // a mesh's LBVH has triangles - 1 internal nodes
@@ -286,6 +312,32 @@ Result<void> GpuScene::update(std::span<const MeshInstance> instances, const ren
             ++draw.instances;
         }
         draws_.push_back(draw);
+    }
+    // Each mesh's subset rows, from the first instance or set of it that has them.
+    {
+        std::vector<uint32_t> rows(subsetRowWords_.size(), 0);
+        const auto place = [&](const geom::GpuMesh* mesh, const std::vector<uint32_t>& subsetMaterials) {
+            const auto found = indexOf.find(mesh);
+            if (found == indexOf.end() || subsetMaterials.empty()) {
+                return;
+            }
+            const uint32_t base = subsetBases_[found->second];
+            const uint32_t count = std::min<uint32_t>(meshes_[found->second]->subsets,
+                                                      static_cast<uint32_t>(subsetMaterials.size()));
+            for (uint32_t k = 0; k < count; ++k) {
+                rows[base + k] = subsetMaterials[k];
+            }
+        };
+        for (const MeshInstance& instance : instances) {
+            place(instance.mesh.get(), instance.subsetMaterials);
+        }
+        for (const InstanceSet& set : sets) {
+            place(set.mesh.get(), set.subsetMaterials);
+        }
+        if (rows != subsetRowWords_) {
+            LRT_TRY(subsetRows_.write(*device_, 0, rows.size() * 4, rows.data()));
+            subsetRowWords_ = std::move(rows);
+        }
     }
     // Sets after the single instances, their records written on the device.
     uint64_t total = records.size();

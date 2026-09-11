@@ -14,7 +14,7 @@ public struct MeshRecord {
     public uint hasNormals;      // 0: shade with the geometric normal
     public uint nodeBase;        // compute BVH: the mesh's first internal node
     public uint slotBase;        // primvars: the mesh's row in the slot table
-    public uint pad2;
+    public uint subsetBase;      // materials: the mesh's first entry in the scene's subset rows
     public float4 boundsLo;      // object space
     public float4 boundsHi;
 };

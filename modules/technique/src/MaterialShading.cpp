@@ -28,6 +28,8 @@ Texture2D<uint4>                visibility;   // (instance + 1, triangle); row 0
 RWStructuredBuffer<float4>      colour;
 RWStructuredBuffer<float>       depth;
 StructuredBuffer<MaterialRecord> materials;
+StructuredBuffer<uint>          triangleSubsets;   // per triangle: 0, or its GeomSubset + 1
+StructuredBuffer<uint>          subsetRows;        // per mesh subset: its material row, 0 for the instance's
 ConstantBuffer<CameraParams>    camera;
 ConstantBuffer<ViewToWorld>     toWorld;
 ConstantBuffer<ShadeParams>     params;
@@ -47,7 +49,13 @@ void shadeMaterials(uint3 tid: SV_DispatchThreadID) {
     }
     const Surface s = surfaceAt(camera, tid.x, tid.y, seen);
     const MaterialInputs inputs = materialInputsAt(camera, toWorld, tid.x, tid.y, s, params.time);
-    const MaterialRecord m = materials[s.instance.flags >> 8];
+    uint row = s.instance.flags >> 8;
+    const uint subset = triangleSubsets[s.mesh.firstTriangle + s.triangle];
+    if (subset != 0) {
+        const uint subsetRow = subsetRows[s.mesh.subsetBase + subset - 1];
+        row = subsetRow != 0 ? subsetRow : row;
+    }
+    const MaterialRecord m = materials[row];
     evaluateMaterial(m.function, inputs, m.blob);
     const LobeStack stack = gLrtResult;
     // The headlight: unit radiance from the eye, so a white Lambert surface
@@ -147,6 +155,8 @@ Result<void> MaterialShading::shade(gpu::CommandBatch& batch, const world::GpuSc
         cursor["colour"].setBinding(out.colour.rhi());
         cursor["depth"].setBinding(out.depth.rhi());
         cursor["materials"].setBinding(records.rhi());
+        cursor["triangleSubsets"].setBinding(scene.triangleSubsets().rhi());
+        cursor["subsetRows"].setBinding(scene.subsetRows().rhi());
         cursor["gMaterialBlob"].setBinding(blob.rhi());
         textures.bind(cursor["gTextures"]);
         setCamera(cursor["camera"], projection, targets.width, targets.height);

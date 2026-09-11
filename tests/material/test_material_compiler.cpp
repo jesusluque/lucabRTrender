@@ -151,7 +151,7 @@ void materialProbe(uint3 tid: SV_DispatchThreadID) {
     inputs.mesh.hasNormals = 0;
     inputs.mesh.nodeBase = 0;
     inputs.mesh.slotBase = 0;
-    inputs.mesh.pad2 = 0;
+    inputs.mesh.subsetBase = 0;
     inputs.mesh.boundsLo = float4(0.0);
     inputs.mesh.boundsHi = float4(0.0);
     inputs.triangle = 0;
