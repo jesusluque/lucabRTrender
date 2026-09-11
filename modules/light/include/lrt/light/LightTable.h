@@ -89,6 +89,8 @@ public:
 
     [[nodiscard]] uint32_t count() const noexcept { return count_; }
     [[nodiscard]] bool     anyShadow() const noexcept { return shadows_; }
+    /// Whether any of them is a dome, which a frame paints where it drew nothing.
+    [[nodiscard]] bool     anyDome() const noexcept { return domes_; }
     [[nodiscard]] const gpu::Buffer& records() const noexcept { return records_; }
 
     /// `lights` and `lightCount`, by name.
@@ -103,6 +105,7 @@ private:
     uint32_t     count_ = 0;
     uint32_t     capacity_ = 0;
     bool         shadows_ = false;
+    bool         domes_ = false;
 };
 
 }   // namespace lrt::light

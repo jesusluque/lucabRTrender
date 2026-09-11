@@ -1639,3 +1639,119 @@ TEST_CASE("a UsdLux light through Hydra lights a Lambert plane as the closed for
     CHECK(c[0] > 800);
     CHECK(c[1] == 0);
 }
+
+TEST_CASE("a dome light's image lights a Lambert plane, and shows where nothing is drawn",
+          "[usd][gpu][mesh][lights]") {
+    LRT_REQUIRE_GPU(gpu);
+    if (!gpu->device->caps().rasterization) {
+        SKIP("no rasterisation on this device");
+    }
+    // A lat-long image of one colour: whatever the mapping does, every
+    // direction reads the same radiance, so the closed form still holds.
+    const fs::path png = scratch("dome.png");
+    {
+        fs::remove(png);
+        std::vector<uint32_t> texels(size_t{32} * 16, 0xFFCCCCCCu);   // ABGR, 0xCC per channel
+        HioImageSharedPtr made = HioImage::OpenForWriting(png.string());
+        REQUIRE(made);
+        HioImage::StorageSpec spec;
+        spec.width = 32;
+        spec.height = 16;
+        spec.depth = 1;
+        spec.format = HioFormatUNorm8Vec4;
+        spec.data = texels.data();
+        REQUIRE(made->Write(spec));
+    }
+    // Requested as auto, so an 8-bit image is read as sRGB.
+    const float code = 0xCC / 255.0F;
+    const float linear = std::pow((code + 0.055F) / 1.055F, 2.4F);
+    const fs::path path = scratch("light_dome.usda");
+    {
+        std::ofstream out(path);
+        out << kSquareStage
+            << "def DomeLight \"Sky\"\n{\n"
+               "    float inputs:intensity = 1\n"
+               "    color3f inputs:color = (1, 1, 1)\n"
+            << "    asset inputs:texture:file = @" << png.string() << "@\n"
+            << "}\n"
+               "def Scope \"Materials\"\n{\n"
+               "    def Material \"Mat\"\n    {\n"
+               "        token outputs:mtlx:surface.connect = </Materials/Mat/Surface.outputs:out>\n"
+               "        def Shader \"Surface\"\n        {\n"
+               "            uniform token info:id = \"ND_surface\"\n"
+               "            token inputs:bsdf.connect = </Materials/Mat/Diffuse.outputs:out>\n"
+               "            token outputs:out\n        }\n"
+               "        def Shader \"Diffuse\"\n        {\n"
+               "            uniform token info:id = \"ND_oren_nayar_diffuse_bsdf\"\n"
+               "            color3f inputs:color = (0.8, 0.8, 0.8)\n"
+               "            float inputs:roughness = 0\n"
+               "            token outputs:out\n        }\n    }\n}\n";
+    }
+    auto renderer = usd::StageRenderer::open(path);
+    if (!renderer) FAIL(renderer.error().toString());
+    const uint32_t w = 161;
+    const uint32_t h = 121;
+    (*renderer)->setLightSamples(1024);
+    auto image = (*renderer)->render("/Camera", 0.0, w, h);
+    if (!image) FAIL(image.error().toString());
+
+    render::Camera camera;
+    camera.lens.focal = 35.0;
+    camera.lens.haperture = 24.576;
+    camera.lens.nearZ = 0.1;
+    camera.lens.farZ = 1000.0;
+    const render::Projection projection = render::projectionFor(camera, w, h);
+    gpu::BufferDesc colourDesc;
+    colourDesc.bytes = image->rgba.size() * sizeof(float);
+    colourDesc.elementBytes = 16;
+    auto colours = gpu::Buffer::create(*gpu->device, colourDesc, image->rgba.data());
+    auto depth = gpu::Buffer::fromSpan<float>(*gpu->device, image->depth, "depth");
+    REQUIRE(colours);
+    REQUIRE(depth);
+    auto check = gpu::ComputeKernel::create(*gpu->library, "lrt/test/lambert_irradiance", "lambertIrradiance");
+    if (!check) FAIL(check.error().toString());
+    gpu::Buffer counts = test::uintBuffer(*gpu->device, 2, "counts");
+    gpu::Buffer worst = test::uintBuffer(*gpu->device, 5, "worst");
+    const std::array<float, 12> toWorld = aofx::xform::inverseAffine(projection.worldToView).rows3x4();
+    {
+        gpu::CommandBatch batch(*gpu->device);
+        check->dispatch(batch, {1, 1, 1}, [&](rhi::ShaderCursor cursor) {
+            cursor["colour"].setBinding(colours->rhi());
+            cursor["depth"].setBinding(depth->rhi());
+            cursor["counts"].setBinding(counts.rhi());
+            cursor["worst"].setBinding(worst.rhi());
+            technique::setCamera(cursor["camera"], projection, w, h);
+            rhi::ShaderCursor p = cursor["plane"];
+            p["kind"].setData(uint32_t{5});   // a dome
+            p["vertices"].setData(uint32_t{512});
+            p["row0"].setData(toWorld.data(), sizeof(float) * 4);
+            p["row1"].setData(toWorld.data() + 4, sizeof(float) * 4);
+            p["row2"].setData(toWorld.data() + 8, sizeof(float) * 4);
+            const float centre[4] = {0.0F, 0.0F, 0.0F, 0.0F};
+            const float axisX[4] = {1.0F, 0.0F, 0.0F, 0.0F};
+            const float axisY[4] = {0.0F, 1.0F, 0.0F, 0.0F};
+            const float normal[4] = {0.0F, 0.0F, 1.0F, 0.8F};
+            const float radiance[4] = {linear, linear, linear, 0.02F};
+            const float none[4] = {0.0F, 0.0F, 0.0F, 0.0F};
+            p["centre"].setData(centre, sizeof(centre));
+            p["axisX"].setData(axisX, sizeof(axisX));
+            p["axisY"].setData(axisY, sizeof(axisY));
+            p["normal"].setData(normal, sizeof(normal));
+            p["radiance"].setData(radiance, sizeof(radiance));
+            p["occluder"].setData(none, sizeof(none));
+            p["occluderAxes"].setData(none, sizeof(none));
+        });
+        REQUIRE(batch.submit(true));
+    }
+    uint32_t c[2] = {0, 0};
+    float probe[5] = {0.0F, 0.0F, 0.0F, 0.0F, 0.0F};
+    REQUIRE(counts.read(*gpu->device, 0, sizeof(c), c));
+    REQUIRE(worst.read(*gpu->device, 0, sizeof(probe), probe));
+    // A corner of the image sees no geometry: it shows the dome itself.
+    const float* corner = image->rgba.data();
+    std::printf("  dome image: %u pixels, %u beyond 2%%, worst %.4f; background %.4f (image %.4f)\n", c[0], c[1],
+                double(probe[0]), double(corner[0]), double(linear));
+    CHECK(c[0] > 800);
+    CHECK(c[1] == 0);
+    CHECK(corner[0] == Catch::Approx(linear).margin(0.01F));
+}

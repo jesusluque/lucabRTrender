@@ -56,9 +56,11 @@ Result<void> LightTable::set(std::span<const Light> lights) {
     std::vector<LightRecord> records;
     records.reserve(lights.size() + 1);
     shadows_ = false;
+    domes_ = false;
     for (const Light& light : lights) {
         records.push_back(recordOf(light));
         shadows_ = shadows_ || light.shadow;
+        domes_ = domes_ || light.kind == LightKind::Dome;
     }
     if (records.empty()) {
         records.emplace_back();   // a buffer to bind, which nothing reads

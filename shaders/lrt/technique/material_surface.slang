@@ -14,7 +14,7 @@ public struct ViewToWorld {
     public float4 row2;
 };
 
-float3 applyRows(ViewToWorld m, float3 x, float w) {
+public float3 applyRows(ViewToWorld m, float3 x, float w) {
     return float3(dot(m.row0.xyz, x) + m.row0.w * w, dot(m.row1.xyz, x) + m.row1.w * w,
                   dot(m.row2.xyz, x) + m.row2.w * w);
 }

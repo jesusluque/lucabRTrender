@@ -264,6 +264,10 @@ private:
     /// Row and blob for this frame's materials, primvar slots set on the scene.
     [[nodiscard]] Result<void> prepareMaterials(const std::vector<std::string>& aovPrimvars);
     std::optional<gpu::ComputeKernel>          nearest_;
+    std::optional<gpu::ComputeKernel>          domeBackground_;
+    /// The frame's domes over what it drew nothing on, after everything else.
+    [[nodiscard]] Result<void> paintDomes(const render::Projection& projection, uint32_t width, uint32_t height,
+                                          render::RenderTargets& targets);
     technique::VisibilityTargets              visibility_;
     std::optional<technique::AovShading>      aovShading_;
     technique::AovBuffers                     aovs_;
