@@ -8,12 +8,14 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <string>
 #include <vector>
 
 #include "lrt/gpu/CommandBatch.h"
 #include "lrt/io/Exr.h"
 #include "lrt/lod/Lod.h"
+#include "lrt/lod/Lrtc.h"
 #include "lrt/render/ReferenceRenderer.h"
 #include "lrt/render/TileRasterizer.h"
 #include "lrt/scene/GpuClouds.h"
@@ -281,7 +283,7 @@ TEST_CASE("chunks not on the device are drawn merged, and chunks not wanted chan
             CHECK(stream.stats.merged == memory.stats.merged);
             CHECK(diff.max == 0);
             REQUIRE(stream.stats.needs.size() == 20);
-            const auto wanted = std::count(stream.stats.needs.begin(), stream.stats.needs.end(), uint8_t{1});
+            const auto wanted = std::count_if(stream.stats.needs.begin(), stream.stats.needs.end(), [](uint32_t n) { return n != 0; });
             if (threshold == 0.0F) {
                 CHECK(wanted == 20);
             } else if (threshold == 1e6F) {
@@ -306,7 +308,7 @@ TEST_CASE("chunks not on the device are drawn merged, and chunks not wanted chan
                     stream.stats.splats, stream.stats.merged, diff.p99, diff.max);
         CHECK(stream.stats.splats <= lod->count - missing);
         CHECK(stream.stats.merged > 0);
-        CHECK(std::count(stream.stats.needs.begin(), stream.stats.needs.end(), uint8_t{1}) == 20);
+        CHECK(std::count_if(stream.stats.needs.begin(), stream.stats.needs.end(), [](uint32_t n) { return n != 0; }) == 20);
         CHECK(diff.max > 0);
     }
 
@@ -326,7 +328,7 @@ TEST_CASE("chunks not on the device are drawn merged, and chunks not wanted chan
             const lod::LodCloud needed = streamedCopy(*h, *lod, keep);
             const Cut trimmed = cutAndRender(*h, near, needed, threshold, settings);
             const auto diff = compare(full, trimmed);
-            std::printf("  threshold %.0f px: %ld of 20 chunks wanted; %u splats + %u merged; max %u\n", threshold,
+            std::printf("  threshold %.0f px: %ld of 20 chunks wanted; %u splats + %u merged; max %u\n", static_cast<double>(threshold),
                         static_cast<long>(wanted), trimmed.stats.splats, trimmed.stats.merged, diff.max);
             CHECK(wanted < 20);
             CHECK(trimmed.stats.splats == full.stats.splats);
@@ -334,4 +336,120 @@ TEST_CASE("chunks not on the device are drawn merged, and chunks not wanted chan
             CHECK(diff.max == 0);
         }
     }
+}
+
+TEST_CASE("a .lrtc reads back as it was built, and a stream settles on the same image", "[lod][gpu]") {
+    LRT_REQUIRE_GPU(gpu);
+    auto h = harness(gpu);
+    CloudBuilder built = randomCloud(20000, 47, 0.003F, 0.05F);
+    auto cloud = h->loader.upload(built.raw, 3);
+    REQUIRE(cloud);
+    lod::LodBuildSettings chunked;
+    chunked.chunkSplats = 1000;
+    auto lod = h->builder.build(*cloud, chunked);
+    if (!lod) FAIL(lod.error().toString());
+    const std::filesystem::path path = std::filesystem::temp_directory_path() / "lrt_test_stream.lrtc";
+    REQUIRE(lod::writeLrtc(*gpu->device, *lod, path));
+    CHECK(std::filesystem::file_size(path) % 4096 == 0);
+
+    render::RenderSettings settings;
+    settings.width = 240;
+    settings.height = 180;
+    render::Projection near = render::projectionFor(render::Camera::lookingAt({0.0, 0.5, 4.5}, {0.0, 0.0, 0.0}),
+                                                    settings.width, settings.height);
+    const auto compare = [&](const Cut& a, const Cut& b) {
+        auto diff = render::compareImages(*gpu->library, a.targets.colour, b.targets.colour, settings.width,
+                                          settings.height);
+        REQUIRE(diff);
+        return *diff;
+    };
+    // Cut, tell the pool, let it load; until a frame places nothing more.
+    const auto settle = [&](lod::StreamingPool& pool, float threshold, int* rounds) {
+        for (*rounds = 1; *rounds <= 8; ++*rounds) {
+            Cut cut = cutAndRender(*h, near, pool.cloud(), threshold, settings);
+            pool.want(cut.stats.needs);
+            auto placed = pool.update(true);
+            REQUIRE(placed);
+            if (*placed == 0) {
+                return cut;
+            }
+        }
+        FAIL("the stream never settled");
+        return Cut{};
+    };
+
+    SECTION("read whole") {
+        auto read = lod::readLrtc(*gpu->device, path);
+        if (!read) FAIL(read.error().toString());
+        CHECK(read->count == lod->count);
+        CHECK(read->chunks() == lod->chunks());
+        CHECK(read->levels.size() == lod->levels.size());
+        for (const float threshold : {0.0F, 36.0F}) {
+            const Cut memory = cutAndRender(*h, near, *lod, threshold, settings);
+            const Cut file = cutAndRender(*h, near, *read, threshold, settings);
+            CHECK(file.stats.splats == memory.stats.splats);
+            CHECK(file.stats.merged == memory.stats.merged);
+            CHECK(compare(memory, file).max == 0);
+        }
+    }
+
+    SECTION("streamed with room for all of it") {
+        auto pool = lod::StreamingPool::open(*gpu->device, path, {uint64_t{1} << 20, 2});
+        if (!pool) FAIL(pool.error().toString());
+        for (const float threshold : {0.0F, 36.0F}) {
+            int rounds = 0;
+            const Cut memory = cutAndRender(*h, near, *lod, threshold, settings);
+            const Cut stream = settle(**pool, threshold, &rounds);
+            const auto status = (*pool)->status();
+            std::printf("  threshold %.0f px: settled in %d rounds, %u of %u chunks on the device\n", static_cast<double>(threshold),
+                        rounds, status.resident, lod->chunks());
+            CHECK(status.missing == 0);
+            CHECK(stream.stats.splats == memory.stats.splats);
+            CHECK(stream.stats.merged == memory.stats.merged);
+            CHECK(compare(memory, stream).max == 0);
+        }
+    }
+
+    SECTION("streamed into a store too small for the view, then a view it fits") {
+        auto pool = lod::StreamingPool::open(*gpu->device, path, {8000, 2});
+        if (!pool) FAIL(pool.error().toString());
+        int rounds = 0;
+        const Cut memory36 = cutAndRender(*h, near, *lod, 36.0F, settings);
+        const Cut tight = settle(**pool, 36.0F, &rounds);
+        auto status = (*pool)->status();
+        const auto diff36 = compare(memory36, tight);
+        std::printf("  8 slots, threshold 36 px: %u chunks missing; %u splats + %u merged (whole: %u + %u); p99 %u\n",
+                    status.missing, tight.stats.splats, tight.stats.merged, memory36.stats.splats,
+                    memory36.stats.merged, diff36.p99);
+        CHECK(status.slots == 8);
+        CHECK(status.resident == 8);
+        CHECK(status.missing > 0);
+        CHECK(tight.stats.splats < memory36.stats.splats);
+
+        const Cut memory48 = cutAndRender(*h, near, *lod, 48.0F, settings);
+        const Cut fits = settle(**pool, 48.0F, &rounds);
+        status = (*pool)->status();
+        std::printf("  8 slots, threshold 48 px: %u missing, %llu loads, %llu evictions\n", status.missing,
+                    static_cast<unsigned long long>(status.loads), static_cast<unsigned long long>(status.evictions));
+        CHECK(status.missing == 0);
+        CHECK(fits.stats.splats == memory48.stats.splats);
+        CHECK(fits.stats.merged == memory48.stats.merged);
+        CHECK(compare(memory48, fits).max == 0);
+
+        // The other side: other chunks wanted, the store full of chunks that
+        // no longer are.
+        near = render::projectionFor(render::Camera::lookingAt({0.0, 0.5, -4.5}, {0.0, 0.0, 0.0}), settings.width,
+                                     settings.height);
+        const uint64_t evictionsBefore = status.evictions;
+        const Cut behindMemory = cutAndRender(*h, near, *lod, 48.0F, settings);
+        const Cut behind = settle(**pool, 48.0F, &rounds);
+        status = (*pool)->status();
+        std::printf("  8 slots, from behind: %u missing, %llu evictions\n", status.missing,
+                    static_cast<unsigned long long>(status.evictions - evictionsBefore));
+        CHECK(status.evictions > evictionsBefore);
+        CHECK(status.missing == 0);
+        CHECK(behind.stats.splats == behindMemory.stats.splats);
+        CHECK(compare(behindMemory, behind).max == 0);
+    }
+    std::filesystem::remove(path);
 }

@@ -315,7 +315,8 @@ is the camera's own rotation. The SceneText bridge maps to those.
   nearest distance, and a child cell lies inside its parent, so the test is
   monotone down the tree and every place is drawn at exactly one level.
 - **What comes back to the CPU.** Only counts: one per level while building,
-  and one per level per instance per frame.
+  and one read per instance per frame, which holds every part's count plus,
+  when streaming, each chunk's need.
 
 ### Measured (M5 Pro)
 
@@ -341,10 +342,83 @@ keys that tie and keep index order, which the Morton sort has changed.
 **A cell with one splat.** It merges back into that splat, with covariance
 equal to 1e-4.
 
+### Chunks, `.lrtc` and streaming
+
+- **Chunks.** The cloud's own splats are cut into chunks: runs of
+  `chunkSplats` of the Morton order (65536 by default), so each chunk is a
+  compact piece of space. The merged levels are small and always on the
+  device; chunks may or may not be. A chunk on the device sits in a slot of a
+  store, and the store's slots need not follow the chunks' order. Built in
+  memory, chunk c is slot c and every chunk is there. The cut draws one run of
+  consecutive slots per dispatch, which is a single run in that case.
+- **The finest merged level decides for its splats.** A finest-level group
+  whose cell wants splats draws them when every chunk holding them is on the
+  device, and draws its own Gaussian otherwise. Its merged Gaussian is the
+  nearest resident ancestor of those splats, so a missing chunk never leaves
+  a hole. Each splat stores the index of its finest-level group, which
+  replaces the Morton key at frame time, and reads the group's decision. The
+  test no longer runs per splat, and every place is still drawn exactly once.
+- **What a view wants.** `lodChunkNeeds` gives, per chunk, the largest
+  projected edge among the cells that want its splats: 0 for none, otherwise
+  in 1/16 px. It comes back in the same single read as the counts.
+- **Why chunks follow the Morton order and not group boundaries.** Fixed-size
+  chunks give uniform slots, and a store of uniform slots never fragments.
+  Groups that straddle a chunk boundary only need to check more than one
+  chunk, which is a short loop in the finest-level kernel.
+- **`.lrtc` v1.**
+  - Layout: a header in page 0; level and chunk tables; the finest level's
+    group starts; each level's positions, shape, SH and cells; each chunk's
+    positions, shape, SH and finest group.
+  - Every block begins on a 4096-byte page, so a chunk can be mapped and
+    faulted in alone. The bytes use the device's own packing, so reading is
+    a copy.
+  - The writer writes `name.partial` and then renames it, so a failed write
+    never looks like a whole file.
+  - `lrt convert in.ply out.lrtc`.
+- **`StreamingPool`.**
+  - The file is mapped. The levels go to the device when the pool opens, and
+    the store starts empty.
+  - After each cut the caller passes its needs to `want`. `update` queues the
+    missing chunks, most wanted first, only as many as have a place to go.
+  - A place is, in order of preference: a free slot; the slot of a chunk not
+    wanted now, least recently wanted first; or the slot of a chunk wanted
+    less than half as much. The half stops two chunks from swapping every
+    frame.
+  - Loader threads copy a chunk off the mapping, so the page faults happen on
+    those threads and not in the frame. The next `update` uploads it and
+    flips its resident flag.
+  - `update(true)` waits for the queued loads; an offline render repeats it
+    until a frame places nothing. `lrt render --stream-budget N` does exactly
+    that, and `lrt bench` streams without waiting.
+
+### Measured: streaming (M5 Pro)
+
+**train_30k (1.05M splats, 16 chunks).**
+
+- `lrt convert` to `.lrtc` takes 2.8 s in total and writes 150 MB, against
+  266 MB for the PLY.
+- At 1080p with `--lod 2`, the PLY built in memory, the `.lrtc` read whole
+  and the `.lrtc` streamed into 4 slots write byte-identical EXRs. The stream
+  settles in 2 cuts (48 ms).
+- At `--lod 0.25` with 4 of 16 slots, 12 wanted chunks do not fit, and their
+  places are drawn merged. Loading by priority instead of chunk order raised
+  the visible splats from 155k to 170k.
+
+**Tests, 20k splats in 20 chunks.**
+
+- A store with its slots reversed gives the same cut and the same image,
+  max 0.
+- Dropping the chunks a view does not want changes nothing, max 0.
+- Missing chunks are drawn merged.
+- With 8 slots, the frame the pool settles on is p99 0 against the whole
+  cloud.
+- Turning the camera to the other side evicts 4 chunks and settles back to
+  max 0.
+
 ### Not done yet
 
-- **The `.lrtc` file, streaming with a residency budget, and
-  `LrtStreamedAssetAPI`.** The cut runs over clouds held whole in memory.
+- **`LrtStreamedAssetAPI`.** USD cannot yet reference a `.lrtc`, so streaming
+  is available only through the CLI and the API.
 - **The cut still waits twice a frame:** once for its counts, which come back
   in one read (reading them level by level had cost 3.9 against 2.3 ms), and
   once for the gather.

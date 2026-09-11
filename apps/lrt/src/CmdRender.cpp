@@ -18,6 +18,7 @@
 #include "lrt/io/Exr.h"
 #include "lrt/io/Readers.h"
 #include "lrt/lod/Lod.h"
+#include "lrt/lod/Lrtc.h"
 #include "lrt/render/GaussianRayTracer.h"
 #include "lrt/render/PointRasterizer.h"
 #include "lrt/render/ReferenceRenderer.h"
@@ -31,6 +32,7 @@ struct RenderOptions {
     std::vector<std::string> splats;
     std::vector<std::string> points;
     float                    lod = 0.0F;   ///< px a merged cell may span; 0 draws the splats
+    uint64_t                 streamBudget = 0;   ///< .lrtc: splats on the device at once; 0 reads it whole
     std::string              technique = "raster";    ///< raster | rt | rt-hw | rt-bvh | reference | reference-rt
     std::string              pointRoute = "raster";   ///< raster | discs
     float                    pointSize = 0.01F;
@@ -81,18 +83,48 @@ int run(const RenderOptions& options, bool bench) {
     std::vector<std::unique_ptr<scene::GpuSplats>> clouds;
     scene::Bounds all;
     bool first = true;
+    const auto grow = [&](const scene::Bounds& b) {
+        for (size_t k = 0; k < 3; ++k) {
+            all.min[k] = first ? b.min[k] : std::min(all.min[k], b.min[k]);
+            all.max[k] = first ? b.max[k] : std::max(all.max[k], b.max[k]);
+        }
+        first = false;
+    };
+    // .lrtc files carry their levels of detail: read whole, or streamed.
+    std::vector<std::unique_ptr<lod::LodCloud>> lrtcClouds;
+    std::vector<std::unique_ptr<lod::StreamingPool>> pools;
     for (const std::string& path : options.splats) {
+        if (lod::isLrtc(path)) {
+            if (options.lod <= 0.0F) {
+                std::fprintf(stderr, "%s: a .lrtc is drawn through its levels of detail: give --lod\n",
+                             path.c_str());
+                return 1;
+            }
+            if (options.streamBudget > 0) {
+                auto pool = lod::StreamingPool::open(**device, path, {options.streamBudget, 2});
+                if (!pool) {
+                    std::fprintf(stderr, "%s\n", pool.error().toString().c_str());
+                    return 1;
+                }
+                grow((*pool)->cloud().splats.bounds);
+                pools.push_back(std::move(*pool));
+            } else {
+                auto read = lod::readLrtc(**device, path);
+                if (!read) {
+                    std::fprintf(stderr, "%s\n", read.error().toString().c_str());
+                    return 1;
+                }
+                grow(read->splats.bounds);
+                lrtcClouds.push_back(std::make_unique<lod::LodCloud>(std::move(*read)));
+            }
+            continue;
+        }
         auto splats = scene::loadSplatFile(*loader, path, options.degree);
         if (!splats) {
             std::fprintf(stderr, "%s\n", splats.error().toString().c_str());
             return 1;
         }
-        for (int k = 0; k < 3; ++k) {
-            const auto kk = static_cast<size_t>(k);
-            all.min[kk] = first ? splats->bounds.min[kk] : std::min(all.min[kk], splats->bounds.min[kk]);
-            all.max[kk] = first ? splats->bounds.max[kk] : std::max(all.max[kk], splats->bounds.max[kk]);
-        }
-        first = false;
+        grow(splats->bounds);
         clouds.push_back(std::make_unique<scene::GpuSplats>(std::move(*splats)));
     }
     std::vector<std::unique_ptr<scene::GpuPoints>> pointClouds;
@@ -107,15 +139,10 @@ int run(const RenderOptions& options, bool bench) {
             std::fprintf(stderr, "%s\n", uploaded.error().toString().c_str());
             return 1;
         }
-        for (int k = 0; k < 3; ++k) {
-            const auto kk = static_cast<size_t>(k);
-            all.min[kk] = first ? uploaded->bounds.min[kk] : std::min(all.min[kk], uploaded->bounds.min[kk]);
-            all.max[kk] = first ? uploaded->bounds.max[kk] : std::max(all.max[kk], uploaded->bounds.max[kk]);
-        }
-        first = false;
+        grow(uploaded->bounds);
         pointClouds.push_back(std::make_unique<scene::GpuPoints>(std::move(*uploaded)));
     }
-    if (clouds.empty() && pointClouds.empty()) {
+    if (clouds.empty() && pointClouds.empty() && lrtcClouds.empty() && pools.empty()) {
         std::fprintf(stderr, "nothing to render: give --splats or --points\n");
         return 1;
     }
@@ -248,6 +275,7 @@ int run(const RenderOptions& options, bool bench) {
     std::optional<lod::CutSelector> cutter;
     std::vector<lod::LodCloud> lodClouds;
     std::vector<lod::LodInstance> lodInstances;
+    std::vector<lod::StreamingPool*> poolOf;   // per LOD instance: its pool, if streamed
     if (options.lod > 0.0F) {
         if (options.technique != "raster" || !pointInstances.empty()) {
             std::fprintf(stderr, "--lod draws splats through the rasteriser\n");
@@ -274,6 +302,55 @@ int run(const RenderOptions& options, bool bench) {
         for (size_t k = 0; k < lodClouds.size(); ++k) {
             lodInstances.push_back({&lodClouds[k], model});
         }
+        for (const auto& cloud : lrtcClouds) {
+            lodInstances.push_back({cloud.get(), model, {}});
+        }
+        poolOf.assign(lodInstances.size(), nullptr);
+        for (const auto& pool : pools) {
+            lodInstances.push_back({&pool->cloud(), model, {}});
+            poolOf.push_back(pool.get());
+        }
+    }
+    // A stream tells its pool what each cut wants; the pool loads it and
+    // places it at the next update. An image waits for that; a bench does not.
+    const auto feed = [&](const std::vector<lod::CutStats>& cutStats, bool wait) -> Result<uint32_t> {
+        for (size_t k = 0; k < poolOf.size() && k < cutStats.size(); ++k) {
+            if (poolOf[k] != nullptr) {
+                poolOf[k]->want(cutStats[k].needs);
+            }
+        }
+        uint32_t placed = 0;
+        for (const auto& pool : pools) {
+            auto n = pool->update(wait);
+            if (!n) return std::move(n).error();
+            placed += *n;
+        }
+        return placed;
+    };
+    if (cutter && !pools.empty() && !bench) {
+        const auto start = std::chrono::steady_clock::now();
+        for (int round = 0;; ++round) {
+            std::vector<lod::CutStats> cutStats;
+            auto selected = cutter->select(render::projectionFor(camera, width, height), lodInstances, options.lod,
+                                           &cutStats);
+            auto placed = selected ? feed(cutStats, true) : Result<uint32_t>(selected.error());
+            if (!placed) {
+                std::fprintf(stderr, "%s\n", placed.error().toString().c_str());
+                return 1;
+            }
+            if (*placed == 0) {
+                for (const auto& pool : pools) {
+                    const auto status = pool->status();
+                    std::printf("stream settled after %d cuts in %.1f ms: %u of %u slots used, %u wanted chunks "
+                                "left out\n",
+                                round + 1,
+                                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start)
+                                    .count(),
+                                status.resident, status.slots, status.missing);
+                }
+                break;
+            }
+        }
     }
     render::FrameStats best;
     best.totalMs = 1e30;
@@ -293,6 +370,10 @@ int run(const RenderOptions& options, bool bench) {
             }
             drawn = std::move(*selected);
             cutMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+            if (auto fed = feed(cutStats, false); !fed) {
+                std::fprintf(stderr, "%s\n", fed.error().toString().c_str());
+                return 1;
+            }
         }
         if (rasterPoints) {
             if (auto drawn = pointRaster->render(camera, pointInstances, settings, pointLayer); !drawn) {
@@ -376,6 +457,8 @@ void addOptions(CLI::App* cmd, RenderOptions& o) {
     cmd->add_option("--near", o.nearZ, "near clipping distance");
     cmd->add_option("--degree", o.degree, "harmonic degree cap 0..3");
     cmd->add_option("--lod", o.lod, "levels of detail: pixels a merged cell may span (0: off)");
+    cmd->add_option("--stream-budget", o.streamBudget,
+                    ".lrtc: splats kept on the device, loaded as the view wants them (0: read whole)");
     cmd->add_flag("--no-antialias", o.noAntialias, "no Mip-Splatting 2D filter compensation");
 }
 

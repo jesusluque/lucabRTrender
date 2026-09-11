@@ -450,6 +450,7 @@ Result<std::vector<render::SplatInstance>> CutSelector::select(const render::Pro
             }
             if (lod.streamed) {
                 chunkNeeds_.dispatch(batch, {chunks, 1, 1}, [&](rhi::ShaderCursor cursor) {
+                    cursor["cells"].setBinding(lod.levels.back().cells.rhi());
                     cursor["starts"].setBinding(lod.starts.rhi());
                     cursor["state"].setBinding(frame.state.rhi());
                     cursor["selected"].setBinding(frame.needs.rhi());
@@ -529,7 +530,7 @@ Result<std::vector<render::SplatInstance>> CutSelector::select(const render::Pro
             if (lod.streamed) {
                 s.needs.resize(chunks);
                 for (uint32_t c = 0; c < chunks; ++c) {
-                    s.needs[c] = read[parts + c] != 0 ? 1 : 0;
+                    s.needs[c] = read[parts + c];
                 }
             }
             stats->push_back(std::move(s));

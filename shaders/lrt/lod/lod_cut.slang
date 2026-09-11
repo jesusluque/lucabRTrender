@@ -86,7 +86,8 @@ void lodCutSplats(uint3 tid: SV_DispatchThreadID) {
     selected[i] = (state[groups[params.offset + i]] & kDrawn) != 0 ? 1u : 0u;
 }
 
-/// Per chunk: 1 when any finest-level group with splats in it wants them.
+/// Per chunk: 0 when no finest-level group with splats in it wants them, else
+/// how badly -- the largest cell edge among those that do, in 1/16 pixels.
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void lodChunkNeeds(uint3 tid: SV_DispatchThreadID) {
@@ -107,9 +108,11 @@ void lodChunkNeeds(uint3 tid: SV_DispatchThreadID) {
             last = middle;
         }
     }
-    bool needed = false;
-    for (uint g = first; g < params.count && starts[g] < hi && !needed; ++g) {
-        needed = (state[g] & kWanted) != 0;
+    float largest = 0.0;
+    for (uint g = first; g < params.count && starts[g] < hi; ++g) {
+        if ((state[g] & kWanted) != 0) {
+            largest = max(largest, projectedEdge(cells[g], params.level));
+        }
     }
-    selected[c] = needed ? 1u : 0u;
+    selected[c] = largest > 0.0 ? uint(clamp(largest * 16.0, 1.0, 4294967040.0)) : 0u;
 }

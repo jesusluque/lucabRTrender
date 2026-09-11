@@ -107,9 +107,11 @@ struct CutStats {
     uint32_t splats = 0;     ///< the cloud's own splats drawn
     uint32_t merged = 0;     ///< merged Gaussians drawn
     uint32_t available = 0;  ///< splats in the cloud
-    /// Streamed clouds: per chunk, 1 when this view wants its splats (on the
-    /// device or not). Empty for a cloud that is all in memory.
-    std::vector<uint8_t> needs;
+    /// Streamed clouds: per chunk, 0 when this view does not want its splats,
+    /// else how much -- the largest projected edge, in 1/16 pixels, of the
+    /// cells wanting them -- on the device or not. Empty for a cloud that is
+    /// all in memory.
+    std::vector<uint32_t> needs;
 };
 
 class CutSelector {
