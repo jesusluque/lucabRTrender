@@ -594,7 +594,8 @@ What the next milestones build on, in `modules/gpu`.
 - **`RasterKernel`.** A vertex and fragment pipeline bound by name.
   - Draws pull their data from StructuredBuffers, with no vertex buffers or
     input layouts, as the point rasteriser already did.
-  - Each draw gets a fresh root object.
+  - A draw that binds something of its own gets a fresh root object. Draws
+    that bind nothing share the pass's (`RasterPass::bind`), added in M2.
   - Checked: two triangles over the left half of clip space cover exactly
     w/2 × h pixels.
 - **`RayTracingKernel`.** A pipeline plus its shader table, for OptiX and
