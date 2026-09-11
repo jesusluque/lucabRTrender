@@ -1,0 +1,12 @@
+lrt_add_module(render
+    SOURCES
+        src/Camera.cpp
+        src/TileRasterizer.cpp
+        src/ReferenceRenderer.cpp
+        src/PointRasterizer.cpp
+        src/GaussianRayTracer.cpp
+    PUBLIC_LIBS
+        lrt::core
+        lrt::gpu
+        lrt::scene
+        aofx::aofx)

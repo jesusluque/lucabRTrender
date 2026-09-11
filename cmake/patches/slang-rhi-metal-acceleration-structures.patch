@@ -1,0 +1,67 @@
+diff --git a/src/metal/metal-acceleration-structure.cpp b/src/metal/metal-acceleration-structure.cpp
+index 8d9dcbb..b033d19 100644
+--- a/src/metal/metal-acceleration-structure.cpp
++++ b/src/metal/metal-acceleration-structure.cpp
+@@ -160,7 +160,9 @@ Result AccelerationStructureBuildDescConverter::convert(
+                 );
+             }
+ 
+-            uint32_t triangleCount = max(triangles.vertexCount, triangles.indexCount) / 3;
++            // With an index buffer the triangles are its indices; the vertex
++            // count only bounds what they may refer to.
++            uint32_t triangleCount = (triangles.indexBuffer ? triangles.indexCount : triangles.vertexCount) / 3;
+             triangleDescriptor->setTriangleCount(triangleCount);
+ 
+             if (triangles.preTransformBuffer)
+diff --git a/src/metal/metal-device.cpp b/src/metal/metal-device.cpp
+index 1286e9e..391b950 100644
+--- a/src/metal/metal-device.cpp
++++ b/src/metal/metal-device.cpp
+@@ -461,11 +461,30 @@ NS::Array* DeviceImpl::getAccelerationStructureArray()
+ {
+     if (m_accelerationStructures.arrayDirty)
+     {
++        // Freed slots hold nullptr until reused, and an NSArray cannot hold
++        // nil: -initWithObjects:count: throws, unwinding past an open
++        // acceleration structure encoder. No live instance refers to a freed
++        // slot; each gets an empty placeholder structure of its own, so the
++        // array stays one distinct object per index.
++        std::vector<MTL::AccelerationStructure*> objects;
++        objects.reserve(m_accelerationStructures.list.size());
++        size_t placeholder = 0;
++        for (auto* as : m_accelerationStructures.list)
++        {
++            if (!as)
++            {
++                if (placeholder == m_accelerationStructures.placeholders.size())
++                {
++                    m_accelerationStructures.placeholders.push_back(
++                        NS::TransferPtr(m_device->newAccelerationStructure(NS::UInteger(64)))
++                    );
++                }
++                as = m_accelerationStructures.placeholders[placeholder++].get();
++            }
++            objects.push_back(as);
++        }
+         m_accelerationStructures.array = NS::TransferPtr(
+-            NS::Array::alloc()->init(
+-                (const NS::Object* const*)m_accelerationStructures.list.data(),
+-                m_accelerationStructures.list.size()
+-            )
++            NS::Array::alloc()->init((const NS::Object* const*)objects.data(), objects.size())
+         );
+         m_accelerationStructures.arrayDirty = false;
+     }
+diff --git a/src/metal/metal-device.h b/src/metal/metal-device.h
+index da25636..ce9b63a 100644
+--- a/src/metal/metal-device.h
++++ b/src/metal/metal-device.h
+@@ -174,6 +174,8 @@ public:
+         bool arrayDirty = true;
+         std::vector<MTL::Resource*> resources;
+         bool resourcesDirty = true;
++        /// Empty structures standing in for freed slots in `array`.
++        std::vector<NS::SharedPtr<MTL::AccelerationStructure>> placeholders;
+     } m_accelerationStructures;
+ 
+     uint32_t registerAccelerationStructure(MTL::AccelerationStructure* accelerationStructure);

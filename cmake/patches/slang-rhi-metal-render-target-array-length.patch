@@ -1,0 +1,17 @@
+diff --git a/src/metal/metal-command.cpp b/src/metal/metal-command.cpp
+index a84ce06..b665865 100644
+--- a/src/metal/metal-command.cpp
++++ b/src/metal/metal-command.cpp
+@@ -457,7 +457,11 @@ void CommandRecorder::cmdBeginRenderPass(const commands::BeginRenderPass& cmd)
+         NS::TransferPtr(MTL::RenderPassDescriptor::alloc()->init());
+ 
+     // Setup color attachments.
+-    renderPassDesc->setRenderTargetArrayLength(desc.colorAttachmentCount);
++    // renderTargetArrayLength is the number of *layers* for layered rendering,
++    // not the number of attachments: setting it to the attachment count makes
++    // every multi-target pass invalid ("slice + renderTargetArrayLength is 2,
++    // but the texture only has 1 slices") and renders garbage without the
++    // Metal validation layer. Leave the default (0, not layered).
+     for (uint32_t i = 0; i < desc.colorAttachmentCount; ++i)
+     {
+         const auto& attachment = desc.colorAttachments[i];

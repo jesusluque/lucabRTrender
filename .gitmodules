@@ -1,0 +1,6 @@
+[submodule "third_party/gpe"]
+	path = third_party/gpe
+	url = https://github.com/jesusluque/gpe.git
+[submodule "third_party/genlock"]
+	path = third_party/genlock
+	url = https://github.com/jesusluque/genlock.git

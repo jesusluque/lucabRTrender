@@ -1,0 +1,9 @@
+lrt_add_module(gpu_host
+    SOURCES
+        src/Context.cpp
+        src/ImageStorage.cpp
+    PUBLIC_LIBS
+        lrt::core
+        lrt::gpu
+        lrt::image
+        gpe)
