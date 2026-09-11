@@ -21,7 +21,9 @@ public:
     /// Levels 1.. of `texture` from level 0, queued into `batch`. The texture
     /// needs ShaderResource and UnorderedAccess usage and a writable format
     /// (float, or 8-bit linear; sRGB formats are not writable as storage).
-    [[nodiscard]] Result<void> generate(CommandBatch& batch, const Texture& texture) const;
+    /// `srgb`: the texels hold sRGB-encoded colour (an 8-bit texture sampled
+    /// through an sRGB view); levels average light and store it encoded.
+    [[nodiscard]] Result<void> generate(CommandBatch& batch, const Texture& texture, bool srgb = false) const;
 
 private:
     ComputeKernel downsample_;

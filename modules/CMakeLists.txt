@@ -1,4 +1,5 @@
 # Order is dependency order: each module may link only the ones above it.
+
 add_subdirectory(core)
 add_subdirectory(sched)
 add_subdirectory(image)
@@ -8,6 +9,7 @@ add_subdirectory(gpu_host)
 add_subdirectory(scene)
 add_subdirectory(render)
 add_subdirectory(geom)
+add_subdirectory(material)
 add_subdirectory(world)
 add_subdirectory(technique)
 add_subdirectory(lod)

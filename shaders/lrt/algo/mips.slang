@@ -13,7 +13,17 @@ struct MipParams {
     uint sourceHeight;
     uint width;
     uint height;
+    uint srgb;   // 1: texels hold sRGB-encoded colour; averaged as light, stored encoded
+    uint pad0; uint pad1; uint pad2;
 };
+
+float decodeSrgb(float x) {
+    return x <= 0.04045 ? x / 12.92 : pow((x + 0.055) / 1.055, 2.4);
+}
+
+float encodeSrgb(float x) {
+    return x <= 0.0031308 ? 12.92 * x : 1.055 * pow(x, 1.0 / 2.4) - 0.055;
+}
 
 Texture2D<float4>         source;
 RWTexture2D<float4>       target;
@@ -57,8 +67,15 @@ void mipDownsample(uint3 tid: SV_DispatchThreadID) {
     float4 sum = float4(0.0);
     for (uint j = 0; j < ty.count; ++j) {
         for (uint i = 0; i < tx.count; ++i) {
-            sum += tx.weights[i] * ty.weights[j] * source.Load(int3(int(tx.first + i), int(ty.first + j), 0));
+            float4 texel = source.Load(int3(int(tx.first + i), int(ty.first + j), 0));
+            if (params.srgb != 0) {
+                texel.rgb = float3(decodeSrgb(texel.r), decodeSrgb(texel.g), decodeSrgb(texel.b));
+            }
+            sum += tx.weights[i] * ty.weights[j] * texel;
         }
+    }
+    if (params.srgb != 0) {
+        sum.rgb = float3(encodeSrgb(sum.r), encodeSrgb(sum.g), encodeSrgb(sum.b));
     }
     target[tid.xy] = sum;
 }

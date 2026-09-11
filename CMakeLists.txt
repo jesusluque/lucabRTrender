@@ -100,6 +100,8 @@ endif()
 # --- the engine -----------------------------------------------------------------
 
 add_subdirectory(third_party/spz)
+# OpenUSD and MaterialX, seen by the modules that read them, the apps and tests.
+include(Usd)
 add_subdirectory(modules)
 add_subdirectory(plugins)
 add_subdirectory(apps)
