@@ -140,7 +140,13 @@ Result<void> writeParticleFieldStage(gpu::ShaderLibrary& library, const io::RawS
     }
 
     if (options.addCamera) {
-        const GfVec3d centre = (lo + hi) * 0.5;
+        // The centre where the cloud is drawn: turned with it about x.
+        GfVec3d centre = (lo + hi) * 0.5;
+        if (options.rotateXDegrees != 0.0) {
+            const double a = GfDegreesToRadians(options.rotateXDegrees);
+            centre = GfVec3d(centre[0], centre[1] * std::cos(a) - centre[2] * std::sin(a),
+                             centre[1] * std::sin(a) + centre[2] * std::cos(a));
+        }
         const double size = std::max({hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2], 1e-3});
         UsdGeomCamera camera = UsdGeomCamera::Define(stage, SdfPath("/World/Camera"));
         camera.CreateFocalLengthAttr(VtValue(35.0F));
