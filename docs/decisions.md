@@ -864,11 +864,14 @@ delegate.
   frame as shown, panels included: a float texture read back for output.
   Looked at for Kitchen_set.
 
-### Measured (M5 Pro, debug build)
+### Measured (M5 Pro, release)
 
-Kitchen_set in a 1600×900 window with a free camera, raster technique and
-automatic (ray) visibility: draw 8.7 ms, frame 9.1–10 ms (medians over 30
-and 120 frames).
+- **Setup.** `lrt view --frames 200` in a 1600×900 window with a free
+  camera, raster technique and automatic (ray) visibility.
+- **Draw.** Kitchen_set 7.08 ms, Kitchen_set_instanced 7.15 ms (medians).
+  That covers Hydra and the engine.
+- **Frame.** 10.0 ms for both, which is the display's vsync, not the
+  engine.
 
 ### Not done
 
