@@ -18,7 +18,7 @@ if(NOT TARGET MaterialXGenSlang)
 endif()
 # Imported targets are directory-scoped; the engine's other modules and apps
 # link MaterialX too.
-foreach(_mx MaterialXCore MaterialXFormat MaterialXGenShader MaterialXGenHw MaterialXGenSlang)
+foreach(_mx MaterialXCore MaterialXFormat MaterialXGenShader MaterialXGenHw MaterialXGenSlang hgi)
     if(TARGET ${_mx})
         get_target_property(_global ${_mx} IMPORTED_GLOBAL)
         if(NOT _global)

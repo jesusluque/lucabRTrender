@@ -121,9 +121,14 @@ Result<void> RayTracingScene::build(const GpuScene& scene) {
             cursor["params"]["count"].setData(count);
             cursor["params"]["layout"].setData(layout);
             cursor["params"]["words"].setData(static_cast<uint32_t>(stride / 4));
-            cursor["params"]["flags"].setData(static_cast<uint32_t>(
-                rhi::AccelerationStructureInstanceFlags::ForceOpaque |
-                rhi::AccelerationStructureInstanceFlags::TriangleFacingCullDisable));
+            // Counter-clockwise is the front, as USD's right-handed meshes
+            // (after the triangulation's left-handed reversal) have it -- the
+            // APIs' default winding once a ray looks at a triangle -- judged in
+            // object space, so mirrored instances keep their front.
+            cursor["params"]["flags"].setData(
+                static_cast<uint32_t>(rhi::AccelerationStructureInstanceFlags::ForceOpaque));
+            cursor["params"]["doubleSided"].setData(
+                static_cast<uint32_t>(rhi::AccelerationStructureInstanceFlags::TriangleFacingCullDisable));
         });
         LRT_TRY(batch.submit(true));
     }

@@ -37,8 +37,10 @@ void visibilityTrace(uint3 tid: SV_DispatchThreadID) {
     // plane, and no far plane, as its reversed infinite depth has none.
     ray.TMin = camera.orthographic != 0 ? 0.0 : camera.nearZ;
     ray.TMax = 3.0e38;
-    RayQuery<RAY_FLAG_FORCE_OPAQUE> query;
-    query.TraceRayInline(scene, RAY_FLAG_FORCE_OPAQUE, 0xFF, ray);
+    // Back faces culled where an instance is single sided (its descriptor
+    // disables culling where it is not): Hydra's rule, the rasteriser's.
+    RayQuery<RAY_FLAG_FORCE_OPAQUE | RAY_FLAG_CULL_BACK_FACING_TRIANGLES> query;
+    query.TraceRayInline(scene, RAY_FLAG_FORCE_OPAQUE | RAY_FLAG_CULL_BACK_FACING_TRIANGLES, 0xFF, ray);
     query.Proceed();
     const int2 texel = int2(int(tid.x), int(camera.height - 1 - tid.y));
     if (query.CommittedStatus() == COMMITTED_TRIANGLE_HIT) {

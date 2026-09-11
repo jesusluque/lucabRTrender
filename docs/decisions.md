@@ -560,8 +560,9 @@ with MaterialX feeding a Slang generator and `lrt view` as the viewer.
     interleave loops and the half-to-float conversions on the host are gone.
     Half attributes draw as their float twins at p99 1.
   - **Hydra render buffers:** `usd/aov_convert.slang` fills them. It converts
-    to the buffer's format, flips rows, and turns view z into the host
-    projection's [0, 1], one thread per output word. The per-pixel loops in
+    to the buffer's format and turns view z into the host projection's
+    [0, 1], one thread per output word. Rows stay bottom first, as Storm and
+    hdEmbree lay out Hydra buffers (M2 found the flip this first did). The per-pixel loops in
     `RenderBuffer::WriteColour` and the render pass are gone.
   - **StageRenderer:** it reads the engine's targets directly, so
     `StageImage.depth` is now view z, as `lrt render` writes it.

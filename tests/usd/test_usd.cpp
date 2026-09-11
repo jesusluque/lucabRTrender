@@ -213,7 +213,7 @@ TEST_CASE("a UsdGeomPoints prim draws through Hydra", "[usd][gpu][points]") {
     CHECK(image->depth[2 * 128 + 2] == 0.0F);
 
     // What a host that maps Hydra's render buffers reads: converted on the
-    // device, top row first, depth in the projection's [0, 1].
+    // device, bottom row first, depth in the projection's [0, 1].
     auto colour = (*renderer)->mappedOutput("color");
     auto depth = (*renderer)->mappedOutput("depth");
     REQUIRE(colour);
@@ -225,9 +225,8 @@ TEST_CASE("a UsdGeomPoints prim draws through Hydra", "[usd][gpu][points]") {
         std::memcpy(&v, bytes.data() + index * 4, 4);
         return v;
     };
-    // Row 64 from the top is row 63 from the bottom: the centre texel's neighbour, still inside the grid.
-    CHECK(floatAt(*colour, (64 * 128 + 64) * 4 + 3) == image->rgba[(63 * 128 + 64) * 4 + 3]);
-    CHECK(floatAt(*colour, (64 * 128 + 64) * 4 + 1) == image->rgba[(63 * 128 + 64) * 4 + 1]);
+    CHECK(floatAt(*colour, (63 * 128 + 64) * 4 + 3) == image->rgba[(63 * 128 + 64) * 4 + 3]);
+    CHECK(floatAt(*colour, (63 * 128 + 64) * 4 + 1) == image->rgba[(63 * 128 + 64) * 4 + 1]);
     const float centreDepth = floatAt(*depth, 64 * 128 + 64);
     CHECK(centreDepth > 0.0F);
     CHECK(centreDepth < 1.0F);
@@ -399,16 +398,16 @@ TEST_CASE("displayColor reaches the pixels per face and per indexed face-vertex"
     REQUIRE(eye);
     REQUIRE(world);
     REQUIRE(colour);
-    // Hydra's buffers are top row first.
+    // Hydra's buffers are bottom row first, as the engine's images.
     const auto at = [&](const std::vector<uint8_t>& bytes, uint32_t x, uint32_t y, uint32_t channels, uint32_t c) {
         int32_t v = 0;
-        std::memcpy(&v, bytes.data() + (size_t{h - 1 - y} * w + x) * channels * 4 + c * 4, 4);
+        std::memcpy(&v, bytes.data() + (size_t{y} * w + x) * channels * 4 + c * 4, 4);
         return v;
     };
     const auto atFloat = [&](const std::vector<uint8_t>& bytes, uint32_t x, uint32_t y, uint32_t channels,
                              uint32_t c) {
         float v = 0.0F;
-        std::memcpy(&v, bytes.data() + (size_t{h - 1 - y} * w + x) * channels * 4 + c * 4, 4);
+        std::memcpy(&v, bytes.data() + (size_t{y} * w + x) * channels * 4 + c * 4, 4);
         return v;
     };
     const uint32_t lx = w / 2 - 20, rx = w / 2 + 20, fy = h / 2 + 15, cy = h / 2 - 15;

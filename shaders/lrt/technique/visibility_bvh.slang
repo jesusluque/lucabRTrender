@@ -57,6 +57,12 @@ void triangleHit(inout Best best, float3 origin, float3 direction, float tMin, M
     if (abs(det) < 1e-30) {
         return;
     }
+    // Single sided: the front only, counter-clockwise, judged in object space.
+    // det = -dot(direction, cross(e1, e2)): negative where the triangle's
+    // counter-clockwise normal points along the ray, away from its origin.
+    if ((instanceRecords[instance].flags & 1u) == 0 && det < 0.0) {
+        return;
+    }
     const float inverse = 1.0 / det;
     const float3 s = origin - a;
     const float u = dot(s, p) * inverse;

@@ -337,7 +337,9 @@ TEST_CASE("rays see the triangles the rasteriser sees", "[technique][visibility]
         world::MeshInstance i;
         i.mesh = squareMesh;
         i.objectToWorld = aofx::xform::translation({-2.5 + 0.45 * k, 0.8 + 0.1 * (k % 3), -2.0 + 0.35 * k}) *
-                          aofx::xform::rotationY(37.0 * k) * aofx::xform::rotationX(25.0 * k);
+                          aofx::xform::rotationY(37.0 * k) * aofx::xform::rotationX(25.0 * k) *
+                          aofx::xform::scaling({k % 4 == 3 ? -1.0 : 1.0, 1.0, 1.0});
+        i.doubleSided = k % 2 == 0;   // half single sided, some of those mirrored
         instances.push_back(i);
     }
     REQUIRE(r->scene.update(instances, projection));
@@ -391,4 +393,47 @@ TEST_CASE("rays see the triangles the rasteriser sees", "[technique][visibility]
         CHECK(c[0] == 0);
         CHECK(std::abs(static_cast<int>(c[2]) - static_cast<int>(c[3])) <= static_cast<int>(c[2] / 50));
     }
+}
+
+TEST_CASE("a single-sided mesh shows its front only, mirrored or not", "[technique][visibility][culling]") {
+    LRT_REQUIRE_GPU(gpu);
+    if (!gpu->device->caps().rasterization) {
+        SKIP("no rasterisation on this device");
+    }
+    auto r = renderer(*gpu);
+    const uint32_t w = 101;
+    const uint32_t h = 81;
+    const render::Projection projection =
+        render::projectionFor(render::Camera::lookingAt({0.0, 0.0, 0.0}, {0.0, 0.0, -1.0}), w, h);
+    const auto mesh = square(*r, 1.0F);   // counter-clockwise seen from +z
+    const auto covered = [&](const render::Mat4& transform, bool doubleSided) {
+        world::MeshInstance i;
+        i.mesh = mesh;
+        i.objectToWorld = aofx::xform::translation({0.0, 0.0, -5.0}) * transform;
+        i.doubleSided = doubleSided;
+        const render::RenderTargets out = draw(*gpu, *r, std::span<const world::MeshInstance>(&i, 1), projection, w, h);
+        gpu::BufferDesc zeros;
+        zeros.bytes = uint64_t{w} * h * 4;
+        zeros.elementBytes = 4;
+        auto empty = gpu::Buffer::create(*gpu->device, zeros);
+        REQUIRE(empty);
+        auto drawn = render::countDifferent(*gpu->library, out.depth, *empty, w * h);
+        REQUIRE(drawn);
+        return *drawn;
+    };
+    const uint64_t front = covered(render::Mat4::identity(), false);
+    const uint64_t back = covered(aofx::xform::rotationY(180.0), false);
+    const uint64_t backTwoSided = covered(aofx::xform::rotationY(180.0), true);
+    // Mirrored: winding on screen turns round, the side the object's normal
+    // is on does not -- that side is still the front.
+    const uint64_t mirroredFront = covered(aofx::xform::scaling({-1.0, 1.0, 1.0}), false);
+    const uint64_t mirroredBack = covered(aofx::xform::scaling({-1.0, 1.0, 1.0}) * aofx::xform::rotationY(180.0), false);
+    std::printf("  single sided: front %llu, back %llu (two sided %llu); mirrored front %llu, back %llu\n",
+                (unsigned long long)front, (unsigned long long)back, (unsigned long long)backTwoSided,
+                (unsigned long long)mirroredFront, (unsigned long long)mirroredBack);
+    CHECK(front > 1000);
+    CHECK(back == 0);
+    CHECK(backTwoSided == front);
+    CHECK(mirroredFront == front);
+    CHECK(mirroredBack == 0);
 }

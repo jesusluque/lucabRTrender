@@ -5,14 +5,18 @@ include(Catch)
 # A Catch2 executable, registered with ctest case by case. GPU tests skip when
 # the machine has no device; they never fall back to anything else.
 function(lrt_test name)
-    cmake_parse_arguments(ARG "" "" "SOURCES;LIBS" ${ARGN})
+    cmake_parse_arguments(ARG "" "" "SOURCES;LIBS;ENVIRONMENT_MODIFICATION" ${ARGN})
     add_executable(${name} ${ARG_SOURCES})
     target_link_libraries(${name} PRIVATE Catch2::Catch2WithMain ${ARG_LIBS})
     lrt_set_target_defaults(${name})
     set_target_properties(${name} PROPERTIES BUILD_RPATH "${SLANG_ROOT}/lib")
     add_dependencies(${name} lrt_shaders_copy)
+    set(properties ENVIRONMENT "LRT_SHADER_DIR=${LRT_SHADER_OUTPUT_DIR}")
+    if(ARG_ENVIRONMENT_MODIFICATION)
+        list(APPEND properties ENVIRONMENT_MODIFICATION "${ARG_ENVIRONMENT_MODIFICATION}")
+    endif()
     catch_discover_tests(${name}
-        PROPERTIES ENVIRONMENT "LRT_SHADER_DIR=${LRT_SHADER_OUTPUT_DIR}"
+        PROPERTIES ${properties}
         DISCOVERY_MODE PRE_TEST)
 endfunction()
 
@@ -60,6 +64,19 @@ target_compile_definitions(lrt_usd_tests PRIVATE LRT_HYDRA_PLUGIN_DIR="${LRT_HYD
 target_compile_options(lrt_usd_tests PRIVATE -Wno-old-style-cast -Wno-shadow -Wno-deprecated-declarations
                        -Wno-double-promotion -Wno-cast-align)
 set_target_properties(lrt_usd_tests PROPERTIES CXX_VISIBILITY_PRESET default VISIBILITY_INLINES_HIDDEN OFF
+                      BUILD_RPATH "${SLANG_ROOT}/lib;${LRT_USD_ROOT}/lib")
+
+# Storm as the oracle for geometry: its own process, its own Metal device,
+# single-sampled (OpenUSD reads the setting as its libraries load).
+lrt_test(lrt_storm_oracle_tests
+    SOURCES usd/test_storm_oracle.cpp
+    LIBS lrt::usd hgi
+    ENVIRONMENT_MODIFICATION "HDX_MSAA_SAMPLE_COUNT=set:1")
+add_dependencies(lrt_storm_oracle_tests hdLrt)
+target_compile_definitions(lrt_storm_oracle_tests PRIVATE LRT_HYDRA_PLUGIN_DIR="${LRT_HYDRA_PLUGIN_DIR}")
+target_compile_options(lrt_storm_oracle_tests PRIVATE -Wno-old-style-cast -Wno-shadow -Wno-deprecated-declarations
+                       -Wno-double-promotion -Wno-cast-align)
+set_target_properties(lrt_storm_oracle_tests PROPERTIES CXX_VISIBILITY_PRESET default VISIBILITY_INLINES_HIDDEN OFF
                       BUILD_RPATH "${SLANG_ROOT}/lib;${LRT_USD_ROOT}/lib")
 
 lrt_test(lrt_gpu_host_tests

@@ -1,8 +1,9 @@
 // Copyright (c) 2026 lucabRTrender contributors.
 //
 // An engine image into the bytes a Hydra render buffer holds: the buffer's
-// format (8-bit, half or float components, 1 to 4 of them), top row first
-// where the engine renders bottom row first, and depth as the host
+// format (8-bit, half or float components, 1 to 4 of them), bottom row first
+// as the engine renders and as Hydra's buffers are laid out (Storm's and
+// hdEmbree's alike: row 0 is the bottom), and depth as the host
 // projection's [0, 1] instead of view z. One thread per output word, so any
 // pixel size -- three bytes, twelve -- writes without two threads touching the
 // same word.
@@ -34,7 +35,7 @@ ConstantBuffer<AovParams>  params;
 float valueOf(uint pixel, uint channel) {
     const uint x = pixel % params.width;
     const uint y = pixel / params.width;
-    const uint at = (params.height - 1 - y) * params.width + x;
+    const uint at = y * params.width + x;
     if (params.source == 0) {
         return channel < 4 ? colour[at * params.stride + params.offset][channel] : 0.0;
     }
@@ -51,7 +52,7 @@ float valueOf(uint pixel, uint channel) {
 uint idAt(uint pixel) {
     const uint x = pixel % params.width;
     const uint y = pixel / params.width;
-    const uint at = (params.height - 1 - y) * params.width + x;
+    const uint at = y * params.width + x;
     return idSource[at * params.stride + params.offset];
 }
 

@@ -26,6 +26,7 @@ struct VertexOut {
     float4 position : SV_Position;
     nointerpolation uint instance : INSTANCE;
     nointerpolation uint triangle : TRIANGLE;
+    nointerpolation uint cullBack : CULL;   // 1: single sided, keep the front only
 };
 
 [shader("vertex")]
@@ -39,10 +40,20 @@ VertexOut visibilityVertex(uint vertex : SV_VertexID, uint instanceIndex : SV_In
     out.position = viewToClip(camera, v);
     out.instance = instance;
     out.triangle = triangle;
+    // Hydra's rule (Storm's, HdCullStyle's default): a mesh that is not
+    // double sided shows its front only -- counter-clockwise for a
+    // right-handed mesh, and turned round when its transform mirrors it.
+    const float3x3 linear = float3x3(record.view0.xyz, record.view1.xyz, record.view2.xyz);
+    const bool mirrored = determinant(linear) < 0.0;
+    out.cullBack = (record.flags & 1u) == 0 ? (mirrored ? 2u : 1u) : 0u;
     return out;
 }
 
 [shader("fragment")]
-uint4 visibilityFragment(VertexOut input) : SV_Target0 {
+uint4 visibilityFragment(VertexOut input, bool front : SV_IsFrontFace) : SV_Target0 {
+    // The view flips z (+z forward), which turns the winding round once more.
+    if ((input.cullBack == 1 && front) || (input.cullBack == 2 && !front)) {
+        discard;
+    }
     return uint4(input.instance + 1, input.triangle, 0, 0);
 }

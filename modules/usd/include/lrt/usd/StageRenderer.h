@@ -44,7 +44,8 @@ public:
     void requestOutputs(const std::vector<std::string>& aovs);
 
     /// The last render's Hydra render buffer for `aov` ("color", "depth"), as
-    /// a host mapping it reads it: the buffer's own format, top row first.
+    /// a host mapping it reads it: the buffer's own format, bottom row first
+    /// (Hydra's layout, Storm's and hdEmbree's).
     [[nodiscard]] Result<std::vector<uint8_t>> mappedOutput(const std::string& aov);
 
     /// Every camera prim on the stage.
