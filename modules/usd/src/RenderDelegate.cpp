@@ -6,6 +6,7 @@
 #include <pxr/imaging/hd/resourceRegistry.h>
 #include <pxr/imaging/hd/tokens.h>
 
+#include "Instancer.h"
 #include "Mesh.h"
 #include "ParticleField.h"
 #include "Points.h"
@@ -103,6 +104,12 @@ HdRprim* HdLrtRenderDelegate::CreateRprim(TfToken const& typeId, SdfPath const& 
 }
 
 void HdLrtRenderDelegate::DestroyRprim(HdRprim* rprim) { delete rprim; }
+
+HdInstancer* HdLrtRenderDelegate::CreateInstancer(HdSceneDelegate* delegate, SdfPath const& id) {
+    return new HdLrtInstancer(delegate, id);
+}
+
+void HdLrtRenderDelegate::DestroyInstancer(HdInstancer* instancer) { delete instancer; }
 
 HdSprim* HdLrtRenderDelegate::CreateSprim(TfToken const& typeId, SdfPath const& id) {
     return typeId == HdPrimTypeTokens->camera ? new HdCamera(id) : nullptr;

@@ -4,7 +4,11 @@
 #include <algorithm>
 #include <span>
 
+#include <pxr/base/gf/matrix4d.h>
+#include <pxr/base/gf/matrix4f.h>
+#include <pxr/base/gf/quatd.h>
 #include <pxr/base/gf/quatf.h>
+#include <pxr/base/gf/vec3d.h>
 #include <pxr/base/gf/quath.h>
 #include <pxr/base/gf/vec3f.h>
 #include <pxr/base/gf/vec3h.h>
@@ -35,6 +39,17 @@ scene::FloatStream streamOf(const pxr::VtValue& value, size_t* elements) {
     if (value.IsHolding<VtQuathArray>()) return bytesOf(value.UncheckedGet<VtQuathArray>(), true, elements);
     if (value.IsHolding<VtFloatArray>()) return bytesOf(value.UncheckedGet<VtFloatArray>(), false, elements);
     if (value.IsHolding<VtHalfArray>()) return bytesOf(value.UncheckedGet<VtHalfArray>(), true, elements);
+    const auto doubles = [&](scene::FloatStream stream) {
+        stream.half = false;
+        stream.isDouble = true;
+        return stream;
+    };
+    if (value.IsHolding<VtVec3dArray>()) return doubles(bytesOf(value.UncheckedGet<VtVec3dArray>(), false, elements));
+    if (value.IsHolding<VtQuatdArray>()) return doubles(bytesOf(value.UncheckedGet<VtQuatdArray>(), false, elements));
+    if (value.IsHolding<VtMatrix4dArray>()) {
+        return doubles(bytesOf(value.UncheckedGet<VtMatrix4dArray>(), false, elements));
+    }
+    if (value.IsHolding<VtMatrix4fArray>()) return bytesOf(value.UncheckedGet<VtMatrix4fArray>(), false, elements);
     if (value.IsHolding<GfVec3f>()) {
         if (elements != nullptr) {
             *elements = 1;

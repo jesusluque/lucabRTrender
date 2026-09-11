@@ -10,6 +10,9 @@
 #include <string>
 
 #include <pxr/base/vt/array.h>
+#include <pxr/usd/sdf/path.h>
+
+#include "lrt/render/Camera.h"
 
 #include <pxr/base/vt/value.h>
 
@@ -39,6 +42,22 @@ struct MeshArrays {
     pxr::VtArray<int>      holeIndices;
     bool                   leftHanded = false;
     bool                   smoothNormals = true;
+};
+
+/// An instancer's primvars as Hydra holds them.
+struct InstancerArrays {
+    pxr::VtValue translations;   ///< VtVec3fArray / VtVec3dArray / VtVec3hArray
+    pxr::VtValue rotations;      ///< VtQuathArray / VtQuatfArray / VtQuatdArray (ix, iy, iz, real)
+    pxr::VtValue scales;         ///< VtVec3fArray / VtVec3dArray / VtVec3hArray
+    pxr::VtValue transforms;     ///< VtMatrix4dArray / VtMatrix4fArray, row-major
+    render::Mat4 instancerTransform = render::Mat4::identity();
+};
+
+/// One level of a prototype's instancing: the instancer, and which of its
+/// elements the level below (the prototype, or a nested instancer) takes.
+struct InstancerLink {
+    pxr::SdfPath      instancer;
+    pxr::VtArray<int> indices;
 };
 
 /// What a mesh looks like before materials: displayColor, displayOpacity.

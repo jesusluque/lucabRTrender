@@ -34,6 +34,7 @@ set(LRT_USD_SOURCES
     src/RenderBuffer.cpp
     src/ParticleField.cpp
     src/Mesh.cpp
+    src/Instancer.cpp
     src/Points.cpp
     src/RenderPass.cpp
     src/RenderDelegate.cpp)

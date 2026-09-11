@@ -82,9 +82,13 @@ void Engine::setPoints(const pxr::SdfPath& id, std::optional<PointsArrays> raw,
 
 void Engine::setMesh(const pxr::SdfPath& id, int32_t primId, const pxr::TfToken& renderTag,
                      std::optional<MeshArrays> arrays, const render::Mat4* transform, std::optional<bool> visible,
-                     std::optional<MeshLook> look) {
+                     std::optional<MeshLook> look, std::optional<std::vector<InstancerLink>> instancing) {
     const std::lock_guard<std::mutex> held(guard_);
     MeshEntry& entry = meshes_[id];
+    if (instancing.has_value()) {
+        entry.instancing = std::move(*instancing);
+        entry.chainDirty = true;
+    }
     entry.primId = static_cast<uint32_t>(primId);
     entry.renderTag = renderTag;
     if (arrays.has_value()) {
@@ -99,6 +103,19 @@ void Engine::setMesh(const pxr::SdfPath& id, int32_t primId, const pxr::TfToken&
     if (look.has_value()) {
         entry.look = *look;
     }
+}
+
+void Engine::setInstancer(const pxr::SdfPath& id, const pxr::SdfPath& parent, InstancerArrays arrays) {
+    const std::lock_guard<std::mutex> held(guard_);
+    InstancerEntry& entry = instancers_[id];
+    entry.arrays = std::move(arrays);
+    entry.parent = parent;
+    entry.version = ++instancerVersion_;
+}
+
+void Engine::removeInstancer(const pxr::SdfPath& id) {
+    const std::lock_guard<std::mutex> held(guard_);
+    instancers_.erase(id);
 }
 
 void Engine::remove(const pxr::SdfPath& id) {
@@ -273,6 +290,7 @@ Result<void> Engine::render(const render::Projection& projection, const render::
                             const pxr::TfTokenVector* renderTags) {
     lastTargets_ = &targets;
     std::vector<world::MeshInstance> meshInstances;
+    std::vector<world::InstanceSet> meshSets;
     std::vector<render::SplatInstance> splats;
     std::vector<render::PointInstance> points;
     std::vector<lod::LodInstance> cuts;
@@ -309,6 +327,56 @@ Result<void> Engine::render(const render::Projection& projection, const render::
             }
             if (renderTags != nullptr && !renderTags->empty() &&
                 std::find(renderTags->begin(), renderTags->end(), entry.renderTag) == renderTags->end()) {
+                continue;
+            }
+            if (!entry.instancing.empty()) {
+                // Instanced: the chain, recomposed on the device when an
+                // instancer in it changed.
+                std::vector<uint64_t> versions;
+                bool complete = true;
+                for (const InstancerLink& link : entry.instancing) {
+                    const auto found = instancers_.find(link.instancer);
+                    complete = complete && found != instancers_.end();
+                    versions.push_back(found != instancers_.end() ? found->second.version : 0);
+                }
+                if (!complete) {
+                    continue;
+                }
+                auto& mutableEntry = const_cast<MeshEntry&>(entry);
+                if (entry.chainDirty || versions != entry.chainVersions) {
+                    if (!instancing_.has_value()) {
+                        auto made = world::Instancing::create(*library_);
+                        if (!made) return std::move(made).error();
+                        instancing_.emplace(std::move(*made));
+                    }
+                    std::vector<world::InstancerLevel> levels;
+                    for (const InstancerLink& link : entry.instancing) {
+                        const InstancerArrays& a = instancers_.at(link.instancer).arrays;
+                        world::InstancerLevel level;
+                        level.indices = std::span<const int32_t>(link.indices.cdata(), link.indices.size());
+                        level.translations = streamOf(a.translations);
+                        level.rotations = streamOf(a.rotations);
+                        level.scales = streamOf(a.scales);
+                        level.transforms = streamOf(a.transforms);
+                        level.instancerTransform = a.instancerTransform;
+                        levels.push_back(level);
+                    }
+                    auto chain = instancing_->compose(levels);
+                    if (!chain) return std::move(chain).error();
+                    mutableEntry.chain = std::move(*chain);
+                    mutableEntry.chainVersions = std::move(versions);
+                    mutableEntry.chainDirty = false;
+                }
+                world::InstanceSet set;
+                set.mesh = entry.gpu;
+                set.chainRows = entry.chain.rows;
+                set.count = entry.chain.count;
+                set.prototype = entry.objectToWorld;
+                set.primId = entry.primId;
+                set.displayColor = entry.look.displayColor;
+                set.displayOpacity = entry.look.displayOpacity;
+                set.doubleSided = entry.look.doubleSided;
+                meshSets.push_back(std::move(set));
                 continue;
             }
             world::MeshInstance instance;
@@ -379,7 +447,7 @@ Result<void> Engine::render(const render::Projection& projection, const render::
         return ok();
     }
     // Opaque layers first -- meshes, points -- then splats blended over them.
-    const bool drawMeshes = !meshInstances.empty();
+    const bool drawMeshes = !meshInstances.empty() || !meshSets.empty();
     if (drawMeshes && !device_->caps().rasterization) {
         static bool warned = false;
         if (!warned) {
@@ -400,7 +468,7 @@ Result<void> Engine::render(const render::Projection& projection, const render::
             if (!shading) return std::move(shading).error();
             headlight_.emplace(std::move(*shading));
         }
-        LRT_TRY(scene_->update(meshInstances, projection));
+        LRT_TRY(scene_->update(meshInstances, projection, meshSets));
         gpu::CommandBatch batch(*device_);
         LRT_TRY(visibilityRaster_->render(batch, *scene_, projection, settings.width, settings.height, visibility_));
         LRT_TRY(headlight_->shade(batch, *scene_, visibility_, projection, meshLayer_));

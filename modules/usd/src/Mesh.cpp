@@ -3,6 +3,8 @@
 
 #include <pxr/base/gf/vec3f.h>
 #include <pxr/imaging/hd/changeTracker.h>
+#include <pxr/imaging/hd/instancer.h>
+#include <pxr/imaging/hd/renderIndex.h>
 #include <pxr/imaging/hd/meshTopology.h>
 #include <pxr/imaging/hd/sceneDelegate.h>
 #include <pxr/imaging/hd/tokens.h>
@@ -64,6 +66,23 @@ void HdLrtMesh::Sync(HdSceneDelegate* delegate, HdRenderParam* renderParam, HdDi
         *dirtyBits &= ~HdChangeTracker::AllSceneDirtyBits;
         return;
     }
+    _UpdateInstancer(delegate, dirtyBits);
+    HdInstancer::_SyncInstancerAndParents(delegate->GetRenderIndex(), GetInstancerId());
+    std::optional<std::vector<lrt::usd::InstancerLink>> instancing;
+    if ((*dirtyBits & (HdChangeTracker::DirtyInstancer | HdChangeTracker::DirtyInstanceIndex)) != 0) {
+        // The chain of instancers above this prototype, innermost first, with
+        // the elements each level takes of the one above.
+        std::vector<lrt::usd::InstancerLink> chain;
+        SdfPath child = id;
+        SdfPath instancer = GetInstancerId();
+        while (!instancer.IsEmpty()) {
+            chain.push_back({instancer, delegate->GetInstanceIndices(instancer, child)});
+            HdInstancer* level = delegate->GetRenderIndex().GetInstancer(instancer);
+            child = instancer;
+            instancer = level != nullptr ? level->GetParentId() : SdfPath();
+        }
+        instancing = std::move(chain);
+    }
 
     std::optional<lrt::usd::MeshArrays> arrays;
     if ((*dirtyBits & (HdChangeTracker::DirtyPoints | HdChangeTracker::DirtyTopology |
@@ -107,7 +126,7 @@ void HdLrtMesh::Sync(HdSceneDelegate* delegate, HdRenderParam* renderParam, HdDi
         visible = IsVisible();
     }
     engine->setMesh(id, GetPrimId(), GetRenderTag(), std::move(arrays), transformDirty ? &transform : nullptr,
-                    visible, look);
+                    visible, look, std::move(instancing));
     *dirtyBits &= ~HdChangeTracker::AllSceneDirtyBits;
 }
 

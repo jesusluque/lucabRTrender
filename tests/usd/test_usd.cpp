@@ -327,6 +327,90 @@ TEST_CASE("a UsdGeomMesh draws through Hydra where, how deep and how lit it anal
     CHECK(depthError < 1e-3F);
 }
 
+TEST_CASE("a PointInstancer draws as its instances authored one by one", "[usd][gpu][mesh][instancing]") {
+    LRT_REQUIRE_GPU(gpu);
+    if (!gpu->device->caps().rasterization) {
+        SKIP("no rasterisation on this device");
+    }
+    const std::string square =
+        "        int[] faceVertexCounts = [4]\n"
+        "        int[] faceVertexIndices = [0, 1, 2, 3]\n"
+        "        point3f[] points = [(-0.5, -0.5, 0), (0.5, -0.5, 0), (0.5, 0.5, 0), (-0.5, 0.5, 0)]\n"
+        "        uniform token subdivisionScheme = \"none\"\n"
+        "        color3f[] primvars:displayColor = [(0.3, 0.7, 0.5)] ( interpolation = \"constant\" )\n";
+    const std::string camera = "def Camera \"Camera\"\n{\n"
+                               "    float focalLength = 35\n"
+                               "    float horizontalAperture = 24.576\n    float verticalAperture = 18.432\n"
+                               "    double3 xformOp:translate = (0.5, 1, 9)\n"
+                               "    uniform token[] xformOpOrder = [\"xformOp:translate\"]\n}\n";
+    const fs::path instanced = scratch("instancer.usda");
+    {
+        std::ofstream out(instanced);
+        out << "#usda 1.0\n(\n    upAxis = \"Y\"\n)\n"
+               "def PointInstancer \"Many\"\n{\n"
+               "    rel prototypes = [</Many/Prototypes/Square>]\n"
+               "    int[] protoIndices = [0, 0, 0]\n"
+               "    point3f[] positions = [(-2, 0, 0), (0, 1, -1), (2, -0.5, 0.5)]\n"
+               "    quath[] orientations = [(1, 0, 0, 0), (0.7071068, 0, 0.7071068, 0), (0.9238795, 0.3826834, 0, 0)]\n"
+               "    float3[] scales = [(1, 1, 1), (2, 1, 1), (1, 1.5, 1)]\n"
+               "    double3 xformOp:rotateXYZ = (0, 10, 0)\n"
+               "    uniform token[] xformOpOrder = [\"xformOp:rotateXYZ\"]\n"
+               "    def Scope \"Prototypes\"\n    {\n"
+               "        def Mesh \"Square\"\n        {\n" << square << "        }\n    }\n}\n" << camera;
+    }
+    const fs::path authored = scratch("authored.usda");
+    {
+        std::ofstream out(authored);
+        out << "#usda 1.0\n(\n    upAxis = \"Y\"\n)\n"
+               "def Xform \"Many\"\n{\n"
+               "    double3 xformOp:rotateXYZ = (0, 10, 0)\n"
+               "    uniform token[] xformOpOrder = [\"xformOp:rotateXYZ\"]\n";
+        // translate, orient (as a rotation about one axis), scale: the
+        // instancer's T * R * S, authored as ops.
+        const char* ops[3] = {
+            "        double3 xformOp:translate = (-2, 0, 0)\n"
+            "        uniform token[] xformOpOrder = [\"xformOp:translate\"]\n",
+            "        double3 xformOp:translate = (0, 1, -1)\n        double xformOp:rotateY = 90\n"
+            "        float3 xformOp:scale = (2, 1, 1)\n"
+            "        uniform token[] xformOpOrder = [\"xformOp:translate\", \"xformOp:rotateY\", \"xformOp:scale\"]\n",
+            "        double3 xformOp:translate = (2, -0.5, 0.5)\n        double xformOp:rotateX = 45\n"
+            "        float3 xformOp:scale = (1, 1.5, 1)\n"
+            "        uniform token[] xformOpOrder = [\"xformOp:translate\", \"xformOp:rotateX\", \"xformOp:scale\"]\n"};
+        for (int k = 0; k < 3; ++k) {
+            out << "    def Mesh \"Square" << k << "\"\n    {\n" << ops[k] << square << "    }\n";
+        }
+        out << "}\n" << camera;
+    }
+    const uint32_t w = 200;
+    const uint32_t h = 150;
+    auto a = usd::StageRenderer::open(instanced);
+    auto b = usd::StageRenderer::open(authored);
+    if (!a) FAIL(a.error().toString());
+    if (!b) FAIL(b.error().toString());
+    auto imageA = (*a)->render("/Camera", 0.0, w, h);
+    auto imageB = (*b)->render("/Camera", 0.0, w, h);
+    if (!imageA) FAIL(imageA.error().toString());
+    if (!imageB) FAIL(imageB.error().toString());
+    gpu::BufferDesc desc;
+    desc.bytes = imageA->rgba.size() * sizeof(float);
+    desc.elementBytes = 16;
+    auto bufferA = gpu::Buffer::create(*gpu->device, desc, imageA->rgba.data());
+    auto bufferB = gpu::Buffer::create(*gpu->device, desc, imageB->rgba.data());
+    REQUIRE(bufferA);
+    REQUIRE(bufferB);
+    auto diff = render::compareHdr(*gpu->library, *bufferA, *bufferB, w, h);
+    REQUIRE(diff);
+    auto blank = std::vector<float>(imageA->rgba.size(), 0.0F);
+    auto blankBuffer = gpu::Buffer::create(*gpu->device, desc, blank.data());
+    REQUIRE(blankBuffer);
+    auto drawn = render::compareHdr(*gpu->library, *bufferA, *blankBuffer, w, h);
+    REQUIRE(drawn);
+    std::printf("  PointInstancer against authored xforms: relMSE %.2e, p99 relative %.2e (against blank: relMSE %.2e)\n",
+                diff->relMse, diff->p99Relative, drawn->relMse);
+    CHECK(drawn->relMse > 1.0);    // something was drawn
+    CHECK(diff->relMse < 1e-5);    // half-precision orientations
+}
+
 TEST_CASE("the hdLrt plugin loads through USD's renderer plugin registry", "[usd][plugin]") {
     const fs::path plugins = LRT_HYDRA_PLUGIN_DIR;
     PlugRegistry::GetInstance().RegisterPlugins(plugins.string());

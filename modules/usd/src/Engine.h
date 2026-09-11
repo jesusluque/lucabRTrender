@@ -34,6 +34,7 @@
 #include "lrt/lod/Lod.h"
 #include "lrt/technique/Visibility.h"
 #include "lrt/world/GpuScene.h"
+#include "lrt/world/Instancing.h"
 #include "lrt/lod/Lrtc.h"
 #include "lrt/render/GaussianRayTracer.h"
 #include "lrt/render/PointRasterizer.h"
@@ -63,8 +64,18 @@ struct SplatEntry {
     std::unique_ptr<lod::StreamingPool> pool;       ///< or streamed
 };
 
+struct InstancerEntry {
+    InstancerArrays  arrays;
+    pxr::SdfPath     parent;
+    uint64_t         version = 0;
+};
+
 struct MeshEntry {
     std::optional<MeshArrays>              pending;
+    std::vector<InstancerLink>             instancing;      ///< innermost first; empty: not instanced
+    world::InstanceChain                   chain;           ///< composed from `instancing`
+    std::vector<uint64_t>                  chainVersions;   ///< the instancer versions `chain` was made from
+    bool                                   chainDirty = false;
     std::shared_ptr<const geom::GpuMesh>   gpu;
     render::Mat4                           objectToWorld = render::Mat4::identity();
     MeshLook                               look;
@@ -109,7 +120,10 @@ public:
                    std::optional<render::PointStyle> style);
     void setMesh(const pxr::SdfPath& id, int32_t primId, const pxr::TfToken& renderTag,
                  std::optional<MeshArrays> arrays, const render::Mat4* transform, std::optional<bool> visible,
-                 std::optional<MeshLook> look);
+                 std::optional<MeshLook> look,
+                 std::optional<std::vector<InstancerLink>> instancing = std::nullopt);
+    void setInstancer(const pxr::SdfPath& id, const pxr::SdfPath& parent, InstancerArrays arrays);
+    void removeInstancer(const pxr::SdfPath& id);
     void remove(const pxr::SdfPath& id);
 
     // --- from the render pass (one thread) ---
@@ -153,6 +167,9 @@ private:
     std::map<pxr::SdfPath, SplatEntry>        splats_;
     std::map<pxr::SdfPath, PointsEntry>       points_;
     std::map<pxr::SdfPath, MeshEntry>         meshes_;
+    std::map<pxr::SdfPath, InstancerEntry>    instancers_;
+    uint64_t                                  instancerVersion_ = 0;
+    std::optional<world::Instancing>          instancing_;
     std::optional<geom::MeshBuilder>          meshBuilder_;   ///< made on first use
     std::optional<world::GpuScene>            scene_;
     std::optional<technique::VisibilityRaster> visibilityRaster_;

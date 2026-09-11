@@ -28,8 +28,8 @@ public:
 
     HdRenderPassSharedPtr CreateRenderPass(HdRenderIndex* index,
                                            HdRprimCollection const& collection) override;
-    HdInstancer* CreateInstancer(HdSceneDelegate*, SdfPath const&) override { return nullptr; }
-    void DestroyInstancer(HdInstancer*) override {}
+    HdInstancer* CreateInstancer(HdSceneDelegate* delegate, SdfPath const& id) override;
+    void DestroyInstancer(HdInstancer* instancer) override;
 
     HdRprim* CreateRprim(TfToken const& typeId, SdfPath const& rprimId) override;
     void DestroyRprim(HdRprim* rprim) override;
