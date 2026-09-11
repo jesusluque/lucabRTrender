@@ -196,3 +196,38 @@ void packedWrite(uint3 tid: SV_DispatchThreadID) {
     const uint4 byte = uint4(round(saturate(colour) * 255.0));
     packed[uint2(0, 0)] = byte.x | (byte.y << 8) | (byte.z << 16) | (byte.w << 24);
 }
+
+/// The pattern written over every texel through the uint view, and checked
+/// back through the ordinary one. The single-texel probe above writes (0, 0),
+/// which is the one coordinate a stride or addressing mistake cannot show.
+[shader("compute")]
+[numthreads(16, 16, 1)]
+void packedFill(uint3 tid: SV_DispatchThreadID) {
+    if (tid.x >= params.width || tid.y >= params.height) {
+        return;
+    }
+    const uint4 byte = uint4(round(saturate(patternAt(tid.x, tid.y)) * 255.0));
+    packed[tid.xy] = byte.x | (byte.y << 8) | (byte.z << 16) | (byte.w << 24);
+}
+
+/// The same check, read back through the uint view rather than the colour one.
+/// If this agrees while packedVerify does not, the store landed and it is the
+/// aliasing of the two views that differs; if it disagrees too, the store
+/// never landed.
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void packedVerifyUint(uint3 tid: SV_DispatchThreadID) {
+    if (tid.x != 0) {
+        return;
+    }
+    uint mismatches = 0;
+    for (uint y = 0; y < params.height; ++y) {
+        for (uint x = 0; x < params.width; ++x) {
+            const uint4 want = uint4(round(saturate(patternAt(x, y)) * 255.0));
+            const uint wantPacked = want.x | (want.y << 8) | (want.z << 16) | (want.w << 24);
+            mismatches += packed[uint2(x, y)] != wantPacked ? 1u : 0u;
+        }
+    }
+    counts[0] = mismatches;
+    counts[1] = params.width * params.height;
+}

@@ -542,3 +542,40 @@ TEST_CASE("an eight-bit texture written through a uint view holds the colour pac
         CHECK(std::abs(read[k] - wrote[k]) <= 1.0F / 255.0F);
     }
 }
+
+/// Written through the uint view and read back through it: does the store land?
+TEST_CASE("an eight-bit texture read back through the same uint view holds what was stored",
+          "[gpu][texture][probe]") {
+    LRT_REQUIRE_GPU(gpu);
+    static gpu::ComputeKernel kFill = kernelOf(*gpu, "packedFill");
+    static gpu::ComputeKernel kVerify = kernelOf(*gpu, "packedVerifyUint");
+    const uint32_t w = 16;
+    const uint32_t h = 16;
+    gpu::Texture eight = texture(*gpu, w, h, 1, "eight-bit round trip", rhi::Format::RGBA8Unorm);
+    rhi::TextureViewDesc desc;
+    desc.format = rhi::Format::R32Uint;
+    rhi::ComPtr<rhi::ITextureView> uintView;
+    if (SLANG_FAILED(gpu->device->rhi()->createTextureView(eight.rhi(), desc, uintView.writeRef()))) {
+        SKIP("this backend will not make a uint view of an eight-bit texture");
+    }
+    gpu::Buffer counts = test::uintBuffer(*gpu->device, 2, "counts");
+    gpu::CommandBatch batch(*gpu->device);
+    kFill.dispatch(batch, {w, h, 1}, [&](rhi::ShaderCursor cursor) {
+        cursor["packed"].setBinding(uintView.get());
+        cursor["params"]["width"].setData(w);
+        cursor["params"]["height"].setData(h);
+    });
+    REQUIRE(batch.submit(true));
+    gpu::CommandBatch second(*gpu->device);
+    kVerify.dispatch(second, {1, 1, 1}, [&](rhi::ShaderCursor cursor) {
+        cursor["packed"].setBinding(uintView.get());
+        cursor["counts"].setBinding(counts.rhi());
+        cursor["params"]["width"].setData(w);
+        cursor["params"]["height"].setData(h);
+    });
+    REQUIRE(second.submit(true));
+    std::array<uint32_t, 2> out{};
+    REQUIRE(counts.read(*gpu->device, 0, sizeof(out), out.data()));
+    std::printf("  packed round trip through the uint view: %u of %u texels differ\n", out[0], out[1]);
+    CHECK(out[0] == 0u);
+}

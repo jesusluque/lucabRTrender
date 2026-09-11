@@ -1295,9 +1295,27 @@ Everything the texture store decodes from an 8-bit image is wrong here until
 it is fixed, which is most of what still fails: the PNG and UDIM tests
 directly, and the ray tracer and USD tests that shade through a decoded image.
 The fix is ours rather than Slang's -- the lowering is faithful, and the two
-targets simply mean different things by the store -- so the texel wants
-packing in the shader and storing through a uint view of the same texture,
-which writes four bytes on either backend and asks neither to convert.
+targets simply mean different things by the store. The obvious route, packing
+the texel in the shader and storing it through a uint view of the same
+texture, was tried and measured, and it does not hold: **the two backends fail
+in opposite places.**
+
+- The `float4` store converts on Metal and writes the float's own bytes on
+  CUDA.
+- A uint (`R32Uint`) view of the same `RGBA8Unorm` texture aliases correctly
+  on CUDA -- written packed, it reads back as the colour through the texture's
+  own view -- and does not alias on Metal, where the store lands (read back
+  through the uint view, 0 of 256 texels differ) but is invisible through the
+  colour view (256 of 256 differ). Metal wants the texture created able to be
+  viewed as another format, which slang-rhi does not ask for.
+
+So the packed route trades a CUDA bug for a Metal one, and was reverted after
+being measured; Metal is back to its 451 assertions exactly. What is left is
+to decode into a buffer and copy the buffer into the texture, which asks
+neither backend to reinterpret anything. That is not attempted here.
+
+`lrt_gpu_tests` keeps the probes that establish all of the above, and they
+pass on both backends bar the one that names the defect.
 
 ### Measured (NVIDIA L4, Ubuntu 24.04, debug)
 
