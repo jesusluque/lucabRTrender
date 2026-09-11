@@ -56,7 +56,8 @@ void HdLrtRenderPass::_Execute(HdRenderPassStateSharedPtr const& state, TfTokenV
     }
 
     const auto technique = _delegate != nullptr ? _delegate->GetTechnique() : lrt::usd::Technique::Raster;
-    if (auto drawn = _engine->render(projection, settings, _targets, technique); !drawn) {
+    const bool settle = _delegate != nullptr && _delegate->GetSettleStreams();
+    if (auto drawn = _engine->render(projection, settings, _targets, technique, settle); !drawn) {
         lrt::log::error("hdLrt: {}", drawn.error().toString());
         return;
     }

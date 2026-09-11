@@ -10,6 +10,8 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <memory>
+#include <optional>
 
 #include <pxr/base/plug/registry.h>
 #include <pxr/imaging/hd/pluginRenderDelegateUniqueHandle.h>
@@ -22,6 +24,8 @@
 #include <pxr/usd/usdGeom/xformCommonAPI.h>
 
 #include "lrt/io/Readers.h"
+#include "lrt/lod/Lod.h"
+#include "lrt/lod/Lrtc.h"
 #include "lrt/render/ReferenceRenderer.h"
 #include "lrt/render/GaussianRayTracer.h"
 #include "lrt/render/TileRasterizer.h"
@@ -296,6 +300,109 @@ TEST_CASE("a SplatEdit authored on an ancestor Xform reaches the cloud through H
     CHECK(unedited->over2 > unedited->pixels / 20);   // the edit really arrived
 }
 
+TEST_CASE("a .lrtc referenced from USD is cut and streamed through Hydra as it is directly", "[usd][gpu][lod]") {
+    LRT_REQUIRE_GPU(gpu);
+    auto loader = scene::CloudLoader::create(*gpu->library);
+    REQUIRE(loader);
+    auto splats = loader->upload(cloud(20000));
+    REQUIRE(splats);
+    auto builder = lod::LodBuilder::create(*gpu->library);
+    REQUIRE(builder);
+    lod::LodBuildSettings chunked;
+    chunked.chunkSplats = 1000;
+    auto built = builder->build(*splats, chunked);
+    REQUIRE(built);
+    REQUIRE(lod::writeLrtc(*gpu->device, *built, scratch("stream.lrtc")));
+
+    const float threshold = 12.0F;
+    render::Camera camera;
+    camera.cameraToWorld = aofx::xform::translation({0.3, 0.4, 4.5});
+    camera.lens.focal = 30.0;
+    camera.lens.nearZ = 0.1;
+    camera.lens.farZ = 1000.0;
+    render::RenderSettings settings;
+    settings.width = 240;
+    settings.height = 180;
+    auto rasterizer = render::TileRasterizer::create(*gpu->library);
+    REQUIRE(rasterizer);
+    auto cutter = lod::CutSelector::create(*gpu->library);
+    REQUIRE(cutter);
+    const render::Projection projection = render::projectionFor(camera, settings.width, settings.height);
+
+    for (const uint64_t budget : {uint64_t{0}, uint64_t{8000}}) {
+        INFO("budget " << budget);
+        const fs::path shot = scratch("stream-shot-" + std::to_string(budget) + ".usda");
+        {
+            std::ofstream out(shot);
+            out << "#usda 1.0\n(\n    defaultPrim = \"World\"\n    upAxis = \"Y\"\n)\n"
+                   "def Xform \"World\"\n{\n"
+                   "    def ParticleField3DGaussianSplat \"Cloud\" (\n"
+                   "        prepend apiSchemas = [\"LrtStreamedAssetAPI\"]\n    )\n    {\n"
+                   "        asset primvars:lrt:asset = @./stream.lrtc@ ( interpolation = \"constant\" )\n"
+                   "        float primvars:lrt:lod:threshold = " << threshold << " ( interpolation = \"constant\" )\n"
+                   "        int64 primvars:lrt:stream:budget = " << budget << " ( interpolation = \"constant\" )\n"
+                   "    }\n"
+                   "    def Camera \"Shot\"\n    {\n"
+                   "        float2 clippingRange = (0.1, 1000)\n        float focalLength = 30\n"
+                   "        float horizontalAperture = 24.576\n        float verticalAperture = 18.432\n"
+                   "        double3 xformOp:translate = (0.3, 0.4, 4.5)\n"
+                   "        uniform token[] xformOpOrder = [\"xformOp:translate\"]\n    }\n}\n";
+        }
+        auto renderer = usd::StageRenderer::open(shot);
+        if (!renderer) FAIL(renderer.error().toString());
+        auto image = (*renderer)->render("/World/Shot", 0.0, settings.width, settings.height);
+        if (!image) FAIL(image.error().toString());
+
+        // The same, directly: the file read whole, or the same stream settled.
+        std::unique_ptr<lod::StreamingPool> pool;
+        std::optional<lod::LodCloud> whole;
+        if (budget == 0) {
+            auto read = lod::readLrtc(*gpu->device, scratch("stream.lrtc"));
+            REQUIRE(read);
+            whole.emplace(std::move(*read));
+        } else {
+            auto opened = lod::StreamingPool::open(*gpu->device, scratch("stream.lrtc"), {budget, 2});
+            REQUIRE(opened);
+            pool = std::move(*opened);
+        }
+        const lod::LodCloud& lodCloud = pool ? pool->cloud() : *whole;
+        std::vector<lod::CutStats> stats;
+        std::vector<render::SplatInstance> drawn;
+        for (int round = 0; round < 16; ++round) {
+            auto selected = cutter->select(projection, std::vector<lod::LodInstance>{{&lodCloud}}, threshold, &stats);
+            REQUIRE(selected);
+            drawn = *selected;
+            if (!pool) {
+                break;
+            }
+            pool->want(stats.front().needs);
+            auto placed = pool->update(true);
+            REQUIRE(placed);
+            if (*placed == 0) {
+                break;
+            }
+        }
+        std::printf("  budget %llu: %u splats + %u merged drawn\n", static_cast<unsigned long long>(budget),
+                    stats.front().splats, stats.front().merged);
+        CHECK(stats.front().merged > 0);
+        CHECK(stats.front().splats > 0);
+        render::RenderTargets direct;
+        REQUIRE(rasterizer->render(projection, drawn, settings, direct));
+
+        gpu::BufferDesc desc;
+        desc.bytes = image->rgba.size() * sizeof(float);
+        desc.elementBytes = 16;
+        auto hydra = gpu::Buffer::create(*gpu->device, desc, image->rgba.data());
+        REQUIRE(hydra);
+        auto diff = render::compareImages(*gpu->library, *hydra, direct.colour, settings.width, settings.height);
+        REQUIRE(diff);
+        std::printf("  budget %llu: Hydra against direct p99 %u, max %u\n", static_cast<unsigned long long>(budget),
+                    diff->p99, diff->max);
+        CHECK(diff->p99 <= 1);
+        CHECK(diff->max <= 2);
+    }
+}
+
 TEST_CASE("the codeless lrt schemas register, with their defaults", "[usd][schema]") {
     PlugRegistry::GetInstance().RegisterPlugins(fs::path(LRT_HYDRA_PLUGIN_DIR).string());
     const UsdSchemaRegistry& registry = UsdSchemaRegistry::GetInstance();
@@ -305,6 +412,7 @@ TEST_CASE("the codeless lrt schemas register, with their defaults", "[usd][schem
 
     UsdStageRefPtr stage = UsdStage::CreateInMemory();
     UsdPrim group = stage->DefinePrim(SdfPath("/Group"), TfToken("Xform"));
+    CHECK(registry.FindAppliedAPIPrimDefinition(TfToken("LrtStreamedAssetAPI")) != nullptr);
     CHECK(group.ApplyAPI(TfToken("LrtSplatEditAPI")));
     CHECK(group.HasAPI(TfToken("LrtSplatEditAPI")));
     // Unauthored, the schema's defaults answer.

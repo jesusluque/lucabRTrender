@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <span>
 #include <vector>
 
@@ -98,9 +99,10 @@ private:
 };
 
 struct LodInstance {
-    const LodCloud*   cloud = nullptr;
-    render::Mat4      objectToWorld = render::Mat4::identity();
-    render::SplatEdit edit;
+    const LodCloud*      cloud = nullptr;
+    render::Mat4         objectToWorld = render::Mat4::identity();
+    render::SplatEdit    edit;
+    std::optional<float> threshold;   ///< its own, over the call's
 };
 
 struct CutStats {
@@ -124,7 +126,8 @@ public:
     /// Each instance's cut for this view, as instances the rasteriser draws.
     /// A cell is drawn merged when it projects to at most `threshold` pixels;
     /// 0 draws every splat as it is. The returned clouds belong to this
-    /// selector and are rewritten by the next call.
+    /// selector and are rewritten by the next call. `stats`, when given, holds
+    /// one entry per instance, in order.
     [[nodiscard]] Result<std::vector<render::SplatInstance>> select(const render::Projection& projection,
                                                                    std::span<const LodInstance> instances,
                                                                    float threshold,

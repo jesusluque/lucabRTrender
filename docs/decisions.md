@@ -415,10 +415,33 @@ equal to 1e-4.
 - Turning the camera to the other side evicts 4 chunks and settles back to
   max 0.
 
-### Not done yet
+### In USD: `LrtStreamedAssetAPI`
 
-- **`LrtStreamedAssetAPI`.** USD cannot yet reference a `.lrtc`, so streaming
-  is available only through the CLI and the API.
+- **The schema.** It is codeless, like the others, and its properties are
+  constant primvars:
+  - `lrt:asset`: the `.lrtc` file.
+  - `lrt:lod:threshold`: pixels.
+  - `lrt:stream:budget`: splats, where 0 reads the file whole.
+- **What it does to the prim.** Authored on a ParticleField, the asset stands
+  in for the prim's own arrays, which may be left empty.
+- **Where the file is opened.** The engine opens it in `commit`, on the render
+  pass's thread. It opens it again only when the path or budget changes; a
+  new threshold alone does not reopen it.
+- **One cut per frame.** Every asset is cut in a single `CutSelector` call,
+  which is why `LodInstance` carries its own threshold: a second call would
+  overwrite the clouds the first returned.
+- **Waiting for streams.** `lrt:settleStreams` is a render setting. It is
+  false by default, so a viewport fills in over the frames that follow.
+  `StageRenderer`, which makes images, sets it true and cuts and loads until
+  nothing more is placed.
+- **The ray-traced technique.** It draws an asset read whole as its whole
+  cloud, and does not draw streamed assets. A cut changes every frame, and
+  the tracer would rebuild every frame.
+- **Checked.** A stage referencing a `.lrtc`, read whole and streamed into
+  8 of 20 slots, renders through Hydra with max 0 against the same cut and
+  stream done directly.
+
+### Not done yet
 - **The cut still waits twice a frame:** once for its counts, which come back
   in one read (reading them level by level had cost 3.9 against 2.3 ms), and
   once for the gather.

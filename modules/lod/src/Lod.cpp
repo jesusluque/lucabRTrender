@@ -361,8 +361,12 @@ Result<std::vector<render::SplatInstance>> CutSelector::select(const render::Pro
     for (size_t k = 0; k < instances.size(); ++k) {
         const LodInstance& instance = instances[k];
         if (instance.cloud == nullptr || instance.cloud->count == 0) {
+            if (stats != nullptr) {
+                stats->emplace_back();
+            }
             continue;
         }
+        const float cutThreshold = instance.threshold.value_or(threshold);
         const LodCloud& lod = *instance.cloud;
         if (lod.levels.empty()) {
             return Error(ErrorCode::InvalidArgument, lod.splats.source + ": a cut needs a merged level");
@@ -414,7 +418,7 @@ Result<std::vector<render::SplatInstance>> CutSelector::select(const render::Pro
             p["eyeY"].setData(static_cast<float>(eye.y));
             p["eyeZ"].setData(static_cast<float>(eye.z));
             p["pixelsPerUnit"].setData(pixelsPerUnit);
-            p["threshold"].setData(threshold);
+            p["threshold"].setData(cutThreshold);
             p["orthographic"].setData(uint32_t{projection.orthographic ? 1u : 0u});
             p["coarsest"].setData(uint32_t{coarsest ? 1u : 0u});
             p["chunkSplats"].setData(lod.chunkSplats);

@@ -46,6 +46,9 @@ public:
     /// `lrt:technique`: "raster" (default) or "rt".
     HdRenderSettingDescriptorList GetRenderSettingDescriptors() const override;
     [[nodiscard]] lrt::usd::Technique GetTechnique() const;
+    /// `lrt:settleStreams`: false (default) for a viewport, which lets streamed
+    /// assets fill in over frames; true for an image that must be complete.
+    [[nodiscard]] bool GetSettleStreams() const;
 
     /// True when a device opened; a delegate without one draws nothing.
     [[nodiscard]] bool HasEngine() const { return _engine != nullptr; }

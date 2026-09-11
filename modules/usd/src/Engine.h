@@ -28,6 +28,8 @@
 #include "lrt/gpu/Device.h"
 #include "lrt/gpu/ShaderLibrary.h"
 #include "lrt/io/RawSplats.h"
+#include "lrt/lod/Lod.h"
+#include "lrt/lod/Lrtc.h"
 #include "lrt/render/GaussianRayTracer.h"
 #include "lrt/render/PointRasterizer.h"
 #include "lrt/render/TileRasterizer.h"
@@ -35,12 +37,25 @@
 
 namespace lrt::usd {
 
+/// LrtStreamedAssetAPI: a .lrtc drawn with its levels of detail.
+struct StreamedAsset {
+    std::string path;              ///< resolved; empty when the prim has none
+    float       threshold = 1.0F;  ///< px a merged cell may span
+    uint64_t    budget = 0;        ///< splats on the device; 0 reads the file whole
+
+    bool operator==(const StreamedAsset&) const = default;
+};
+
 struct SplatEntry {
     std::optional<io::RawSplats>        pending;   ///< synced, not yet uploaded
     std::unique_ptr<scene::GpuSplats>   gpu;
     render::Mat4                        objectToWorld = render::Mat4::identity();
     bool                                visible = true;
     render::SplatEdit                   edit;
+    std::optional<StreamedAsset>        assetPending;
+    StreamedAsset                       asset;
+    std::unique_ptr<lod::LodCloud>      lodCloud;   ///< the asset read whole
+    std::unique_ptr<lod::StreamingPool> pool;       ///< or streamed
 };
 
 struct PointsEntry {
@@ -65,7 +80,8 @@ public:
     // --- from Sync (any thread) ---
     void setSplats(const pxr::SdfPath& id, std::optional<io::RawSplats> raw,
                    const render::Mat4* transform, std::optional<bool> visible,
-                   std::optional<render::SplatEdit> edit = std::nullopt);
+                   std::optional<render::SplatEdit> edit = std::nullopt,
+                   std::optional<StreamedAsset> asset = std::nullopt);
     void setPoints(const pxr::SdfPath& id, std::optional<io::RawPoints> raw,
                    const render::Mat4* transform, std::optional<bool> visible,
                    std::optional<render::PointStyle> style);
@@ -74,8 +90,13 @@ public:
     // --- from the render pass (one thread) ---
     /// Uploads what changed. Returns how many entries were uploaded.
     Result<size_t> commit();
+    /// `settleStreams`: before drawing, cut and load until the streamed
+    /// assets hold what this view wants (as much as their budgets allow) --
+    /// for an image that must be complete. Otherwise streams fill in over
+    /// the frames that follow.
     Result<void> render(const render::Projection& projection, const render::RenderSettings& settings,
-                        render::RenderTargets& targets, Technique technique = Technique::Raster);
+                        render::RenderTargets& targets, Technique technique = Technique::Raster,
+                        bool settleStreams = false);
 
     [[nodiscard]] gpu::Device& device() noexcept { return *device_; }
 
@@ -88,6 +109,7 @@ private:
     std::optional<render::TileRasterizer>     rasterizer_;
     std::optional<render::PointRasterizer>    pointRasterizer_;
     std::optional<render::GaussianRayTracer>  rayTracer_;   ///< made on first use
+    std::optional<lod::CutSelector>           cutter_;      ///< made on first use
     render::RenderTargets                     pointLayer_;
 
     std::mutex                                guard_;

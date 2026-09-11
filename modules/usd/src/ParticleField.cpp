@@ -1,6 +1,7 @@
 // Copyright (c) 2026 lucabRTrender contributors.
 #include "ParticleField.h"
 
+#include <algorithm>
 #include <array>
 
 #include <pxr/base/gf/vec3d.h>
@@ -9,6 +10,7 @@
 #include <pxr/base/gf/quath.h>
 #include <pxr/imaging/hd/changeTracker.h>
 #include <pxr/imaging/hd/sceneDelegate.h>
+#include <pxr/usd/sdf/assetPath.h>
 #include <pxr/usd/usdVol/tokens.h>
 
 #include "RenderParam.h"
@@ -36,6 +38,13 @@ TF_DEFINE_PRIVATE_TOKENS(_editTokens,
     ((maxScale, "lrt:edit:maxScale"))
     ((invert, "lrt:edit:invert"))
     (sphere)(keep)(remove)
+);
+
+// LrtStreamedAssetAPI's.
+TF_DEFINE_PRIVATE_TOKENS(_assetTokens,
+    ((asset, "lrt:asset"))
+    ((threshold, "lrt:lod:threshold"))
+    ((budget, "lrt:stream:budget"))
 );
 
 float floatOf(VtValue const& value, float fallback) {
@@ -102,6 +111,31 @@ lrt::render::SplatEdit editOf(HdSceneDelegate* delegate, SdfPath const& id) {
     return edit;
 }
 
+lrt::usd::StreamedAsset assetOf(HdSceneDelegate* delegate, SdfPath const& id) {
+    lrt::usd::StreamedAsset asset;
+    VtValue value = delegate->Get(id, _assetTokens->asset);
+    SdfAssetPath path;
+    if (value.IsHolding<SdfAssetPath>()) {
+        path = value.UncheckedGet<SdfAssetPath>();
+    } else if (value.IsHolding<VtArray<SdfAssetPath>>() && !value.UncheckedGet<VtArray<SdfAssetPath>>().empty()) {
+        path = value.UncheckedGet<VtArray<SdfAssetPath>>()[0];
+    }
+    asset.path = !path.GetResolvedPath().empty() ? path.GetResolvedPath() : path.GetAssetPath();
+    if (asset.path.empty()) {
+        return asset;
+    }
+    asset.threshold = std::max(floatOf(delegate->Get(id, _assetTokens->threshold), asset.threshold), 0.0F);
+    const VtValue budget = delegate->Get(id, _assetTokens->budget);
+    if (budget.IsHolding<int64_t>()) {
+        asset.budget = static_cast<uint64_t>(std::max<int64_t>(budget.UncheckedGet<int64_t>(), 0));
+    } else if (budget.IsHolding<int>()) {
+        asset.budget = static_cast<uint64_t>(std::max(budget.UncheckedGet<int>(), 0));
+    } else if (budget.IsHolding<VtInt64Array>() && !budget.UncheckedGet<VtInt64Array>().empty()) {
+        asset.budget = static_cast<uint64_t>(std::max<int64_t>(budget.UncheckedGet<VtInt64Array>()[0], 0));
+    }
+    return asset;
+}
+
 VtVec3fArray vec3fOf(VtValue const& value) {
     if (value.IsHolding<VtVec3fArray>()) {
         return value.UncheckedGet<VtVec3fArray>();
@@ -165,8 +199,10 @@ void HdLrtParticleField::Sync(HdSceneDelegate* delegate, HdRenderParam* renderPa
         raw = lrt::usd::rawSplatsFrom(arrays, id.GetString());
     }
     std::optional<lrt::render::SplatEdit> edit;
+    std::optional<lrt::usd::StreamedAsset> asset;
     if ((*dirtyBits & HdChangeTracker::DirtyPrimvar) != 0) {
         edit = editOf(delegate, id);
+        asset = assetOf(delegate, id);
     }
 
     lrt::render::Mat4 transform;
@@ -179,7 +215,7 @@ void HdLrtParticleField::Sync(HdSceneDelegate* delegate, HdRenderParam* renderPa
         _UpdateVisibility(delegate, dirtyBits);
         visible = IsVisible();
     }
-    engine->setSplats(id, std::move(raw), transformDirty ? &transform : nullptr, visible, edit);
+    engine->setSplats(id, std::move(raw), transformDirty ? &transform : nullptr, visible, edit, std::move(asset));
     *dirtyBits &= ~HdChangeTracker::AllSceneDirtyBits;
 }
 

@@ -56,14 +56,23 @@ HdRenderPassSharedPtr HdLrtRenderDelegate::CreateRenderPass(HdRenderIndex* index
     return std::make_shared<HdLrtRenderPass>(index, collection, _engine.get(), this);
 }
 
-TF_DEFINE_PRIVATE_TOKENS(_lrtSettings, ((technique, "lrt:technique"))(raster)(rt));
+TF_DEFINE_PRIVATE_TOKENS(_lrtSettings, ((technique, "lrt:technique"))((settleStreams, "lrt:settleStreams"))(raster)(rt));
 
 HdRenderSettingDescriptorList HdLrtRenderDelegate::GetRenderSettingDescriptors() const {
     HdRenderSettingDescriptor technique;
     technique.name = "Technique (raster | rt)";
     technique.key = _lrtSettings->technique;
     technique.defaultValue = VtValue(_lrtSettings->raster);
-    return {technique};
+    HdRenderSettingDescriptor settle;
+    settle.name = "Wait for streamed assets before drawing";
+    settle.key = _lrtSettings->settleStreams;
+    settle.defaultValue = VtValue(false);
+    return {technique, settle};
+}
+
+bool HdLrtRenderDelegate::GetSettleStreams() const {
+    const VtValue value = GetRenderSetting(_lrtSettings->settleStreams);
+    return value.IsHolding<bool>() && value.UncheckedGet<bool>();
 }
 
 lrt::usd::Technique HdLrtRenderDelegate::GetTechnique() const {

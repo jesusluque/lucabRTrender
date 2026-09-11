@@ -64,6 +64,30 @@ authored nearer a cloud overrides it."""
     )
 }
 
+class "LrtStreamedAssetAPI" (
+    doc = """A Gaussian splat cloud drawn from a .lrtc file -- a cloud with its
+levels of detail, written by `lrt convert cloud.ply cloud.lrtc` -- in place
+of the ParticleField's own arrays, which may then be left empty. Every frame
+the cloud is cut for the view: cells that project small are drawn merged, and
+the splats of the rest are drawn when their chunk is on the device and merged
+until it is. Its properties are constant primvars; author them on the
+ParticleField itself."""
+)
+{
+    asset primvars:lrt:asset = @@ (
+        doc = "The .lrtc file."
+        interpolation = "constant"
+    )
+    float primvars:lrt:lod:threshold = 1 (
+        doc = "Pixels a merged cell may span on screen before its splats are drawn instead (0: every splat)."
+        interpolation = "constant"
+    )
+    int64 primvars:lrt:stream:budget = 0 (
+        doc = "Splats kept on the device, loaded from the file as views want them, most wanted first (0: the file is read whole)."
+        interpolation = "constant"
+    )
+}
+
 class "LrtPointStyleAPI" (
     doc = """How lucabRTrender draws a UsdGeomPoints: widths are world units
 unless sizeInPixels says otherwise, with optional eye-dome lighting and

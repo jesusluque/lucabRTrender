@@ -85,6 +85,8 @@ Result<StageImage> StageRenderer::render(const std::string& camera, double time,
         return Error::make(ErrorCode::InvalidArgument, "technique '{}': raster or rt", technique);
     }
     impl.delegate->SetRenderSetting(TfToken("lrt:technique"), VtValue(TfToken(technique)));
+    // An image, not a viewport: streamed assets are loaded before it is drawn.
+    impl.delegate->SetRenderSetting(TfToken("lrt:settleStreams"), VtValue(true));
     std::string cameraPath = camera;
     if (cameraPath.empty()) {
         const auto all = cameras();
