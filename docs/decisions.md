@@ -1320,10 +1320,12 @@ pass on both backends bar the one that names the defect.
 ### Measured (NVIDIA L4, Ubuntu 24.04, debug)
 
 `ctest --preset linux-x86_64-debug`, with engine's materials merged in:
-**86 of 99 pass, 13 fail, 25 of those passes skips** -- from 47 of 83 when the
+**91 of 104 pass, 13 fail, 27 of those passes skips** -- from 47 of 83 when the
 port first ran, and from 63 of 97 before the sort was fixed. One of the
 thirteen is the eight-bit texture probe above, which fails here deliberately
-and says why when it does.
+and says why when it does; the other twelve are the texture surface write and
+the two measured on their own below. Lights (M5) are merged and build here,
+and their tests run: the count grew from 97 to 104 with them.
 Passing outright: the prefix sum, textures, mips, the texture table and its
 sRGB views, the shader cache and link constants, every loader (PLY, .splat,
 SPZ, SOG, points), the lobe library, the display transform, the codeless
