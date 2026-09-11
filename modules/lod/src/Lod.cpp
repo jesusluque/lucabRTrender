@@ -269,6 +269,7 @@ struct CutSelector::Frame {
     scene::GpuSplats cloud;
     uint32_t         capacity = 0;
     std::vector<gpu::Buffer> selected, dest, totals;
+    gpu::Buffer      allTotals;   ///< every part's count, copied together for one read
 };
 
 CutSelector::CutSelector() = default;
@@ -382,13 +383,25 @@ Result<std::vector<render::SplatInstance>> CutSelector::select(const render::Pro
                 }
                 LRT_TRY(prefix_.apply(batch, frame.selected[part], frame.dest[part], frame.totals[part], count));
             }
+            // Every count into one buffer, so they come back in one read and
+            // not one read a level (that was most of the cut's time).
+            if (frame.allTotals.count() < parts) {
+                auto made = buffer(device, parts, 4, "cut.allTotals");
+                if (!made) return std::move(made).error();
+                frame.allTotals = std::move(*made);
+            }
+            for (size_t part = 0; part < parts; ++part) {
+                batch.encoder()->copyBuffer(frame.allTotals.rhi(), part * sizeof(uint32_t), frame.totals[part].rhi(), 0,
+                                            sizeof(uint32_t));
+            }
+            batch.markDirty();
             LRT_TRY(batch.submit(true));
         }
         std::vector<uint32_t> totals(parts, 0);
+        LRT_TRY(frame.allTotals.read(device, 0, parts * sizeof(uint32_t), totals.data()));
         uint32_t drawn = 0;
-        for (size_t part = 0; part < parts; ++part) {
-            LRT_TRY(frame.totals[part].read(device, 0, sizeof(uint32_t), &totals[part]));
-            drawn += totals[part];
+        for (const uint32_t t : totals) {
+            drawn += t;
         }
         if (frame.capacity < drawn || frame.cloud.restPerColour != lod.splats.restPerColour ||
             frame.cloud.shWords != lod.splats.shWords || !frame.cloud.positions.valid()) {

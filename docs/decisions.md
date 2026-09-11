@@ -325,8 +325,8 @@ Gaussians over levels 1 to 10. On a far view at 1080p:
 | Threshold | Drawn | Cut | Render | Image |
 |---|---|---|---|---|
 | 0 (off) | 742k | | 12.6 ms | reference |
-| 4 px | 727k | 3.9 ms | 12.1 ms | mean abs 1e-4 |
-| 8 px | 83k (11%) | 2.9 ms | 3.2 ms | mean abs 3e-3 |
+| 4 px | 727k | 2.3 ms | 11.4 ms | mean abs 1e-4 |
+| 8 px | 83k (11%) | 1.3 ms | 3.3 ms | mean abs 3e-3 |
 
 **Random-colour test clouds**, the worst case for merging:
 
@@ -345,7 +345,8 @@ equal to 1e-4.
 
 - **The `.lrtc` file, streaming with a residency budget, and
   `LrtStreamedAssetAPI`.** The cut runs over clouds held whole in memory.
-- **The cut's per-level counts are read one by one.** Up to about 3.9 ms of
-  the cut on train_7k; they should come back in one read.
+- **The cut still waits twice a frame:** once for its counts, which come back
+  in one read (reading them level by level had cost 3.9 against 2.3 ms), and
+  once for the gather.
 - **LOD with the ray tracer.** A cut that changes every frame would rebuild
   the structures every frame.
