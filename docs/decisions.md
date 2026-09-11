@@ -1133,16 +1133,24 @@ What that rules out, each measured rather than argued:
 - **The bindings land where they are named.** Seven buffers, each holding its
   own marker, bound by the names the kernel declares: every name reads its
   own marker on CUDA as on Metal.
-- **An unused binding still changes the answer.** The scatter binds stand-ins
-  for its high-word inputs when keys are 32 bits, and changing which buffer
-  one of those points at changed a *low* word the sort placed. The stand-ins
-  are now the sort's own buffers, big enough for any index the kernel can
-  form, which is right whatever the cause.
+- **A scatter-shaped kernel reads what it was given.** The same seven
+  bindings, one invocation, two elements, no sorting arithmetic: both elements
+  read their own key and value on CUDA as on Metal.
+- **Two wrong turns, recorded so they are not taken again.** Changing which
+  buffer the scatter's unused high-word names point at appeared to change a
+  low word the sort placed, and the slots the probe reported appeared to be
+  off by one. Both readings came from buffers nobody had written -- a buffer a
+  test makes is not zeroed -- and both evaporated once the probe wrote its own
+  cursors. The sort itself never reads an uninitialised cursor: radix_starts
+  writes every entry of every chunk's row. Giving the scatter distinct
+  stand-ins made CUDA worse (four of the sort's cases passing fell to one), so
+  it binds dummy_ and the histogram as it always did.
 
 What is left is the scatter kernel itself on this backend: its counts are
-right, its cursors are right, its buffers are its own, and the words it places
-are not. This one bug cascades -- the tile rasteriser, the ray tracer, the
-LOD, geom's smooth normals and most USD tests sort, and all of them fail here.
+right, its totals are right, its cursors are right, its bindings land where
+they are named, and the words it places are not. This one bug cascades -- the
+tile rasteriser, the ray tracer, the LOD, geom's smooth normals and most USD
+tests sort, and all of them fail here.
 
 ### What else the port found
 
@@ -1166,7 +1174,9 @@ LOD, geom's smooth normals and most USD tests sort, and all of them fail here.
 ### Measured (NVIDIA L4, Ubuntu 24.04, debug)
 
 `ctest --preset linux-x86_64-debug`, with engine's materials merged in:
-**63 of 96 pass, 33 fail, 24 skip**.
+**63 of 97 pass, 34 fail, 24 skip**. Two of those failures are the machine and
+not the port: the free-running clock test and the PTP loopback test both pass
+when run on their own and fail under a suite that keeps eight cores busy.
 Passing outright: the prefix sum, textures, mips, the texture table and its
 sRGB views, the shader cache and link constants, every loader (PLY, .splat,
 SPZ, SOG, points), the lobe library, the display transform, the codeless
