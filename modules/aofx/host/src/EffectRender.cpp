@@ -87,6 +87,7 @@ Result<image::ImagePtr> renderEffect(gpu_host::Context& context, aofx::Effect& e
 
     aofx::RenderRequest request;
     request.time = job.time;
+    request.bufferFrames = job.bufferFrames;
     request.instance = job.instance;
     request.renderWindow = toRect(bounds);
     request.outputRod = toRect(bounds);

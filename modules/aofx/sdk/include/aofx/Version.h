@@ -138,7 +138,13 @@ namespace aofx {
 /// bumped for. A bundle built against 20 attaches rows of six that the host
 /// reads as rows of seven, and every box after the first is the previous
 /// one's numbers shifted along.
-inline constexpr int kAbiVersion = 21;
+/// 22: `RenderRequest::bufferFrames`, the machine's latency budget -- the
+/// depth of the live jitter buffer -- so a node that needs to look ahead
+/// before it answers spends the number this system already states instead of
+/// inventing a second one. A struct layout change, so every bundle is
+/// rebuilt: one built against 21 would read every field after it from the
+/// wrong offset.
+inline constexpr int kAbiVersion = 22;
 
 /// What this translation unit was compiled with.
 ///

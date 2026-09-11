@@ -394,6 +394,17 @@ struct RenderRequest {
     AudioFormat audioFormat;
     int64_t     audioFrames = 0;
 
+    /// How many frames this machine is prepared to be behind.
+    ///
+    /// The depth of the live jitter buffer -- what an SRT arriving out of
+    /// order is given to sort itself out in, twelve frames unless the project
+    /// panel says otherwise. It is here because it is the one place this
+    /// system states a LATENCY BUDGET, and a node that wants to look ahead
+    /// before it answers should spend that budget rather than invent a second
+    /// one. A pose filter with a window can throw a spike away for certain
+    /// instead of guessing, and the price is exactly this many frames.
+    int bufferFrames = 0;
+
     /// True when this render is a delivery rather than somebody looking.
     ///
     /// A node with a side effect must not do it while a viewer is scrubbing:

@@ -36,6 +36,9 @@ struct EffectJob {
     image::PixelRect              bounds;
     double                        time = 0.0;
     std::string                   instance = "lrt";
+    /// Frames the host is prepared to be behind (RenderRequest::bufferFrames,
+    /// ABI 22): the depth of a live jitter buffer. Zero for a render with none.
+    int                           bufferFrames = 0;
 };
 
 /// Renders `effect`. Images must live on the context's device (the context's
