@@ -134,6 +134,19 @@ std::vector<std::string> loadedLibraries() {
     return out;
 }
 
+std::filesystem::path cacheDirectory() {
+#if defined(__APPLE__)
+    return std::filesystem::path(env("HOME")) / "Library" / "Caches";
+#elif defined(_WIN32)
+    return std::filesystem::path(env("LOCALAPPDATA"));
+#else
+    if (std::string xdg = env("XDG_CACHE_HOME"); !xdg.empty()) {
+        return xdg;
+    }
+    return std::filesystem::path(env("HOME")) / ".cache";
+#endif
+}
+
 std::filesystem::path executableDir() {
 #if defined(__APPLE__)
     uint32_t size = 0;

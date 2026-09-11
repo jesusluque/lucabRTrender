@@ -5,6 +5,7 @@
 
 #include "lrt/core/Log.h"
 #include "lrt/core/Platform.h"
+#include "ShaderCache.h"
 
 namespace lrt::gpu {
 namespace {
@@ -88,6 +89,15 @@ Result<std::shared_ptr<Device>> Device::create(const DeviceDesc& desc) {
     if (desc.validation) {
         rhi::getRHI()->enableDebugLayers();
     }
+    if (desc.useShaderCache) {
+        std::filesystem::path directory = desc.shaderCache;
+        if (directory.empty()) {
+            const std::string fromEnv = platform::env("LRT_SHADER_CACHE");
+            directory = !fromEnv.empty() ? std::filesystem::path(fromEnv)
+                                         : platform::cacheDirectory() / "lucabRTrender" / "shaders";
+        }
+        device->shaderCache_.attach(new DiskShaderCache(directory));
+    }
 
     std::string failures;
     for (Backend backend : order) {
@@ -102,6 +112,7 @@ Result<std::shared_ptr<Device>> Device::create(const DeviceDesc& desc) {
         rhiDesc.slang.searchPaths = searchPaths.data();
         rhiDesc.slang.searchPathCount = static_cast<uint32_t>(searchPaths.size());
         rhiDesc.slang.optimizationLevel = SLANG_OPTIMIZATION_LEVEL_HIGH;
+        rhiDesc.persistentShaderCache = device->shaderCache_.get();
 
         rhi::ComPtr<rhi::IDevice> made;
         if (SLANG_FAILED(rhi::getRHI()->createDevice(rhiDesc, made.writeRef())) ||
@@ -175,6 +186,11 @@ NativeHandles Device::native() const {
         handles.queue = queueHandle;
     }
     return handles;
+}
+
+ShaderCacheStats Device::shaderCacheStats() const {
+    return shaderCache_ != nullptr ? static_cast<const DiskShaderCache*>(shaderCache_.get())->stats()
+                                   : ShaderCacheStats{};
 }
 
 void Device::waitIdle() {

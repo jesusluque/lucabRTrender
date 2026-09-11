@@ -27,6 +27,15 @@ struct Program {
     std::array<uint32_t, 3>            threadGroup{1, 1, 1};
 };
 
+/// A link-time constant: a module declares `extern static const uint kName;`
+/// and the program is linked with `export static const uint kName = value;`.
+/// One compiled program per distinct set of values.
+struct LinkConstant {
+    std::string type;    ///< "uint", "int", "float", "bool"
+    std::string name;
+    std::string value;   ///< as Slang source: "16", "1.5", "true"
+};
+
 class ShaderLibrary {
 public:
     explicit ShaderLibrary(std::shared_ptr<Device> device);
@@ -34,12 +43,27 @@ public:
     /// `module` is a Slang module name as `import` would write it
     /// ("lrt/algo/prefixsum"); `entries` its entry points.
     [[nodiscard]] Result<std::shared_ptr<const Program>> load(
-        const std::string& module, const std::vector<std::string>& entries);
+        const std::string& module, const std::vector<std::string>& entries,
+        const std::vector<LinkConstant>& constants = {});
+
+    /// A module that exists only as source -- generated code (materials) --
+    /// under `name`, which other modules may then `import`. Loading the same
+    /// name with different source is refused: generated modules are named
+    /// after what they contain.
+    [[nodiscard]] Result<std::shared_ptr<const Program>> loadSource(
+        const std::string& name, const std::string& source, const std::vector<std::string>& entries,
+        const std::vector<LinkConstant>& constants = {});
 
     [[nodiscard]] Device& device() noexcept { return *device_; }
 
 private:
+    [[nodiscard]] Result<std::shared_ptr<const Program>> link(const std::string& key, slang::IModule* module,
+                                                              const std::string& name,
+                                                              const std::vector<std::string>& entries,
+                                                              const std::vector<LinkConstant>& constants);
+
     std::shared_ptr<Device>                                   device_;
+    std::map<std::string, std::string>                        sources_;   ///< generated module name -> source
     std::mutex                                                guard_;
     std::map<std::string, std::shared_ptr<const Program>>     programs_;
 };

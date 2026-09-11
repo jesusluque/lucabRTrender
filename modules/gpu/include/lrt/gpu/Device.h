@@ -42,6 +42,17 @@ struct DeviceDesc {
     /// Extra directories searched for `import`ed Slang modules, after the
     /// engine's own shader directory.
     std::vector<std::filesystem::path> shaderPaths;
+    /// Compiled shaders kept on disk between runs. Empty: $LRT_SHADER_CACHE,
+    /// else lucabRTrender/shaders in the platform's cache directory.
+    std::filesystem::path shaderCache;
+    bool                  useShaderCache = true;
+};
+
+/// What the persistent shader cache did since the device opened.
+struct ShaderCacheStats {
+    uint64_t hits = 0;
+    uint64_t misses = 0;
+    uint64_t writes = 0;
 };
 
 /// What the device can do, asked once at creation.
@@ -75,6 +86,8 @@ public:
     [[nodiscard]] Backend backend() const noexcept { return backend_; }
     [[nodiscard]] const Caps& caps() const noexcept { return caps_; }
     [[nodiscard]] NativeHandles native() const;
+    /// All zero when the device runs without a shader cache.
+    [[nodiscard]] ShaderCacheStats shaderCacheStats() const;
 
     [[nodiscard]] rhi::IDevice* rhi() const noexcept { return device_.get(); }
     [[nodiscard]] rhi::ICommandQueue* queue() const noexcept { return queue_.get(); }
@@ -107,6 +120,7 @@ private:
     Backend                         backend_ = Backend::Metal;
     Caps                            caps_;
     std::vector<std::string>        searchPaths_;
+    rhi::ComPtr<rhi::IPersistentCache> shaderCache_;
     rhi::ComPtr<rhi::IDevice>       device_;
     rhi::ComPtr<rhi::ICommandQueue> queue_;
     rhi::ComPtr<slang::ISession>    session_;

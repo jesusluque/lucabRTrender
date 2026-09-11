@@ -572,3 +572,53 @@ with MaterialX feeding a Slang generator and `lrt view` as the viewer.
   - **Fix:** CTest is now included first.
 - **Deferred to M3:** GLFW and Dear ImGui arrive with `lrt view`, their only
   user, rather than as unused dependencies now.
+
+## Complete USD: GPU foundations (M1)
+
+What the next milestones build on, in `modules/gpu`.
+
+- **`Texture` and `Sampler`.**
+  - They own their slang-rhi objects and report failures as `Result`.
+  - Each subresource is uploaded with a single command and read back only for
+    output and tests.
+  - Engine images stay buffers, because kernels index them. A texture is for
+    what needs one: material images with mips, render targets, depth.
+- **`MipGenerator` (`algo/mips.slang`).** slang-rhi has no mip generation.
+  - Each texel of a level is the area-weighted mean of the texels above it.
+  - An odd edge of 2n + 1 folds into n with weights (n − x, n, x + 1) / (2n + 1).
+  - Every source texel therefore gives exactly n/(2n + 1) of itself to the
+    level below, so the chain keeps level 0's mean.
+  - Measured on 64², 37×23, 1×9 and 128×5: the means agree to 2e-6, and the
+    37×23 chain drifts only in the seventh decimal.
+- **`RasterKernel`.** A vertex and fragment pipeline bound by name.
+  - Draws pull their data from StructuredBuffers, with no vertex buffers or
+    input layouts, as the point rasteriser already did.
+  - Each draw gets a fresh root object.
+  - Checked: two triangles over the left half of clip space cover exactly
+    w/2 × h pixels.
+- **`RayTracingKernel`.** A pipeline plus its shader table, for OptiX and
+  Vulkan RT.
+  - On Metal, slang-rhi has no pipelines, only inline RayQuery in compute, so
+    this reports `Unsupported` and the engine traces with ComputeKernels there.
+- **`ShaderLibrary` extensions.**
+  - **Link-time constants:** a module declares
+    `extern static const uint kName;` and is linked against a generated
+    exports module. Each distinct set of values gets its own program.
+  - **Generated modules:** `loadSource` compiles modules that exist only as
+    source (materials). Loading an existing name with different source is
+    refused.
+- **Persistent shader cache (`DiskShaderCache`).**
+  - One file per compiled program, holding its key and its data, written to a
+    temporary name and renamed into place.
+  - Location: `$LRT_SHADER_CACHE`, or `lucabRTrender/shaders` under the
+    platform's cache directory.
+  - The key comes from slang-rhi and includes the linked program's hash, so
+    edited shaders miss the cache.
+  - The whole suite dropped from 89 s to 26 s on a warm cache.
+- **Image comparisons (`render/ReferenceRenderer`).**
+  - **`compareHdr`:** per-pixel relative difference in a logarithmic histogram
+    (eight bins per octave), and relMSE Kahan-summed per row. It is for
+    radiance above 1 and dark noise, where 8-bit code values say nothing.
+    Checked: a against 1.1·a gives p99 0.0964 against an exact 1/11.
+  - **`countDifferent`:** counts the differing entries of two uint buffers,
+    per chunk, then reduces the counts. It is meant for ID AOVs.

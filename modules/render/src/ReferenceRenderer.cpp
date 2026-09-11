@@ -1,6 +1,8 @@
 // Copyright (c) 2026 lucabRTrender contributors.
 #include "lrt/render/ReferenceRenderer.h"
 
+#include <cmath>
+
 #include <algorithm>
 #include <array>
 
@@ -292,6 +294,105 @@ Result<ImageDifference> compareImages(gpu::ShaderLibrary& library, const gpu::Bu
         }
     }
     return diff;
+}
+
+Result<HdrDifference> compareHdr(gpu::ShaderLibrary& library, const gpu::Buffer& a, const gpu::Buffer& b,
+                                 uint32_t width, uint32_t height) {
+    gpu::Device& device = library.device();
+    auto compare = gpu::ComputeKernel::create(library, "lrt/reference/image_compare_hdr", "imageCompareHdr");
+    if (!compare) return std::move(compare).error();
+    auto sum = gpu::ComputeKernel::create(library, "lrt/reference/image_compare_hdr", "floatSum");
+    if (!sum) return std::move(sum).error();
+    auto reduce = gpu::ComputeKernel::create(library, "lrt/reference/histogram_reduce", "histogramReduce");
+    if (!reduce) return std::move(reduce).error();
+    auto rows = buffer(device, uint64_t{height} * 256, 4, "hdr.rows");
+    if (!rows) return std::move(rows).error();
+    auto rowError = buffer(device, height, 4, "hdr.rowError");
+    if (!rowError) return std::move(rowError).error();
+    auto bins = buffer(device, 256, 4, "hdr.bins");
+    if (!bins) return std::move(bins).error();
+    auto total = buffer(device, 1, 4, "hdr.total");
+    if (!total) return std::move(total).error();
+    gpu::CommandBatch batch(device);
+    compare->dispatch(batch, {height, 1, 1}, [&](rhi::ShaderCursor cursor) {
+        cursor["a"].setBinding(a.rhi());
+        cursor["b"].setBinding(b.rhi());
+        cursor["histogram"].setBinding(rows->rhi());
+        cursor["rowError"].setBinding(rowError->rhi());
+        cursor["params"]["width"].setData(width);
+        cursor["params"]["height"].setData(height);
+    });
+    sum->dispatch(batch, {1, 1, 1}, [&](rhi::ShaderCursor cursor) {
+        cursor["values"].setBinding(rowError->rhi());
+        cursor["total"].setBinding(total->rhi());
+        cursor["params"]["height"].setData(height);
+    });
+    reduce->dispatch(batch, {256, 1, 1}, [&](rhi::ShaderCursor cursor) {
+        cursor["histogram"].setBinding(rows->rhi());
+        cursor["total"].setBinding(bins->rhi());
+        cursor["params"]["rows"].setData(height);
+        cursor["params"]["bins"].setData(uint32_t{256});
+    });
+    LRT_TRY(batch.submit(true));
+    std::array<uint32_t, 256> histogram{};
+    LRT_TRY(bins->read(device, 0, sizeof(histogram), histogram.data()));
+    float error = 0.0F;
+    LRT_TRY(total->read(device, 0, sizeof(error), &error));
+
+    // Bin k > 0 holds relative differences in [2^((k-1)/8 - 16), 2^(k/8 - 16)).
+    const auto upper = [](uint32_t bin) { return bin == 0 ? 0.0 : std::pow(2.0, bin / 8.0 - 16.0); };
+    HdrDifference diff;
+    for (uint32_t k = 0; k < 256; ++k) {
+        diff.pixels += histogram[k];
+        if (histogram[k] > 0) {
+            diff.maxRelative = upper(k);
+        }
+    }
+    const uint64_t p99At = diff.pixels - diff.pixels / 100;
+    uint64_t running = 0;
+    for (uint32_t k = 0; k < 256; ++k) {
+        running += histogram[k];
+        if (running >= p99At) {
+            diff.p99Relative = upper(k);
+            break;
+        }
+    }
+    diff.relMse = diff.pixels > 0 ? static_cast<double>(error) / static_cast<double>(diff.pixels) : 0.0;
+    return diff;
+}
+
+Result<uint64_t> countDifferent(gpu::ShaderLibrary& library, const gpu::Buffer& a, const gpu::Buffer& b,
+                                uint32_t count) {
+    gpu::Device& device = library.device();
+    auto compare = gpu::ComputeKernel::create(library, "lrt/reference/image_compare_hdr", "idsCompare");
+    if (!compare) return std::move(compare).error();
+    auto reduce = gpu::ComputeKernel::create(library, "lrt/reference/histogram_reduce", "histogramReduce");
+    if (!reduce) return std::move(reduce).error();
+    constexpr uint32_t kChunk = 4096;
+    const uint32_t chunks = std::max<uint32_t>((count + kChunk - 1) / kChunk, 1);
+    auto per = buffer(device, chunks, 4, "ids.differing");
+    if (!per) return std::move(per).error();
+    auto total = buffer(device, 1, 4, "ids.total");
+    if (!total) return std::move(total).error();
+    gpu::CommandBatch batch(device);
+    compare->dispatch(batch, {chunks, 1, 1}, [&](rhi::ShaderCursor cursor) {
+        cursor["idsA"].setBinding(a.rhi());
+        cursor["idsB"].setBinding(b.rhi());
+        cursor["differing"].setBinding(per->rhi());
+        cursor["params"]["width"].setData(kChunk);
+        cursor["params"]["height"].setData(chunks);
+        cursor["params"]["count"].setData(count);
+    });
+    reduce->dispatch(batch, {1, 1, 1}, [&](rhi::ShaderCursor cursor) {
+        cursor["histogram"].setBinding(per->rhi());
+        cursor["total"].setBinding(total->rhi());
+        cursor["params"]["rows"].setData(chunks);
+        cursor["params"]["bins"].setData(uint32_t{1});
+    });
+    LRT_TRY(batch.submit(true));
+    uint32_t differing = 0;
+    LRT_TRY(total->read(device, 0, sizeof(differing), &differing));
+    return uint64_t{differing};
 }
 
 }   // namespace lrt::render

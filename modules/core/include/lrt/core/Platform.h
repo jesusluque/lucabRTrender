@@ -60,6 +60,10 @@ void sleepPrecisely(std::chrono::nanoseconds duration);
 /// Every shared library the process has loaded, by path.
 [[nodiscard]] std::vector<std::string> loadedLibraries();
 
+/// Where a user's caches go: ~/Library/Caches on macOS, $XDG_CACHE_HOME or
+/// ~/.cache on Linux.
+[[nodiscard]] std::filesystem::path cacheDirectory();
+
 /// The directory holding the running executable.
 [[nodiscard]] std::filesystem::path executableDir();
 

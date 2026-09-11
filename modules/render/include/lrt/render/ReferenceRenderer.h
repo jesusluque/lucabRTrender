@@ -54,6 +54,22 @@ struct ImageDifference {
     uint64_t over2 = 0;   ///< pixels differing by more than 2 code values
 };
 
+/// Two linear images compared as radiance, not as code values: for what 8
+/// bits hide (values above 1, dark noise).
+struct HdrDifference {
+    uint64_t pixels = 0;
+    double   relMse = 0.0;         ///< mean over pixels of the channel-mean (a - b)^2 / (b^2 + 1e-2)
+    double   p99Relative = 0.0;    ///< 99th percentile of max_c |a - b| / max(|b|, 1e-3), to 9%
+    double   maxRelative = 0.0;
+};
+
+[[nodiscard]] Result<HdrDifference> compareHdr(gpu::ShaderLibrary& library, const gpu::Buffer& a,
+                                               const gpu::Buffer& b, uint32_t width, uint32_t height);
+
+/// How many of `count` uint entries differ between `a` and `b` (IDs, masks).
+[[nodiscard]] Result<uint64_t> countDifferent(gpu::ShaderLibrary& library, const gpu::Buffer& a,
+                                              const gpu::Buffer& b, uint32_t count);
+
 [[nodiscard]] Result<ImageDifference> compareImages(gpu::ShaderLibrary& library,
                                                     const gpu::Buffer& a, const gpu::Buffer& b,
                                                     uint32_t width, uint32_t height);
