@@ -2,6 +2,7 @@
 #include "Engine.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <cmath>
 #include <filesystem>
 
@@ -767,10 +768,12 @@ Result<void> Engine::render(const render::Projection& projection, const render::
     const bool meshLayer = drawMeshes;
     if (meshLayer) {
         LRT_TRY(scene_->update(meshInstances, projection, meshSets));
-        gpu::CommandBatch batch(*device_);
         // The frame's lights, and what a shadow ray traces against: rays
         // shadow whatever route found the visibility, so the structure is
-        // built even where the rasteriser drew.
+        // built even where the rasteriser drew. All of this uploads and
+        // builds -- each submitting a batch of its own -- so it happens
+        // before the frame's batch opens: a submit inside a batch that has
+        // already recorded work releases what that work still refers to.
         if (!lightTable_.has_value()) {
             auto made = light::LightTable::create(*device_);
             if (!made) return std::move(made).error();
@@ -800,7 +803,7 @@ Result<void> Engine::render(const render::Projection& projection, const render::
             }
         }
         LRT_TRY(lightTable_->set(lamps));
-        rhi::IAccelerationStructure* shadows = nullptr;
+        bool shadowsWanted = false;
         if (lightTable_->anyShadow() && caps.rayQuery && caps.accelerationStructure) {
             if (!rayTracingScene_.has_value()) {
                 auto accel = world::RayTracingScene::create(*library_);
@@ -808,9 +811,9 @@ Result<void> Engine::render(const render::Projection& projection, const render::
                 rayTracingScene_.emplace(std::move(*accel));
             }
             if (visibility != MeshVisibility::Rays) {
-                LRT_TRY(rayTracingScene_->build(*scene_));   // the rays route has built it already
+                LRT_TRY(rayTracingScene_->build(*scene_));   // the rays route builds it in the pass below
             }
-            shadows = rayTracingScene_->topLevel();
+            shadowsWanted = true;
         }
         // What a material needs wherever it is evaluated: shading always,
         // visibility only where a material cuts its samples away.
@@ -822,46 +825,51 @@ Result<void> Engine::render(const render::Projection& projection, const render::
         frame.textures = textures_.get();
         frame.lights = &*lightTable_;
         frame.samples = lightSamples_.load();
-        frame.shadows = shadows;
         const technique::MaterialFrame* cutouts = materialCutouts_ ? &frame : nullptr;
+            gpu::CommandBatch batch(*device_);
         switch (visibility) {
-            case MeshVisibility::Automatic:
-            case MeshVisibility::Raster:
-                if (!visibilityRaster_.has_value()) {
-                    auto made = technique::VisibilityRaster::create(*library_);
-                    if (!made) return std::move(made).error();
-                    visibilityRaster_.emplace(std::move(*made));
-                }
-                LRT_TRY(visibilityRaster_->render(batch, *scene_, projection, settings.width, settings.height,
-                                                  visibility_, cutouts));
-                break;
-            case MeshVisibility::Rays:
-                if (!visibilityTrace_.has_value()) {
-                    auto accel = world::RayTracingScene::create(*library_);
-                    if (!accel) return std::move(accel).error();
-                    rayTracingScene_.emplace(std::move(*accel));
-                    auto made = technique::VisibilityTrace::create(*library_);
-                    if (!made) return std::move(made).error();
-                    visibilityTrace_.emplace(std::move(*made));
-                }
-                LRT_TRY(rayTracingScene_->build(*scene_));
-                LRT_TRY(visibilityTrace_->render(batch, *rayTracingScene_, projection, settings.width,
-                                                 settings.height, visibility_, cutouts));
-                break;
-            case MeshVisibility::Bvh:
-                if (!visibilityBvh_.has_value()) {
-                    auto bvh = world::BvhScene::create(*library_);
-                    if (!bvh) return std::move(bvh).error();
-                    bvhScene_.emplace(std::move(*bvh));
-                    auto made = technique::VisibilityBvh::create(*library_);
-                    if (!made) return std::move(made).error();
-                    visibilityBvh_.emplace(std::move(*made));
-                }
-                LRT_TRY(bvhScene_->build(*scene_));
-                LRT_TRY(visibilityBvh_->render(batch, *scene_, *bvhScene_, projection, settings.width,
-                                               settings.height, visibility_, cutouts));
-                break;
+        case MeshVisibility::Automatic:
+        case MeshVisibility::Raster:
+            if (!visibilityRaster_.has_value()) {
+                auto made = technique::VisibilityRaster::create(*library_);
+                if (!made) return std::move(made).error();
+                visibilityRaster_.emplace(std::move(*made));
+            }
+            LRT_TRY(visibilityRaster_->render(batch, *scene_, projection, settings.width, settings.height,
+                                              visibility_, cutouts));
+            break;
+        case MeshVisibility::Rays:
+            if (!visibilityTrace_.has_value()) {
+                auto accel = world::RayTracingScene::create(*library_);
+                if (!accel) return std::move(accel).error();
+                rayTracingScene_.emplace(std::move(*accel));
+                auto made = technique::VisibilityTrace::create(*library_);
+                if (!made) return std::move(made).error();
+                visibilityTrace_.emplace(std::move(*made));
+            }
+            LRT_TRY(rayTracingScene_->build(*scene_));
+            LRT_TRY(visibilityTrace_->render(batch, *rayTracingScene_, projection, settings.width,
+                                             settings.height, visibility_, cutouts));
+            break;
+        case MeshVisibility::Bvh:
+            if (!visibilityBvh_.has_value()) {
+                auto bvh = world::BvhScene::create(*library_);
+                if (!bvh) return std::move(bvh).error();
+                bvhScene_.emplace(std::move(*bvh));
+                auto made = technique::VisibilityBvh::create(*library_);
+                if (!made) return std::move(made).error();
+                visibilityBvh_.emplace(std::move(*made));
+            }
+            LRT_TRY(bvhScene_->build(*scene_));
+            LRT_TRY(visibilityBvh_->render(batch, *scene_, *bvhScene_, projection, settings.width,
+                                           settings.height, visibility_, cutouts));
+            break;
         }
+        // Read after the visibility pass, never before it: the rays route
+        // rebuilds this structure there, and the one it replaces is released
+        // with it -- taking the pointer earlier left shading tracing against
+        // a freed structure.
+        frame.shadows = shadowsWanted ? rayTracingScene_->topLevel() : nullptr;
         LRT_TRY(materialShading_->shade(batch, visibility_, projection, frame, meshLayer_));
         if (aovRequest.ids || aovRequest.normals || !aovRequest.primvars.empty()) {
             if (!aovShading_.has_value()) {
