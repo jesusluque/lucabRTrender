@@ -111,6 +111,42 @@ TEST_CASE("the prefix sum of every size is right, checked element by element on 
 /// The pairs themselves, before and after, for the smallest sort there is.
 /// When a backend gets the sort wrong, this says which stage wrote what: the
 /// generator's two pairs, then what the sort left in their place.
+/// What each of a sort pass's dispatches receives in its parameter block.
+/// Four dispatches are queued into one batch, as RadixSort::sort queues them,
+/// each with its own shift; a backend that hands them all the same constants
+/// shows up here rather than as a wrong sort.
+TEST_CASE("each dispatch in a batch gets its own parameters", "[gpu][algo][probe]") {
+    LRT_REQUIRE_GPU(gpu);
+    static gpu::ComputeKernel kProbe = test::kernel(*gpu, "lrt/test/radix_params_probe");
+    constexpr uint32_t kPasses = 4;
+    gpu::Buffer seen = test::uintBuffer(*gpu->device, kPasses * 4, "radix.params.seen");
+    gpu::CommandBatch batch(*gpu->device);
+    for (uint32_t pass = 0; pass < kPasses; ++pass) {
+        kProbe.dispatch(batch, {1, 1, 1}, [&](rhi::ShaderCursor cursor) {
+            cursor["seen"].setBinding(seen.rhi());
+            cursor["which"]["pass"].setData(pass);
+            rhi::ShaderCursor p = cursor["params"];
+            p["count"].setData(uint32_t{100 + pass});
+            p["chunkSize"].setData(uint32_t{4096});
+            p["chunkCount"].setData(uint32_t{1 + pass});
+            p["shift"].setData(uint32_t{pass * 8});
+            p["wide"].setData(uint32_t{0});
+        });
+    }
+    REQUIRE(batch.submit(true));
+    std::array<uint32_t, kPasses * 4> words{};
+    REQUIRE(seen.read(*gpu->device, 0, sizeof(words), words.data()));
+    for (uint32_t pass = 0; pass < kPasses; ++pass) {
+        std::printf("  pass %u saw count %u, chunks %u, shift %u\n", pass, words[pass * 4], words[pass * 4 + 1],
+                    words[pass * 4 + 2]);
+    }
+    for (uint32_t pass = 0; pass < kPasses; ++pass) {
+        CHECK(words[pass * 4] == 100 + pass);
+        CHECK(words[pass * 4 + 1] == 1 + pass);
+        CHECK(words[pass * 4 + 2] == pass * 8);
+    }
+}
+
 TEST_CASE("two pairs sort into one order, and are the pairs that went in", "[gpu][algo][probe]") {
     LRT_REQUIRE_GPU(gpu);
     auto sort = gpu::RadixSort::create(*gpu->library);

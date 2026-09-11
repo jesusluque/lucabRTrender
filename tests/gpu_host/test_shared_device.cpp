@@ -99,9 +99,9 @@ TEST_CASE("a slang-rhi buffer adopted by gpe is the same memory", "[gpu_host][gp
     REQUIRE(context->run([&] {
         std::vector<uint32_t> zeros(kSlots, 0);
         auto buffer = lrt::gpu::Buffer::fromSpan<uint32_t>(context->device(), zeros, "rhi-owned");
-        REQUIRE(buffer);
+        if (!buffer) FAIL(buffer.error().toString());
         auto adopted = context->computeView(*buffer);
-        REQUIRE(adopted);
+        if (!adopted) FAIL(adopted.error().toString());
         CHECK(compute.backendBuffer(*adopted) == buffer->native().value);
 
         gpe::Args args;
