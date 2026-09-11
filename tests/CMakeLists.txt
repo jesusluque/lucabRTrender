@@ -49,7 +49,7 @@ lrt_test(lrt_geom_tests
     LIBS lrt::geom)
 
 lrt_test(lrt_material_tests
-    SOURCES material/test_texture_store.cpp
+    SOURCES material/test_texture_store.cpp material/test_lobes.cpp
     LIBS lrt::material hio)
 target_compile_options(lrt_material_tests PRIVATE -Wno-old-style-cast -Wno-shadow -Wno-deprecated-declarations
                        -Wno-double-promotion -Wno-cast-align)
