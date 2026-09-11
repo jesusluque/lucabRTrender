@@ -150,3 +150,31 @@ void textureTexelIds(uint3 tid: SV_DispatchThreadID) {
     counts[2] = v.z;
     counts[3] = v.w;
 }
+
+/// A colour exactly representable in eight bits, written through an
+/// RWTexture2D<float4> and read back as the texture actually holds it. Metal
+/// converts a float4 store into the texture's format; a backend whose store
+/// writes the float's own bytes instead shows up here, one kernel away from
+/// the texture store's decode rather than four. The bits are reported raw so
+/// that whatever comes back stays visible.
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void formatWrite(uint3 tid: SV_DispatchThreadID) {
+    if (tid.x != 0) {
+        return;
+    }
+    written[uint2(0, 0)] = float4(1.0, 0.0, 64.0 / 255.0, 1.0);
+}
+
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void formatRead(uint3 tid: SV_DispatchThreadID) {
+    if (tid.x != 0) {
+        return;
+    }
+    const float4 v = texture.Load(int3(0, 0, 0));
+    counts[0] = asuint(v.r);
+    counts[1] = asuint(v.g);
+    counts[2] = asuint(v.b);
+    counts[3] = asuint(v.a);
+}

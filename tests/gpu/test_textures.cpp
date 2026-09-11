@@ -24,12 +24,13 @@ using namespace lrt;
 
 namespace {
 
-gpu::Texture texture(test::Gpu& gpu, uint32_t width, uint32_t height, uint32_t mips, const char* label) {
+gpu::Texture texture(test::Gpu& gpu, uint32_t width, uint32_t height, uint32_t mips, const char* label,
+                     rhi::Format format = rhi::Format::RGBA32Float) {
     gpu::TextureDesc desc;
     desc.width = width;
     desc.height = height;
     desc.mipCount = mips;
-    desc.format = rhi::Format::RGBA32Float;
+    desc.format = format;
     desc.usage = rhi::TextureUsage::ShaderResource | rhi::TextureUsage::UnorderedAccess |
                  rhi::TextureUsage::RenderTarget;
     desc.label = label;
@@ -444,4 +445,45 @@ TEST_CASE("a texture table binds textures by slot, and an sRGB view decodes what
     const float encoded = 180.0F / 255.0F;
     const float decoded = std::pow((encoded + 0.055F) / 1.055F, 2.4F);
     CHECK(v[8] == Catch::Approx(decoded).margin(2e-3F));
+}
+
+/// What a float4 store becomes in an 8-bit texture. The texture store decodes
+/// an 8-bit image into RGBA8Unorm through an RWTexture2D<float4>, and on a
+/// backend whose store does not convert, every component of every texel is
+/// wrong; this asks that question of one texel, with no decoding, sampling or
+/// mips in the way.
+TEST_CASE("a float4 written to an 8-bit texture comes back as the colour it wrote", "[gpu][texture][probe]") {
+    LRT_REQUIRE_GPU(gpu);
+    static gpu::ComputeKernel kWrite = kernelOf(*gpu, "formatWrite");
+    static gpu::ComputeKernel kRead = kernelOf(*gpu, "formatRead");
+    gpu::Texture eight = texture(*gpu, 4, 4, 1, "eight-bit", rhi::Format::RGBA8Unorm);
+    auto view = eight.view(0);
+    REQUIRE(view);
+    gpu::Buffer got = test::uintBuffer(*gpu->device, 4, "got");
+    {
+        gpu::CommandBatch batch(*gpu->device);
+        kWrite.dispatch(batch, {1, 1, 1},
+                        [&](rhi::ShaderCursor cursor) { cursor["written"].setBinding((*view).get()); });
+        REQUIRE(batch.submit(true));
+    }
+    {
+        gpu::CommandBatch batch(*gpu->device);
+        kRead.dispatch(batch, {1, 1, 1}, [&](rhi::ShaderCursor cursor) {
+            cursor["texture"].setBinding((*view).get());
+            cursor["counts"].setBinding(got.rhi());
+        });
+        REQUIRE(batch.submit(true));
+    }
+    std::array<uint32_t, 4> bits{};
+    REQUIRE(got.read(*gpu->device, 0, sizeof(bits), bits.data()));
+    std::array<float, 4> read{};
+    std::memcpy(read.data(), bits.data(), sizeof(read));
+    const std::array<float, 4> wrote = {1.0F, 0.0F, 64.0F / 255.0F, 1.0F};
+    std::printf("  eight-bit texel: %.4f %.4f %.4f %.4f (wrote %.4f %.4f %.4f %.4f)\n", double(read[0]),
+                double(read[1]), double(read[2]), double(read[3]), double(wrote[0]), double(wrote[1]),
+                double(wrote[2]), double(wrote[3]));
+    for (uint32_t k = 0; k < 4; ++k) {
+        // One step of eight-bit quantisation is all the write may cost.
+        CHECK(std::abs(read[k] - wrote[k]) <= 1.0F / 255.0F);
+    }
 }
