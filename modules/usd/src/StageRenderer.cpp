@@ -17,7 +17,11 @@
 #include <pxr/imaging/cameraUtil/framing.h>
 #include <pxr/usd/usd/primRange.h>
 #include <pxr/usd/usd/stage.h>
+#include <pxr/imaging/hd/primOriginSchema.h>
+#include <pxr/imaging/hd/sceneIndex.h>
 #include <pxr/usd/usdGeom/camera.h>
+#include <pxr/usd/usdGeom/metrics.h>
+#include <pxr/usd/usdGeom/tokens.h>
 #include <pxr/usdImaging/usdImaging/sceneIndices.h>
 #include <pxr/usdImaging/usdImaging/stageSceneIndex.h>
 
@@ -125,15 +129,12 @@ double StageRenderer::startTimeCode() const {
     return impl_->stage->GetStartTimeCode();
 }
 
-Result<StageImage> StageRenderer::render(const std::string& camera, double time, uint32_t width,
-                                         uint32_t height, const std::string& technique) {
+Result<void> StageRenderer::aim(const std::string& camera, double time, const std::string& technique) {
     Impl& impl = *impl_;
     if (technique != "raster" && technique != "rt") {
         return Error::make(ErrorCode::InvalidArgument, "technique '{}': raster or rt", technique);
     }
     impl.delegate->SetRenderSetting(TfToken("lrt:technique"), VtValue(TfToken(technique)));
-    // An image, not a viewport: streamed assets are loaded before it is drawn.
-    impl.delegate->SetRenderSetting(TfToken("lrt:settleStreams"), VtValue(true));
     std::string cameraPath = camera;
     if (cameraPath.empty()) {
         const auto all = cameras();
@@ -147,19 +148,17 @@ Result<StageImage> StageRenderer::render(const std::string& camera, double time,
     }
     impl.sceneIndices.stageSceneIndex->SetTime(UsdTimeCode(time));
     impl.sceneIndices.stageSceneIndex->ApplyPendingUpdates();
-
     impl.controller->SetCameraPath(SdfPath(cameraPath));
-    return execute(width, height);
+    return ok();
 }
 
-Result<StageImage> StageRenderer::render(const render::Camera& camera, double time, uint32_t width, uint32_t height,
-                                         const std::string& technique) {
+Result<void> StageRenderer::aim(const render::Camera& camera, double time, uint32_t width, uint32_t height,
+                                const std::string& technique) {
     Impl& impl = *impl_;
     if (technique != "raster" && technique != "rt") {
         return Error::make(ErrorCode::InvalidArgument, "technique '{}': raster or rt", technique);
     }
     impl.delegate->SetRenderSetting(TfToken("lrt:technique"), VtValue(TfToken(technique)));
-    impl.delegate->SetRenderSetting(TfToken("lrt:settleStreams"), VtValue(true));
     impl.sceneIndices.stageSceneIndex->SetTime(UsdTimeCode(time));
     impl.sceneIndices.stageSceneIndex->ApplyPendingUpdates();
     // A camera's matrices, as a free camera: world to camera, and the lens's
@@ -181,37 +180,186 @@ Result<StageImage> StageRenderer::render(const render::Camera& camera, double ti
     }
     impl.controller->SetCameraPath(SdfPath());
     impl.controller->SetFreeCameraMatrices(view, lens.GetFrustum().ComputeProjectionMatrix());
+    return ok();
+}
+
+Result<StageImage> StageRenderer::render(const std::string& camera, double time, uint32_t width,
+                                         uint32_t height, const std::string& technique) {
+    // An image, not a viewport: streamed assets are loaded before it is drawn.
+    impl_->delegate->SetRenderSetting(TfToken("lrt:settleStreams"), VtValue(true));
+    LRT_TRY(aim(camera, time, technique));
+    LRT_TRY(execute(width, height));
+    return readImage(width, height);
+}
+
+Result<StageImage> StageRenderer::render(const render::Camera& camera, double time, uint32_t width, uint32_t height,
+                                         const std::string& technique) {
+    impl_->delegate->SetRenderSetting(TfToken("lrt:settleStreams"), VtValue(true));
+    LRT_TRY(aim(camera, time, width, height, technique));
+    LRT_TRY(execute(width, height));
+    return readImage(width, height);
+}
+
+Result<void> StageRenderer::draw(const std::string& camera, double time, uint32_t width, uint32_t height,
+                                 const std::string& technique) {
+    // A viewport: streamed assets fill in over the frames that follow.
+    impl_->delegate->SetRenderSetting(TfToken("lrt:settleStreams"), VtValue(false));
+    LRT_TRY(aim(camera, time, technique));
     return execute(width, height);
 }
 
-Result<StageImage> StageRenderer::execute(uint32_t width, uint32_t height) {
+Result<void> StageRenderer::draw(const render::Camera& camera, double time, uint32_t width, uint32_t height,
+                                 const std::string& technique) {
+    impl_->delegate->SetRenderSetting(TfToken("lrt:settleStreams"), VtValue(false));
+    LRT_TRY(aim(camera, time, width, height, technique));
+    return execute(width, height);
+}
+
+Result<void> StageRenderer::execute(uint32_t width, uint32_t height) {
     Impl& impl = *impl_;
     impl.controller->SetRenderBufferSize(GfVec2i(static_cast<int>(width), static_cast<int>(height)));
     impl.controller->SetFraming(CameraUtilFraming(
         GfRect2i(GfVec2i(0), static_cast<int>(width), static_cast<int>(height))));
     HdTaskSharedPtrVector tasks = impl.controller->GetRenderingTasks();
     impl.engine.Execute(impl.index, &tasks);
+    const render::RenderTargets* targets = lastTargets();
+    if (targets == nullptr || targets->width != width || targets->height != height) {
+        return Error(ErrorCode::InternalError, "the render pass drew nothing");
+    }
+    return ok();
+}
 
+const render::RenderTargets* StageRenderer::lastTargets() const {
+    auto* param = static_cast<HdLrtRenderParam*>(impl_->delegate->GetRenderParam());
+    const Engine* engine = param != nullptr ? param->GetEngine() : nullptr;
+    return engine != nullptr ? engine->lastTargets() : nullptr;
+}
+
+Result<StageImage> StageRenderer::readImage(uint32_t width, uint32_t height) {
     // The engine's own targets, as the render pass left them: bottom row
     // first and view z already, so the only step is the readback.
-    auto* param = static_cast<HdLrtRenderParam*>(impl.delegate->GetRenderParam());
-    const lrt::usd::Engine* engine = param != nullptr ? param->GetEngine() : nullptr;
-    const render::RenderTargets* targets = engine != nullptr ? engine->lastTargets() : nullptr;
+    const render::RenderTargets* targets = lastTargets();
     if (targets == nullptr || targets->width != width || targets->height != height) {
         return Error(ErrorCode::InternalError, "the render pass drew nothing to read");
     }
     StageImage image;
     image.width = width;
     image.height = height;
-    auto rgba = targets->colour.readAll<float>(impl.delegate->GetEngineDevice());
+    auto rgba = targets->colour.readAll<float>(impl_->delegate->GetEngineDevice());
     if (!rgba) return std::move(rgba).error();
-    auto depth = targets->depth.readAll<float>(impl.delegate->GetEngineDevice());
+    auto depth = targets->depth.readAll<float>(impl_->delegate->GetEngineDevice());
     if (!depth) return std::move(depth).error();
     image.rgba = std::move(*rgba);
     image.depth = std::move(*depth);
     image.rgba.resize(size_t{width} * height * 4);
     image.depth.resize(size_t{width} * height);
     return image;
+}
+
+gpu::Device& StageRenderer::device() {
+    return impl_->delegate->GetEngineDevice();
+}
+
+Result<technique::DisplaySource> StageRenderer::displaySource(const std::string& aov) {
+    const render::RenderTargets* targets = lastTargets();
+    auto* param = static_cast<HdLrtRenderParam*>(impl_->delegate->GetRenderParam());
+    Engine* engine = param != nullptr ? param->GetEngine() : nullptr;
+    if (targets == nullptr || engine == nullptr) {
+        return Error(ErrorCode::InvalidArgument, "nothing drawn yet");
+    }
+    AovSource source;
+    technique::DisplaySource shown;
+    if (aov == "color") {
+        source.kind = AovKind::Colour;
+        shown.kind = technique::DisplaySource::Kind::Colour;
+    } else if (aov == "depth") {
+        source.kind = AovKind::Depth;
+        shown.kind = technique::DisplaySource::Kind::Depth;
+    } else if (aov == "primId" || aov == "instanceId" || aov == "elementId") {
+        source.kind = aov == "primId" ? AovKind::PrimId : aov == "instanceId" ? AovKind::InstanceId : AovKind::ElementId;
+        shown.kind = technique::DisplaySource::Kind::Ids;
+    } else if (aov == "Neye" || aov == "normal") {
+        source.kind = aov == "Neye" ? AovKind::EyeNormal : AovKind::WorldNormal;
+        shown.kind = technique::DisplaySource::Kind::Vector;
+    } else {
+        return Error::make(ErrorCode::InvalidArgument, "no display for AOV '{}'", aov);
+    }
+    const AovView view = engine->aovView(*targets, source);
+    shown.buffer = view.buffer;
+    shown.stride = view.stride;
+    shown.offset = view.offset;
+    shown.width = targets->width;
+    shown.height = targets->height;
+    shown.bottomRowFirst = true;
+    return shown;
+}
+
+Result<std::optional<scene::Bounds>> StageRenderer::bounds() {
+    auto* param = static_cast<HdLrtRenderParam*>(impl_->delegate->GetRenderParam());
+    Engine* engine = param != nullptr ? param->GetEngine() : nullptr;
+    if (engine == nullptr) {
+        return std::optional<scene::Bounds>{};
+    }
+    return engine->bounds();
+}
+
+Result<std::optional<StagePick>> StageRenderer::pick(uint32_t x, uint32_t y) {
+    Impl& impl = *impl_;
+    const render::RenderTargets* targets = lastTargets();
+    auto* param = static_cast<HdLrtRenderParam*>(impl.delegate->GetRenderParam());
+    Engine* engine = param != nullptr ? param->GetEngine() : nullptr;
+    if (targets == nullptr || engine == nullptr || x >= targets->width || y >= targets->height) {
+        return std::optional<StagePick>{};
+    }
+    const AovView view = engine->aovView(*targets, {AovKind::PrimId, 0});
+    if (view.buffer == nullptr) {
+        return std::optional<StagePick>{};
+    }
+    // Two ids of one pixel: bookkeeping, not an image read back.
+    const uint64_t pixel = uint64_t{targets->height - 1 - y} * targets->width + x;   // bottom row first
+    uint32_t ids[2] = {0, 0};
+    LRT_TRY(view.buffer->read(impl.delegate->GetEngineDevice(), pixel * view.stride * 4, sizeof(ids), ids));
+    if (ids[0] == 0xFFFFFFFFu) {
+        return std::optional<StagePick>{};
+    }
+    StagePick picked;
+    const SdfPath rprim = impl.index->GetRprimPathFromPrimId(static_cast<int>(ids[0]));
+    if (rprim.IsEmpty()) {
+        return std::optional<StagePick>{};
+    }
+    picked.rprim = rprim.GetString();
+    picked.instance = static_cast<int32_t>(ids[1]);
+    const HdSceneIndexPrim prim = impl.index->GetTerminalSceneIndex()->GetPrim(rprim);
+    const SdfPath origin = HdPrimOriginSchema::GetFromParent(prim.dataSource).GetOriginPath(HdPrimOriginSchemaTokens->scenePath);
+    picked.prim = origin.IsEmpty() ? picked.rprim : origin.GetString();
+    return std::optional<StagePick>(std::move(picked));
+}
+
+std::vector<StagePrim> StageRenderer::children(const std::string& path) const {
+    std::vector<StagePrim> out;
+    const UsdPrim parent = path.empty() || path == "/" ? impl_->stage->GetPseudoRoot()
+                                                       : impl_->stage->GetPrimAtPath(SdfPath(path));
+    if (!parent) {
+        return out;
+    }
+    for (const UsdPrim& child : parent.GetChildren()) {
+        StagePrim row;
+        row.path = child.GetPath().GetString();
+        row.name = child.GetName().GetString();
+        row.type = child.GetTypeName().GetString();
+        row.hasChildren = !child.GetChildren().empty();
+        row.instance = child.IsInstance();
+        out.push_back(std::move(row));
+    }
+    return out;
+}
+
+char StageRenderer::upAxis() const {
+    return UsdGeomGetStageUpAxis(impl_->stage) == UsdGeomTokens->z ? 'Z' : 'Y';
+}
+
+double StageRenderer::endTimeCode() const {
+    return impl_->stage->GetEndTimeCode();
 }
 
 }   // namespace lrt::usd

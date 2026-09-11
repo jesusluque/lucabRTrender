@@ -2,6 +2,7 @@
 #include "Engine.h"
 
 #include <algorithm>
+#include <cmath>
 
 #include "lrt/core/Log.h"
 #include "lrt/gpu/CommandBatch.h"
@@ -241,6 +242,63 @@ Result<size_t> Engine::commit() {
         ++uploaded;
     }
     return uploaded;
+}
+
+Result<std::optional<scene::Bounds>> Engine::bounds() {
+    std::optional<scene::Bounds> all;
+    const auto grow = [&](const scene::Bounds& box, const render::Mat4& toWorld) {
+        // A box through an affine map, as scene_bounds.slang does per instance:
+        // one prim's matrix and its cloud's box, not the cloud.
+        scene::Bounds moved;
+        for (int r = 0; r < 3; ++r) {
+            double centre = toWorld.at(r, 3);
+            double extent = 0.0;
+            for (int c = 0; c < 3; ++c) {
+                const double mid = 0.5 * (double(box.min[size_t(c)]) + double(box.max[size_t(c)]));
+                const double half = 0.5 * (double(box.max[size_t(c)]) - double(box.min[size_t(c)]));
+                centre += toWorld.at(r, c) * mid;
+                extent += std::abs(toWorld.at(r, c)) * half;
+            }
+            moved.min[size_t(r)] = static_cast<float>(centre - extent);
+            moved.max[size_t(r)] = static_cast<float>(centre + extent);
+        }
+        if (!all) {
+            all = moved;
+            return;
+        }
+        for (size_t k = 0; k < 3; ++k) {
+            all->min[k] = std::min(all->min[k], moved.min[k]);
+            all->max[k] = std::max(all->max[k], moved.max[k]);
+        }
+    };
+    {
+        const std::lock_guard<std::mutex> held(guard_);
+        for (const auto& [id, entry] : splats_) {
+            if (!entry.visible) {
+                continue;
+            }
+            if (entry.gpu != nullptr) {
+                grow(entry.gpu->bounds, entry.objectToWorld);
+            } else if (entry.lodCloud != nullptr) {
+                grow(entry.lodCloud->splats.bounds, entry.objectToWorld);
+            } else if (entry.pool != nullptr) {
+                grow(entry.pool->cloud().splats.bounds, entry.objectToWorld);
+            }
+        }
+        for (const auto& [id, entry] : points_) {
+            if (entry.visible && entry.gpu != nullptr) {
+                grow(entry.gpu->bounds, entry.objectToWorld);
+            }
+        }
+    }
+    if (scene_.has_value()) {
+        auto meshes = scene_->worldBounds();
+        if (!meshes) return std::move(meshes).error();
+        if (meshes->has_value()) {
+            grow(**meshes, render::Mat4::identity());
+        }
+    }
+    return all;
 }
 
 AovView Engine::aovView(const render::RenderTargets& targets, AovSource aov) const {

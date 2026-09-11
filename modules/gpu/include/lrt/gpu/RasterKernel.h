@@ -62,6 +62,9 @@ struct RasterDraw {
     uint32_t                               firstVertex = 0;
     uint32_t                               firstInstance = 0;
     std::function<void(rhi::ShaderCursor)> bind;
+    /// Pixels the draw may touch, (x0, y0, x1, y1) from the top left; the
+    /// whole pass when x1 <= x0.
+    std::array<uint32_t, 4>                scissor{0, 0, 0, 0};
 };
 
 class RasterKernel {

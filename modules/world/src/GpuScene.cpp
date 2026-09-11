@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstring>
 #include <map>
+#include <tuple>
 
 #include "lrt/gpu/CommandBatch.h"
 #include "lrt/gpu/Device.h"
@@ -72,6 +73,13 @@ Result<GpuScene> GpuScene::create(gpu::ShaderLibrary& library) {
     auto records = gpu::ComputeKernel::create(library, "lrt/world/instancing", "instanceRecords");
     if (!records) return std::move(records).error();
     scene.records_ = std::move(*records);
+    for (auto [into, module, entry] : {std::tuple{&scene.worldBoxes_, "lrt/world/scene_bounds", "instanceWorldBoxes"},
+                                       std::tuple{&scene.boundsChunks_, "lrt/scene/bounds_chunks", "boundsChunks"},
+                                       std::tuple{&scene.boundsReduce_, "lrt/scene/bounds_reduce", "boundsReduce"}}) {
+        auto made = gpu::ComputeKernel::create(library, module, entry);
+        if (!made) return std::move(made).error();
+        *into = std::move(*made);
+    }
     return scene;
 }
 
@@ -370,6 +378,51 @@ Result<void> GpuScene::update(std::span<const MeshInstance> instances, const ren
     });
     LRT_TRY(batch.submit(true));
     return ok();
+}
+
+Result<std::optional<scene::Bounds>> GpuScene::worldBounds() const {
+    const uint32_t n = instanceCount_;
+    if (n == 0) {
+        return std::optional<scene::Bounds>{};
+    }
+    constexpr uint32_t kChunk = 4096;
+    const uint32_t points = n * 2;
+    const uint32_t chunks = (points + kChunk - 1) / kChunk;
+    auto corners = deviceBuffer(*device_, points, 16, "scene.bounds.corners");
+    if (!corners) return std::move(corners).error();
+    auto extents = deviceBuffer(*device_, uint64_t{chunks} * 2, 16, "scene.bounds.extents");
+    if (!extents) return std::move(extents).error();
+    auto result = deviceBuffer(*device_, 2, 16, "scene.bounds");
+    if (!result) return std::move(result).error();
+    gpu::CommandBatch batch(*device_);
+    worldBoxes_.dispatch(batch, {n, 1, 1}, [&](rhi::ShaderCursor cursor) {
+        cursor["meshes"].setBinding(meshRecords_.rhi());
+        cursor["instances"].setBinding(instanceRecords_.rhi());
+        cursor["corners"].setBinding(corners->rhi());
+        cursor["params"]["count"].setData(n);
+    });
+    const auto params = [&](rhi::ShaderCursor cursor) {
+        cursor["params"]["count"].setData(points);
+        cursor["params"]["chunkSize"].setData(kChunk);
+        cursor["params"]["chunkCount"].setData(chunks);
+    };
+    boundsChunks_.dispatch(batch, {chunks, 1, 1}, [&](rhi::ShaderCursor cursor) {
+        cursor["positions"].setBinding(corners->rhi());
+        cursor["extents"].setBinding(extents->rhi());
+        params(cursor);
+    });
+    boundsReduce_.dispatch(batch, {1, 1, 1}, [&](rhi::ShaderCursor cursor) {
+        cursor["extents"].setBinding(extents->rhi());
+        cursor["result"].setBinding(result->rhi());
+        params(cursor);
+    });
+    LRT_TRY(batch.submit(true));
+    float box[8];
+    LRT_TRY(result->read(*device_, 0, sizeof(box), box));
+    scene::Bounds bounds;
+    std::copy(box, box + 3, bounds.min.begin());
+    std::copy(box + 4, box + 7, bounds.max.begin());
+    return std::optional<scene::Bounds>(bounds);
 }
 
 }   // namespace lrt::world

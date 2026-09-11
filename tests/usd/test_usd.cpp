@@ -503,6 +503,30 @@ TEST_CASE("displayColor reaches the pixels per face and per indexed face-vertex"
     CHECK(atFloat(*world, lx, fy, 3, 2) == Catch::Approx(1.0F).margin(1e-4F));
     CHECK(atFloat(*colour, lx, fy, 3, 0) == Catch::Approx(1.0F).margin(1e-5F));
     CHECK(atFloat(*colour, lx, fy, 3, 1) == Catch::Approx(0.0F).margin(1e-5F));
+
+    // What a viewer asks of the same frame: the prim under a pixel (from the
+    // top left) and where the stage is.
+    auto overFace = (*renderer)->pick(lx, h - 1 - fy);
+    auto overCorner = (*renderer)->pick(w / 2, h - 1 - cy);
+    auto overNothing = (*renderer)->pick(2, 2);
+    REQUIRE(overFace);
+    REQUIRE(overCorner);
+    REQUIRE(overNothing);
+    REQUIRE(overFace->has_value());
+    REQUIRE(overCorner->has_value());
+    CHECK((*overFace)->prim == "/PerFace");
+    CHECK((*overCorner)->prim == "/PerCorner");
+    CHECK(!overNothing->has_value());
+    auto box = (*renderer)->bounds();
+    REQUIRE(box);
+    REQUIRE(box->has_value());
+    std::printf("  picked %s and %s; bounds (%.2f %.2f %.2f)-(%.2f %.2f %.2f)\n", (*overFace)->prim.c_str(),
+                (*overCorner)->prim.c_str(), double((*box)->min[0]), double((*box)->min[1]), double((*box)->min[2]),
+                double((*box)->max[0]), double((*box)->max[1]), double((*box)->max[2]));
+    CHECK((*box)->min[0] == Catch::Approx(-2.0F).margin(1e-5F));
+    CHECK((*box)->min[1] == Catch::Approx(-1.5F).margin(1e-5F));
+    CHECK((*box)->max[1] == Catch::Approx(1.5F).margin(1e-5F));
+    CHECK((*box)->max[2] == Catch::Approx(-5.0F).margin(1e-5F));
 }
 
 TEST_CASE("a PointInstancer draws as its instances authored one by one", "[usd][gpu][mesh][instancing]") {

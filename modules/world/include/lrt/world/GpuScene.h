@@ -10,6 +10,7 @@
 #include <array>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -67,6 +68,9 @@ public:
                                       std::span<const InstanceSet> sets = {});
 
     [[nodiscard]] uint32_t instanceCount() const noexcept { return instanceCount_; }
+    /// The world box around every instance's mesh box, folded on the device;
+    /// nothing when the scene is empty.
+    [[nodiscard]] Result<std::optional<scene::Bounds>> worldBounds() const;
     [[nodiscard]] uint32_t meshCount() const noexcept { return static_cast<uint32_t>(meshes_.size()); }
     [[nodiscard]] std::span<const DrawRange> draws() const noexcept { return draws_; }
     [[nodiscard]] const geom::GpuMesh& mesh(uint32_t index) const { return *meshes_[index]; }
@@ -102,6 +106,7 @@ private:
 
     gpu::Device*                                       device_ = nullptr;
     gpu::ComputeKernel                                 records_;
+    gpu::ComputeKernel                                 worldBoxes_, boundsChunks_, boundsReduce_;
     std::vector<std::shared_ptr<const geom::GpuMesh>>  meshes_;
     std::vector<Range>                                 ranges_;
     std::vector<DrawRange>                             draws_;

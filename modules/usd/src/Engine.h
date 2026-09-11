@@ -177,6 +177,11 @@ public:
     /// The targets the last render drew into (owned by the render pass).
     [[nodiscard]] const render::RenderTargets* lastTargets() const noexcept { return lastTargets_; }
 
+    /// Where everything drawn in the last frame is, in world space: mesh boxes
+    /// folded on the device, cloud boxes through their prims' transforms.
+    /// Nothing before a frame has drawn anything.
+    [[nodiscard]] Result<std::optional<scene::Bounds>> bounds();
+
     /// The last frame's `aov` on the device, for a caller that shows it
     /// there (lrt view) rather than reading it back.
     [[nodiscard]] AovView aovView(const render::RenderTargets& targets, AovSource aov) const;

@@ -1,6 +1,8 @@
 // Copyright (c) 2026 lucabRTrender contributors.
 #include "lrt/gpu/RasterKernel.h"
 
+#include <algorithm>
+
 #include "lrt/gpu/CommandBatch.h"
 #include "lrt/gpu/Device.h"
 #include "lrt/gpu/ShaderLibrary.h"
@@ -73,9 +75,16 @@ void RasterKernel::run(CommandBatch& batch, const RasterPass& pass, std::span<co
             if (draw.bind) {
                 draw.bind(rhi::ShaderCursor(root));
             }
-            encoder->setRenderState(state);
             shared = !draw.bind;
         }
+        rhi::RenderState drawState = state;
+        if (draw.scissor[2] > draw.scissor[0] && draw.scissor[3] > draw.scissor[1]) {
+            drawState.scissorRects[0].minX = std::min(draw.scissor[0], pass.width);
+            drawState.scissorRects[0].minY = std::min(draw.scissor[1], pass.height);
+            drawState.scissorRects[0].maxX = std::min(draw.scissor[2], pass.width);
+            drawState.scissorRects[0].maxY = std::min(draw.scissor[3], pass.height);
+        }
+        encoder->setRenderState(drawState);
         rhi::DrawArguments args;
         args.vertexCount = draw.vertexCount;
         args.instanceCount = draw.instanceCount;
