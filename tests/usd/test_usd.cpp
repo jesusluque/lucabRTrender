@@ -40,6 +40,7 @@
 #include "lrt/render/TileRasterizer.h"
 #include "lrt/scene/GpuClouds.h"
 #include "lrt/usd/Export.h"
+#include "lrt/technique/Denoiser.h"
 #include "lrt/usd/StageRenderer.h"
 
 using namespace lrt;
@@ -2025,5 +2026,80 @@ TEST_CASE("a path traced frame accumulates over passes and starts again when it 
     std::printf("  before the bounce count changed: %u, after: %u\n", beforeSetting, afterSetting);
     CHECK(beforeSetting == 16);
     CHECK(afterSetting == 4);
+}
+
+// The denoiser from the engine: lrt:denoise runs OIDN over a path traced
+// frame once it has gathered lrt:pathTotal, in place. Two frames of the same
+// stage and paths, one with the setting and one without, must differ once the
+// total is reached -- and must not differ while it is not, which is the gate.
+TEST_CASE("lrt:denoise runs once a path traced frame is gathered, and not before",
+          "[usd][gpu][mesh][path][denoise]") {
+    LRT_REQUIRE_GPU(gpu);
+    if (!gpu->device->caps().rasterization) {
+        SKIP("no rasterisation on this device");
+    }
+    if (!technique::denoiserBuilt()) {
+        SKIP("built without OIDN");
+    }
+    if (auto probe = technique::Denoiser::create(*gpu->library); !probe) {
+        SKIP(std::string("no denoiser here: ") + probe.error().toString());
+    }
+    const fs::path path = scratch("rt_denoise.usda");
+    {
+        std::ofstream out(path);
+        out << kSquareStage
+            << "def SphereLight \"Key\"\n{\n"
+               "    bool inputs:shadow:enable = 0\n"
+               "    float inputs:radius = 0.4\n"
+               "    float inputs:intensity = 1\n"
+               "    bool inputs:normalize = 0\n"
+               "    double3 xformOp:translate = (0, 0, -3)\n"
+               "    uniform token[] xformOpOrder = [\"xformOp:translate\"]\n}\n"
+               "def Scope \"Materials\"\n{\n"
+               "    def Material \"Mat\"\n    {\n"
+               "        token outputs:mtlx:surface.connect = </Materials/Mat/Surface.outputs:out>\n"
+               "        def Shader \"Surface\"\n        {\n"
+               "            uniform token info:id = \"ND_surface\"\n"
+               "            token inputs:bsdf.connect = </Materials/Mat/Diffuse.outputs:out>\n"
+               "            token outputs:out\n        }\n"
+               "        def Shader \"Diffuse\"\n        {\n"
+               "            uniform token info:id = \"ND_oren_nayar_diffuse_bsdf\"\n"
+               "            color3f inputs:color = (0.8, 0.8, 0.8)\n"
+               "            float inputs:roughness = 0\n"
+               "            token outputs:out\n        }\n    }\n}\n";
+    }
+    const uint32_t w = 96;
+    const uint32_t h = 72;
+    const auto frame = [&](bool denoise, uint32_t total) {
+        auto renderer = usd::StageRenderer::open(path);
+        if (!renderer) FAIL(renderer.error().toString());
+        (*renderer)->setPathSamples(4);
+        (*renderer)->setPathBounces(1);
+        (*renderer)->setPathTotal(total);
+        (*renderer)->setDenoise(denoise);
+        auto image = (*renderer)->render("/Camera", 0.0, w, h, "rt");
+        if (!image) FAIL(image.error().toString());
+        gpu::BufferDesc desc;
+        desc.bytes = image->rgba.size() * sizeof(float);
+        desc.elementBytes = 16;
+        auto buffer = gpu::Buffer::create(*gpu->device, desc, image->rgba.data());
+        REQUIRE(buffer);
+        return *buffer;
+    };
+    const uint32_t words = w * h * 4;
+    // Gathered in one pass: the denoiser runs, and the frame is not the mean.
+    const gpu::Buffer plain = frame(false, 4);
+    const gpu::Buffer denoised = frame(true, 4);
+    auto changed = render::countDifferent(*gpu->library, plain, denoised, words);
+    REQUIRE(changed);
+    // Not yet gathered: the gate holds, and the two frames are the same frame.
+    const gpu::Buffer plainEarly = frame(false, 64);
+    const gpu::Buffer gated = frame(true, 64);
+    auto unchanged = render::countDifferent(*gpu->library, plainEarly, gated, words);
+    REQUIRE(unchanged);
+    std::printf("  denoise at the total: %llu of %u words changed; before the total: %llu\n",
+                static_cast<unsigned long long>(*changed), words, static_cast<unsigned long long>(*unchanged));
+    CHECK(*changed > 0);
+    CHECK(*unchanged == 0);
 }
 

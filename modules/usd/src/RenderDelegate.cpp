@@ -113,7 +113,7 @@ HdRenderPassSharedPtr HdLrtRenderDelegate::CreateRenderPass(HdRenderIndex* index
 
 TF_DEFINE_PRIVATE_TOKENS(_lrtSettings, ((technique, "lrt:technique"))((settleStreams, "lrt:settleStreams"))
                                            ((visibility, "lrt:visibility"))((lightSamples, "lrt:lightSamples"))((chooseLights, "lrt:chooseLights"))
-                                           ((pathSamples, "lrt:pathSamples"))((pathBounces, "lrt:pathBounces"))((pathTotal, "lrt:pathTotal"))
+                                           ((pathSamples, "lrt:pathSamples"))((pathBounces, "lrt:pathBounces"))((pathTotal, "lrt:pathTotal"))((denoise, "lrt:denoise"))
                                            (raster)(rt)(automatic)(rays)(bvh));
 
 HdRenderSettingDescriptorList HdLrtRenderDelegate::GetRenderSettingDescriptors() const {
@@ -149,7 +149,11 @@ HdRenderSettingDescriptorList HdLrtRenderDelegate::GetRenderSettingDescriptors()
     total.name = "Paths per pixel to converge to (rt)";
     total.key = _lrtSettings->pathTotal;
     total.defaultValue = VtValue(1);
-    return {technique, settle, visibility, samples, choose, paths, bounces, total};
+    HdRenderSettingDescriptor denoise;
+    denoise.name = "Denoise the path traced frame once gathered (rt)";
+    denoise.key = _lrtSettings->denoise;
+    denoise.defaultValue = VtValue(false);
+    return {technique, settle, visibility, samples, choose, paths, bounces, total, denoise};
 }
 
 lrt::usd::MeshVisibility HdLrtRenderDelegate::GetMeshVisibility() const {
@@ -201,6 +205,11 @@ uint32_t HdLrtRenderDelegate::GetPathSamples() const {
 
 uint32_t HdLrtRenderDelegate::GetPathBounces() const {
     return _UintSetting(GetRenderSetting(_lrtSettings->pathBounces), 1, 0);
+}
+
+bool HdLrtRenderDelegate::GetDenoise() const {
+    const VtValue value = GetRenderSetting(_lrtSettings->denoise);
+    return value.IsHolding<bool>() && value.UncheckedGet<bool>();
 }
 
 uint32_t HdLrtRenderDelegate::GetPathTotal() const {

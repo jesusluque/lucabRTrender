@@ -208,6 +208,8 @@ void Engine::setPathBounces(uint32_t bounces) {
 
 void Engine::setPathTotal(uint32_t total) { pathTotal_.store(std::max(total, 1u)); }
 
+void Engine::setDenoise(bool denoise) { denoise_.store(denoise); }
+
 uint32_t Engine::pathAccumulated() const noexcept {
     return pathTracer_.has_value() && pathState_.traced ? pathTracer_->accumulated() : 0;
 }
@@ -1042,6 +1044,29 @@ Result<void> Engine::render(const render::Projection& projection, const render::
             aovsValid_ = true;
         }
         LRT_TRY(batch.submit(true));
+        // After the frame's batch, never inside it: the denoiser submits work
+        // of its own and waits for OIDN. It runs on a path traced frame that
+        // has gathered what it was asked for, in place over the mean -- the
+        // input is copied to OIDN's staging before OIDN writes anything.
+        if (pathTracing && denoise_.load() && !denoiserFailed_ && pathTracer_->accumulated() >= pathTotal_.load()) {
+            if (!denoiser_.has_value()) {
+                auto made = technique::Denoiser::create(*library_);
+                if (!made) {
+                    denoiserFailed_ = true;
+                    log::warn("hdLrt: no denoiser: {}", made.error().toString());
+                } else {
+                    denoiser_.emplace(std::move(*made));
+                }
+            }
+            if (denoiser_.has_value()) {
+                if (auto ran = denoiser_->denoise(meshLayer_.colour, &pathAux_.albedo, &pathAux_.normal,
+                                                 meshLayer_.colour, settings.width, settings.height);
+                    !ran) {
+                    denoiserFailed_ = true;
+                    log::warn("hdLrt: denoising stopped: {}", ran.error().toString());
+                }
+            }
+        }
     }
     const bool pointLayer = !points.empty() && pointRasterizer_.has_value();
     if (pointLayer) {

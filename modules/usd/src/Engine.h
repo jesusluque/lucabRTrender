@@ -41,6 +41,7 @@
 #include "lrt/material/TextureStore.h"
 #include "lrt/light/LightTable.h"
 #include "lrt/technique/MaterialShading.h"
+#include "lrt/technique/Denoiser.h"
 #include "lrt/technique/PathTracer.h"
 #include "lrt/render/GaussianRayTracer.h"
 #include "lrt/render/PointRasterizer.h"
@@ -203,6 +204,9 @@ public:
     /// default -- is a frame that never accumulates, which is what a viewport
     /// showing a moving camera wants.
     void setPathTotal(uint32_t total);
+    /// Denoise a path traced frame once it has gathered `pathTotal` paths
+    /// (every frame, when the total is one). Off by default.
+    void setDenoise(bool denoise);
 
     /// How many paths a pixel the path traced frame on screen has gathered,
     /// and whether that is all it is going to gather. A frame that is not a
@@ -280,6 +284,9 @@ private:
     std::optional<technique::PathTracer>      pathTracer_;   ///< made on first use
     technique::PathAux                        pathAux_;      ///< the last path traced frame's albedo and normal
     bool                                      pathAuxValid_ = false;
+    std::optional<technique::Denoiser>        denoiser_;     ///< made on first use
+    std::atomic<bool>                         denoise_{false};
+    bool                                      denoiserFailed_ = false;   ///< said once
     std::map<pxr::SdfPath, MaterialEntry>     materials_;
     std::map<pxr::SdfPath, light::Light>      lights_;
     std::optional<light::LightTable>          lightTable_;

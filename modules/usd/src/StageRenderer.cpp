@@ -145,6 +145,9 @@ void StageRenderer::setPathSamples(uint32_t samples) {
 void StageRenderer::setPathBounces(uint32_t bounces) {
     impl_->delegate->SetRenderSetting(TfToken("lrt:pathBounces"), VtValue(static_cast<int>(bounces)));
 }
+void StageRenderer::setDenoise(bool denoise) {
+    impl_->delegate->SetRenderSetting(TfToken("lrt:denoise"), VtValue(denoise));
+}
 void StageRenderer::setPathTotal(uint32_t total) {
     impl_->delegate->SetRenderSetting(TfToken("lrt:pathTotal"), VtValue(static_cast<int>(std::max(total, 1u))));
 }

@@ -1439,6 +1439,11 @@ finished.
   passes agree to 3.9e-15; no two of 3072 pixels share a sample sequence or a
   sample set, at the seeds the ladder used; and block-averaged errors fall as
   independent errors do (4.42x and 15.94x for 2x2 and 4x4).
+- **A frame of splats alone through `rt` is `GaussianRayTracer`'s**, the
+  plan's fourth check: the Hydra case that renders a cloud through the
+  delegate's `lrt:technique` against the ray tracer called directly has held
+  it at p99 1 and max 2 since M0, and the engine's early return is what keeps
+  it true.
 - **The bounce carries light from a second surface.** The check above proves
   the bounce takes nothing away where there is nothing to find -- which is
   also exactly what an unbound acceleration structure would look like, and
@@ -1567,9 +1572,15 @@ unguided filter does a little better; that is printed, not asserted, since
 nothing says the guides must win on such a scene. The test skips where OIDN is
 not built or the device will not open it -- never a CPU fallback.
 
+From the engine, `lrt:denoise` runs it over a path traced frame once the
+frame has gathered `lrt:pathTotal` -- every frame when the total is one -- in
+place over the mean, after the frame's batch and never inside it, since OIDN
+submits work of its own and waits. Checked through Hydra by the gate: with the
+setting and the total reached, 8748 of 27648 words of the frame change; with
+the setting and the total not reached, none.
+
 Not done here: un-premultiplying the colour before the filter and
-re-premultiplying after (the scene's opacity is 1 everywhere a test looks);
-denoising from the engine on convergence (`lrt:denoise`).
+re-premultiplying after (the scene's opacity is 1 everywhere a test looks).
 
 ### Three things the ground did not turn out to be
 
@@ -1594,7 +1605,7 @@ the rest of M6 has to build:
   `draw` until `pathConverged`, which the tests do and the CLI does not. There
   is no `HdRenderThread` here either: the pass still draws on the thread that
   executes it.
-- Adaptive sampling, and the denoiser run from the engine on convergence.
+- Adaptive sampling.
 - Splats in rays, points as spheres, depth of field, lens distortion and
   exposure.
 - **Real MIS**, for when the two strategies overlap: mesh lights. It needs a

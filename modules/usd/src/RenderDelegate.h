@@ -62,6 +62,8 @@ public:
     /// Paths a pixel at which a path traced frame is finished
     /// ("lrt:pathTotal"); one, the default, never accumulates.
     [[nodiscard]] uint32_t GetPathTotal() const;
+    /// Denoise a path traced frame once it is gathered ("lrt:denoise").
+    [[nodiscard]] bool GetDenoise() const;
     /// `lrt:visibility`: "automatic" (default), "raster", "rays" or "bvh".
     [[nodiscard]] lrt::usd::MeshVisibility GetMeshVisibility() const;
 
