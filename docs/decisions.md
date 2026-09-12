@@ -1316,17 +1316,6 @@ enough that what is left is the light and not the noise.
   where it projects, and with it naming another the plane is lit as if
   nothing were there -- 0 pixels of 7440 away from the closed form either
   way. What arrives from USD is the same half that light linking is missing.
-- **The rest of the ground is surveyed:** USD
-  resolves the collections for us if the delegate registers
-  `HdsiLightLinkingSceneIndex` (`RegisterSceneIndexForRenderer` with our
-  display name, from `RendererPlugin.cpp`), after which an rprim's categories
-  arrive through `HdSceneDelegate::GetCategories` and a light carries
-  `lightLink` and `shadowLink` as light parameters. What it needs here is a
-  field of its own on both sides -- `InstanceRecord.flags` is spent, bit 0 on
-  double sidedness and bits 8 and up on the material row -- holding an index
-  into a table of deduplicated 64-bit category masks, which shading then
-  tests before it samples a light and before it traces its shadow. The plan's
-  check is counters with the link on and off.
 - **No light instancing, no IES profiles and no cylinder lights.**
 - **Splats are relit where their prim asks**, and baked everywhere else.
   `LrtSplatLightingAPI` (`primvars:lrt:splat:relight`, a constant primvar, so
@@ -1348,6 +1337,10 @@ enough that what is left is the light and not the noise.
     picture changes (max 185 over 9216 pixels), and a light whose collection
     does not include the cloud lights none of it (max 18 against the relit
     frame).
+  - **Not measured.** What relighting costs against showing what was baked has
+    no number here: it wants a stage with both a cloud and lights, and there
+    is no splat asset on this machine to build one from -- the clouds the tests
+    use are synthesised in memory and never reach the command line.
 - **Contact shadows** closer than the ray's offset are missed, and a cutout
   material still stops a shadow ray where its opacity would have let it
   through.
