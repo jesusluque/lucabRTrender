@@ -60,6 +60,21 @@ public:
         return (keyBits + 7) / 8;
     }
 
+    /// What the passes leave between them, as the last `sort` left it: the
+    /// digit counts per chunk, their totals, and the cursor each chunk writes
+    /// its share of each digit from. A sort of one pass (`keyBits` 8) leaves
+    /// that pass's own, which is how a test says which pass a backend gets
+    /// wrong. Empty until something has been sorted.
+    struct Working {
+        const Buffer* histogram = nullptr;     ///< chunkCount rows of 256 digit counts
+        const Buffer* digitTotals = nullptr;   ///< 256: each digit over every chunk
+        const Buffer* chunkStarts = nullptr;   ///< chunkCount rows of 256 cursors
+        uint32_t      chunks = 0;
+    };
+    [[nodiscard]] Working working() const noexcept {
+        return {&histogramBuffer_, &digitTotals_, &chunkStarts_, chunks_};
+    }
+
 private:
     [[nodiscard]] Result<void> reserve(uint32_t chunks);
 
@@ -73,6 +88,7 @@ private:
     Buffer        chunkStarts_;
     Buffer        dummy_;
     uint32_t      capacity_ = 0;
+    uint32_t      chunks_ = 0;   ///< the last sort's, for `working`
 };
 
 }   // namespace lrt::gpu

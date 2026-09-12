@@ -31,7 +31,7 @@ gpu::Buffer floatBuffer(gpu::Device& device, uint64_t count, const char* label) 
     desc.elementBytes = 16;
     desc.label = label;
     auto made = gpu::Buffer::create(device, desc);
-    REQUIRE(made);
+    if (!made) FAIL(made.error().toString());
     return *made;
 }
 
@@ -40,7 +40,7 @@ gpu::Buffer floatBuffer(gpu::Device& device, uint64_t count, const char* label) 
 void writePattern(test::Gpu& gpu, const fs::path& path, uint32_t w, uint32_t h, const float* colour = nullptr) {
     static gpu::ComputeKernel kPattern = [&] {
         auto made = gpu::ComputeKernel::create(*gpu.library, "lrt/test/material_textures", "materialPattern");
-        REQUIRE(made);
+        if (!made) FAIL(made.error().toString());
         return std::move(*made);
     }();
     const uint32_t words = (w * h * 4 + 3) / 4;

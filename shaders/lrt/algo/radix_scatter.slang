@@ -26,11 +26,17 @@ void radixScatter(uint3 tid: SV_DispatchThreadID) {
         const uint hi = params.wide != 0 ? srcKeysHi[i] : 0;
         const uint slot = row + digitOf(lo, hi, params.shift, params.wide);
         const uint at = chunkStarts[slot];
-        chunkStarts[slot] = at + 1;
         dstKeysLo[at] = lo;
         if (params.wide != 0) {
             dstKeysHi[at] = hi;
         }
         dstValues[at] = srcValues[i];
+        // The cursor advances once the pair is placed, not before. Slang's
+        // CUDA emitter keeps `at` as a dereference of the cursor's own address
+        // rather than a value, and re-reads it after this store, so a write
+        // ordered after it lands one slot past where the cursor pointed; the
+        // Metal emitter materialises the load and never showed it. The walk is
+        // one invocation's own, so placing the pair first costs nothing.
+        chunkStarts[slot] = at + 1;
     }
 }

@@ -1541,3 +1541,249 @@ the rest of M6 has to build:
   "does this direction reach light k, and with what radiance" beside
   `lightPdf`, which does not exist. Until then the disjointness above is the
   argument, and a weight here would be the defect again.
+## Linux, on the 94 (M11's first half)
+
+The engine built and ran on Linux for the first time: Ubuntu 24.04, an NVIDIA
+L4, CUDA as the backend. What follows is what the port needed, what it found
+and what is still wrong.
+
+### The toolchain
+
+- **OpenUSD 26.08** with MaterialX 1.39.5 and OpenVDB/NanoVDB, from
+  `scripts/build-usd.sh`. `--ignore-homebrew` is a macOS-only option of
+  `build_usd.py`, so the script passes it only there.
+- **OIDN 2.5.1** with the CUDA device. Its CUDA device wants CUDA 12.8 or
+  newer and Ubuntu 24.04 ships 12.0, so `cuda-toolkit-12-8` goes beside it and
+  both `scripts/build-oidn.sh` and the top-level CMake pick the newest
+  `/usr/local/cuda-*` (`LRT_CUDA_ROOT` overrides). One toolkit for gpe's
+  kernels, slang-rhi's CUDA device and OIDN.
+- **zlib** is found at the top level now: an imported target belongs to the
+  directory that found it, and the tests link `ZLIB::ZLIB` too.
+- **`<cstring>`** before slang-rhi's `acceleration-structure-utils.h`, which
+  calls `memcpy` without including it -- libc++ carries it in anyway,
+  libstdc++ does not.
+
+### The CUDA driver's names were slang-rhi's variables
+
+slang-rhi loads the CUDA driver with `dlopen` and keeps its entry points in
+variables named after the driver's own functions (`cuInit`, `cuLaunchKernel`,
+...). At global scope those variables are the definitions the rest of the
+program binds to, and a strong data definition in an object file beats a
+shared library's function whatever the link order -- both orders were tried.
+
+So gpe and OIDN, which call the driver directly, called through slang-rhi's
+pointers instead of through libcuda and died on a null one: `lrt info` exited
+139 after printing correctly, and the gpu_host tests, every aofx host test and
+`single_tbb` crashed in what the backtrace called `cuInit ()` at an address in
+the executable's BSS.
+
+`cmake/patches/slang-rhi-cuda-driver-symbols.patch` puts the block in
+`namespace rhi::cuda_driver` with a using-declaration after it: the names keep
+working inside slang-rhi and collide with nothing outside it. After it,
+`cuInit` is undefined in our binaries (resolved from libcuda), `lrt info`
+exits 0 and reports `denoiser OIDN 2.5.1 on CUDA` and `tbb libraries 1`, the
+aofx tests are green and `single_tbb` passes.
+
+### The radix sort on CUDA: a cursor re-read after it was advanced
+
+For as little as two pairs, one chunk and one pass: the generator writes
+`(1766601275, v0) (3252568193, v1)` and the sort leaves
+`(1766601275, v1) (0, v0's slot never written)` -- two destinations collided.
+What that rules out, each measured rather than argued:
+
+- **The generator** is right: the probe dumps the pairs before the sort.
+- **Ordering between passes** is not it: CUDA launches all go on one stream,
+  and `LRT_RADIX_SUBMIT_EACH_PASS=1` -- a submit and a wait between every pass
+  -- changes nothing, the same 89 assertions fail.
+- **The constants** reach each dispatch: four dispatches queued into one batch
+  with four different parameter blocks each read back their own `count`,
+  `chunkCount` and `shift`.
+
+- **The counting, totalling and cursor stages are right.** One pass over two
+  pairs (eight key bits is one pass) leaves a histogram counting both pairs,
+  totals that agree, and 197 cursors past zero -- the same 197 as Metal.
+  `RadixSort::working` names those buffers so a test can say so.
+- **The bindings land where they are named.** Seven buffers, each holding its
+  own marker, bound by the names the kernel declares: every name reads its
+  own marker on CUDA as on Metal.
+- **A scatter-shaped kernel reads what it was given.** The same seven
+  bindings, one invocation, two elements, no sorting arithmetic: both elements
+  read their own key and value on CUDA as on Metal. Its writes were another
+  matter, and they are what gave the answer away: with the cursors zeroed, the
+  probe reported taking slots 1 and 2 where Metal took 0 and 1, and the key of
+  a pair landed one slot past the value written beside it from the same local.
+- **Two wrong turns, recorded so they are not taken again.** Changing which
+  buffer the scatter's unused high-word names point at appeared to change a
+  low word the sort placed, and the slots the probe reported appeared to be
+  off by one. Both readings came from buffers nobody had written -- a buffer a
+  test makes is not zeroed -- and both evaporated once the probe wrote its own
+  cursors. The sort itself never reads an uninitialised cursor: radix_starts
+  writes every entry of every chunk's row. Giving the scatter distinct
+  stand-ins made CUDA worse (four of the sort's cases passing fell to one), so
+  it binds dummy_ and the histogram as it always did.
+
+What was left was the generated code, and reading it ended the hunt. Slang's
+CUDA emitter does not materialise `const uint at = chunkStarts[slot]`; it
+keeps the cursor's address and re-reads through it, after the store that
+advanced it:
+
+```cuda
+uint * _S14 = &chunkStarts_0[slot_0];
+*(&chunkStarts_0[slot_0]) = *_S14 + 1U;   // the cursor now holds at + 1
+*(&dstKeysLo_0[*_S14]) = _S9;             // re-read: one slot past
+uint * _S16 = &dstValues_0[at_0];         // materialised: the right slot
+```
+
+One `at` in the source, two indices in the object code -- which is why a key
+landed one slot past the value written beside it, and why every stage feeding
+the scatter measured correct. The Metal emitter materialises the load, so the
+suite here never saw it:
+
+```metal
+*((&kernelContext_0)->dstKeysLo_0+at_0) = lo_1;
+```
+
+Reduced to the smallest thing that shows it, for whoever takes this upstream
+-- a load, a store that advances it, and a second use of the load:
+
+```slang
+RWStructuredBuffer<uint> cursor;   // cursor[0] starts at 0
+RWStructuredBuffer<uint> out;
+
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void repro(uint3 tid: SV_DispatchThreadID) {
+    const uint at = cursor[0];
+    cursor[0] = at + 1;
+    out[at] = 7;   // CUDA writes out[1]; Metal writes out[0]
+}
+```
+
+**The fix is to place the pair and then advance the cursor.** With no store to
+the cursor between its load and the uses, there is nothing for an emitter to
+re-read, and the walk is one invocation's own, so the order costs nothing and
+the sort stays stable. `slangc -target cuda` confirms it on the generated code
+before any device runs it, which is the cheapest way to check this class of
+bug and worth reaching for earlier next time: four stages were measured right
+one at a time when one look at the emitted kernel would have said why.
+
+### What else the port found
+
+- **`SampleGrad` was not available in a compute entry point on the CUDA
+  target** (Slang `E36107`). The material system answers that in the shader,
+  with a `__target_switch` choosing gradients or an explicit level at the
+  footprint's wider side, so the kernels build here now. What is left is not a
+  capability error but wrong pixels, and reading the emitted CUDA says why.
+  A decoded 8-bit image is an `RGBA8Unorm` texture written through an
+  `RWTexture2D<float4>`, which on this target becomes
+  `surf2Dwrite<float4>(texel, surf, x * 16, y)`: sixteen raw bytes of float at
+  a sixteen-byte stride, into a surface holding four bytes a texel. CUDA
+  surface writes do not convert formats; Metal's texture write does. So every
+  component is wrong and each row runs four times past its end, which is the
+  3386-of-3404 mismatch and the mip means collapsing to zero. No intrinsic is
+  missing, so no `__target_switch` reaches it -- it is the store itself that
+  means something different on the two targets. The float and half formats go
+  through the same kernel untouched, which is why the gpu texture tests, which
+  build `RGBA32Float`, pass here while the material ones do not.
+
+  Measured, rather than read off the emitted code: a probe writes
+  `float4(1, 0, 64/255, 1)` through an `RWTexture2D<float4>` into one texel of
+  an `RGBA8Unorm` texture and reads that texel back, with no decoding,
+  sampling or mips in the way. Metal returns the colour written. CUDA returns
+  `(0.0, 0.0, 0.502, 0.247)` -- which is `00 00 80 3F`, the four bytes of
+  `1.0f`, sitting in the texel as bytes. The store wrote the float4's memory,
+  not its colour; the second, third and fourth components landed in the next
+  three texels along, which is also why each row runs four times past its end.
+- **gpu_host's `OutOfMemory` was never about memory.** A CUDA context is
+  current per *thread*, and `CudaDevice::open` makes it current on the thread
+  that creates the Context -- not on the worker `Context::run` spawns after
+  it. gpe guards its own entry points (`ensureCurrent` before each), so gpe's
+  work was fine; the work queued on the GPU thread reaches the same context
+  through slang-rhi, so a buffer allocated there was the first driver call on
+  a thread holding no context at all. 16 GB free, 4 KB refused, and the
+  identical allocation off the thread succeeding. gpe grew a `bindThread()`
+  for exactly this -- a caller about to reach the shared context another way
+  -- and the GPU thread binds once before it takes work. Metal keeps no such
+  per-thread state and takes the default, which does nothing.
+- **A buffer nobody wrote is not a buffer of zeros, in the engine too.**
+  `meshHoles` marks a hole face with a 1 and leaves every other face alone,
+  and nothing else wrote `holeFlags`, so each face was judged by whatever the
+  device last left there. Metal returned zeros; CUDA did not, and a stale word
+  reads as "this face is a hole", dropping its triangles. The mixed-face mesh
+  triangulated to 4 of its 10 triangles, and to none with the handedness
+  flipped. The flags are cleared on the device before the topology dispatches.
+- **Two failures that look like load, and are not.** The test presets already
+  set `execution: { jobs: 1 }`, so the suite is serial as it stands. Run
+  entirely alone on an idle box, the free-running clock test (#93) still fails
+  in 0.4 seconds, twice running, and the lobe test (#52) still fails in 7.4
+  seconds. Neither is contention and neither should be written off as the
+  machine: #93 is a timing bound this box does not meet and #52 is a Monte
+  Carlo tolerance, and both want measuring on their own terms.
+- **Tests skip rather than fail where CUDA cannot answer**: no rasterisation,
+  so the raster visibility, mesh and Storm-oracle tests skip with a reason, as
+  does `lrt view` with no display.
+
+### Open on this backend
+
+**A float4 stored through an `RWTexture2D` does not arrive as the texture's
+format on CUDA.** `lrt_gpu_tests` "a float4 written to an 8-bit texture comes
+back as the colour it wrote" fails here, deliberately: it is the smallest
+statement of the defect, one texel with no decoding, sampling or mips in the
+way, and it names what it means when it fails. It is not skipped, because CUDA
+can run it -- it answers wrongly, and a skip would hide that behind a green
+suite. Skipping is for what a backend cannot do.
+
+Everything the texture store decodes from an 8-bit image is wrong here until
+it is fixed, which is most of what still fails: the PNG and UDIM tests
+directly, and the ray tracer and USD tests that shade through a decoded image.
+The fix is ours rather than Slang's -- the lowering is faithful, and the two
+targets simply mean different things by the store. The obvious route, packing
+the texel in the shader and storing it through a uint view of the same
+texture, was tried and measured, and it does not hold: **the two backends fail
+in opposite places.**
+
+- The `float4` store converts on Metal and writes the float's own bytes on
+  CUDA.
+- A uint (`R32Uint`) view of the same `RGBA8Unorm` texture aliases correctly
+  on CUDA -- written packed, it reads back as the colour through the texture's
+  own view -- and does not alias on Metal, where the store lands (read back
+  through the uint view, 0 of 256 texels differ) but is invisible through the
+  colour view (256 of 256 differ). Metal wants the texture created able to be
+  viewed as another format, which slang-rhi does not ask for.
+
+So the packed route trades a CUDA bug for a Metal one, and was reverted after
+being measured; Metal is back to its 451 assertions exactly. What is left is
+to decode into a buffer and copy the buffer into the texture, which asks
+neither backend to reinterpret anything. That is not attempted here.
+
+`lrt_gpu_tests` keeps the probes that establish all of the above, and they
+pass on both backends bar the one that names the defect.
+
+### Measured (NVIDIA L4, Ubuntu 24.04, debug)
+
+`ctest --preset linux-x86_64-debug`, with engine's materials merged in:
+**91 of 104 pass, 13 fail, 27 of those passes skips** -- from 47 of 83 when the
+port first ran, and from 63 of 97 before the sort was fixed. One of the
+thirteen is the eight-bit texture probe above, which fails here deliberately
+and says why when it does; the other twelve are the texture surface write and
+the two measured on their own below. Lights (M5) are merged and build here,
+and their tests run: the count grew from 97 to 104 with them.
+Passing outright: the prefix sum, textures, mips, the texture table and its
+sRGB views, the shader cache and link constants, every loader (PLY, .splat,
+SPZ, SOG, points), the lobe library, the display transform, the codeless
+schemas, the hdLrt plugin, timecode and PTP, the aofx host and its SDK
+manifest hash, the whole sort, and gpe sharing the device. What is left is the
+texture surface write (#46, #48, and the ray tracer and USD tests that shade
+through it), the hole flags (#43, fixed after this reading), and the two
+measured above.
+
+### Not done
+
+- The texture surface write: an 8-bit texture written as float4 needs either a
+  target the backend converts into or a store that converts itself. Until then
+  every test that shades through a decoded 8-bit image is wrong here.
+- A release build and any timing beyond the sort's own.
+- Vulkan: the backend is compiled in and untried, since CUDA is what gpe
+  shares.
+- OptiX: absent on this box, so slang-rhi warns and falls back to CUDA
+  compute.

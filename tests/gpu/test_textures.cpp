@@ -24,12 +24,13 @@ using namespace lrt;
 
 namespace {
 
-gpu::Texture texture(test::Gpu& gpu, uint32_t width, uint32_t height, uint32_t mips, const char* label) {
+gpu::Texture texture(test::Gpu& gpu, uint32_t width, uint32_t height, uint32_t mips, const char* label,
+                     rhi::Format format = rhi::Format::RGBA32Float) {
     gpu::TextureDesc desc;
     desc.width = width;
     desc.height = height;
     desc.mipCount = mips;
-    desc.format = rhi::Format::RGBA32Float;
+    desc.format = format;
     desc.usage = rhi::TextureUsage::ShaderResource | rhi::TextureUsage::UnorderedAccess |
                  rhi::TextureUsage::RenderTarget;
     desc.label = label;
@@ -266,10 +267,10 @@ TEST_CASE("compiled shaders come back from the disk cache on a second device", "
         gpu::DeviceDesc desc;
         desc.shaderCache = cache;
         auto device = gpu::Device::create(desc);
-        REQUIRE(device);
+        if (!device) FAIL(device.error().toString());
         gpu::ShaderLibrary library(*device);
         auto kernel = gpu::ComputeKernel::create(library, "lrt/test/textures", "textureMean");
-        REQUIRE(kernel);
+        if (!kernel) FAIL(kernel.error().toString());
         return (*device)->shaderCacheStats();
     };
     const gpu::ShaderCacheStats first = compile();
@@ -444,4 +445,137 @@ TEST_CASE("a texture table binds textures by slot, and an sRGB view decodes what
     const float encoded = 180.0F / 255.0F;
     const float decoded = std::pow((encoded + 0.055F) / 1.055F, 2.4F);
     CHECK(v[8] == Catch::Approx(decoded).margin(2e-3F));
+}
+
+/// What a float4 store becomes in an 8-bit texture. The texture store decodes
+/// an 8-bit image into RGBA8Unorm through an RWTexture2D<float4>, and on a
+/// backend whose store does not convert, every component of every texel is
+/// wrong; this asks that question of one texel, with no decoding, sampling or
+/// mips in the way.
+TEST_CASE("a float4 written to an 8-bit texture comes back as the colour it wrote", "[gpu][texture][probe]") {
+    LRT_REQUIRE_GPU(gpu);
+    static gpu::ComputeKernel kWrite = kernelOf(*gpu, "formatWrite");
+    static gpu::ComputeKernel kRead = kernelOf(*gpu, "formatRead");
+    gpu::Texture eight = texture(*gpu, 4, 4, 1, "eight-bit", rhi::Format::RGBA8Unorm);
+    auto view = eight.view(0);
+    REQUIRE(view);
+    gpu::Buffer got = test::uintBuffer(*gpu->device, 4, "got");
+    {
+        gpu::CommandBatch batch(*gpu->device);
+        kWrite.dispatch(batch, {1, 1, 1},
+                        [&](rhi::ShaderCursor cursor) { cursor["written"].setBinding((*view).get()); });
+        REQUIRE(batch.submit(true));
+    }
+    {
+        gpu::CommandBatch batch(*gpu->device);
+        kRead.dispatch(batch, {1, 1, 1}, [&](rhi::ShaderCursor cursor) {
+            cursor["texture"].setBinding((*view).get());
+            cursor["counts"].setBinding(got.rhi());
+        });
+        REQUIRE(batch.submit(true));
+    }
+    std::array<uint32_t, 4> bits{};
+    REQUIRE(got.read(*gpu->device, 0, sizeof(bits), bits.data()));
+    std::array<float, 4> read{};
+    std::memcpy(read.data(), bits.data(), sizeof(read));
+    const std::array<float, 4> wrote = {1.0F, 0.0F, 64.0F / 255.0F, 1.0F};
+    std::printf("  eight-bit texel: %.4f %.4f %.4f %.4f (wrote %.4f %.4f %.4f %.4f)\n", double(read[0]),
+                double(read[1]), double(read[2]), double(read[3]), double(wrote[0]), double(wrote[1]),
+                double(wrote[2]), double(wrote[3]));
+    // A red suite on CUDA should name the defect, not just show a number: this
+    // one is located, measured and ours to fix.
+    INFO("A float4 stored through an RWTexture2D must arrive as the texture's format. Metal converts on the "
+         "store. CUDA's surface store does not: surf2Dwrite<float4> writes the float4's own bytes, so this "
+         "texel holds 00 00 80 3F -- the four bytes of 1.0f -- read back as (0.0, 0.0, 0.502, 0.247), and "
+         "the other three components land in the next three texels along. Every 8-bit image the texture "
+         "store decodes is wrong on CUDA until the texel is packed and stored through a uint view of the "
+         "same texture. Read back here: "
+         << read[0] << ", " << read[1] << ", " << read[2] << ", " << read[3]);
+    for (uint32_t k = 0; k < 4; ++k) {
+        // One step of eight-bit quantisation is all the write may cost.
+        CHECK(std::abs(read[k] - wrote[k]) <= 1.0F / 255.0F);
+    }
+}
+
+/// The same eight-bit texture written as its own bytes, through a uint view of
+/// it: four bytes stored as four bytes, which asks neither backend to convert
+/// anything. If this holds on both, it is what the texture store's decode
+/// should do.
+TEST_CASE("an eight-bit texture written through a uint view holds the colour packed into it",
+          "[gpu][texture][probe]") {
+    LRT_REQUIRE_GPU(gpu);
+    static gpu::ComputeKernel kPacked = kernelOf(*gpu, "packedWrite");
+    static gpu::ComputeKernel kRead = kernelOf(*gpu, "formatRead");
+    gpu::Texture eight = texture(*gpu, 4, 4, 1, "eight-bit packed", rhi::Format::RGBA8Unorm);
+    rhi::TextureViewDesc desc;
+    desc.format = rhi::Format::R32Uint;
+    rhi::ComPtr<rhi::ITextureView> uintView;
+    if (SLANG_FAILED(gpu->device->rhi()->createTextureView(eight.rhi(), desc, uintView.writeRef()))) {
+        SKIP("this backend will not make a uint view of an eight-bit texture");
+    }
+    auto colourView = eight.view(0);
+    REQUIRE(colourView);
+    gpu::Buffer got = test::uintBuffer(*gpu->device, 4, "got");
+    {
+        gpu::CommandBatch batch(*gpu->device);
+        kPacked.dispatch(batch, {1, 1, 1},
+                         [&](rhi::ShaderCursor cursor) { cursor["packed"].setBinding(uintView.get()); });
+        REQUIRE(batch.submit(true));
+    }
+    {
+        gpu::CommandBatch batch(*gpu->device);
+        kRead.dispatch(batch, {1, 1, 1}, [&](rhi::ShaderCursor cursor) {
+            cursor["texture"].setBinding((*colourView).get());
+            cursor["counts"].setBinding(got.rhi());
+        });
+        REQUIRE(batch.submit(true));
+    }
+    std::array<uint32_t, 4> bits{};
+    REQUIRE(got.read(*gpu->device, 0, sizeof(bits), bits.data()));
+    std::array<float, 4> read{};
+    std::memcpy(read.data(), bits.data(), sizeof(read));
+    const std::array<float, 4> wrote = {1.0F, 0.0F, 64.0F / 255.0F, 1.0F};
+    std::printf("  packed through a uint view: %.4f %.4f %.4f %.4f (wrote %.4f %.4f %.4f %.4f)\n", double(read[0]),
+                double(read[1]), double(read[2]), double(read[3]), double(wrote[0]), double(wrote[1]),
+                double(wrote[2]), double(wrote[3]));
+    for (uint32_t k = 0; k < 4; ++k) {
+        CHECK(std::abs(read[k] - wrote[k]) <= 1.0F / 255.0F);
+    }
+}
+
+/// Written through the uint view and read back through it: does the store land?
+TEST_CASE("an eight-bit texture read back through the same uint view holds what was stored",
+          "[gpu][texture][probe]") {
+    LRT_REQUIRE_GPU(gpu);
+    static gpu::ComputeKernel kFill = kernelOf(*gpu, "packedFill");
+    static gpu::ComputeKernel kVerify = kernelOf(*gpu, "packedVerifyUint");
+    const uint32_t w = 16;
+    const uint32_t h = 16;
+    gpu::Texture eight = texture(*gpu, w, h, 1, "eight-bit round trip", rhi::Format::RGBA8Unorm);
+    rhi::TextureViewDesc desc;
+    desc.format = rhi::Format::R32Uint;
+    rhi::ComPtr<rhi::ITextureView> uintView;
+    if (SLANG_FAILED(gpu->device->rhi()->createTextureView(eight.rhi(), desc, uintView.writeRef()))) {
+        SKIP("this backend will not make a uint view of an eight-bit texture");
+    }
+    gpu::Buffer counts = test::uintBuffer(*gpu->device, 2, "counts");
+    gpu::CommandBatch batch(*gpu->device);
+    kFill.dispatch(batch, {w, h, 1}, [&](rhi::ShaderCursor cursor) {
+        cursor["packed"].setBinding(uintView.get());
+        cursor["params"]["width"].setData(w);
+        cursor["params"]["height"].setData(h);
+    });
+    REQUIRE(batch.submit(true));
+    gpu::CommandBatch second(*gpu->device);
+    kVerify.dispatch(second, {1, 1, 1}, [&](rhi::ShaderCursor cursor) {
+        cursor["packed"].setBinding(uintView.get());
+        cursor["counts"].setBinding(counts.rhi());
+        cursor["params"]["width"].setData(w);
+        cursor["params"]["height"].setData(h);
+    });
+    REQUIRE(second.submit(true));
+    std::array<uint32_t, 2> out{};
+    REQUIRE(counts.read(*gpu->device, 0, sizeof(out), out.data()));
+    std::printf("  packed round trip through the uint view: %u of %u texels differ\n", out[0], out[1]);
+    CHECK(out[0] == 0u);
 }

@@ -57,6 +57,11 @@ endif()
 #   - slang-rhi-metal-texture-view-format.patch: a view of a whole texture in
 #     another format (sRGB over linear) came back as the texture itself, in
 #     the texture's format.
+#   - slang-rhi-cuda-driver-symbols.patch: slang-rhi loads the CUDA driver by
+#     dlopen and holds its entry points in variables carrying the driver's own
+#     names. At global scope those are the definitions the rest of the program
+#     binds to, so gpe and OIDN called through slang-rhi's pointers instead of
+#     libcuda and crashed on a null one. A namespace keeps them to slang-rhi.
 #   - slang-rhi-metal-acceleration-structures.patch: once any
 #     acceleration structure had been freed, the next build threw inside
 #     Metal (a nil in the device's structure array) and aborted the process;
@@ -68,7 +73,7 @@ FetchContent_Declare(slang_rhi
     GIT_SHALLOW    FALSE
     GIT_SUBMODULES ""
     PATCH_COMMAND  ${CMAKE_COMMAND}
-                   "-DPATCHES=${CMAKE_CURRENT_LIST_DIR}/patches/slang-rhi-metal-render-target-array-length.patch$<SEMICOLON>${CMAKE_CURRENT_LIST_DIR}/patches/slang-rhi-metal-acceleration-structures.patch$<SEMICOLON>${CMAKE_CURRENT_LIST_DIR}/patches/slang-rhi-metal-texture-view-format.patch"
+                   "-DPATCHES=${CMAKE_CURRENT_LIST_DIR}/patches/slang-rhi-metal-render-target-array-length.patch$<SEMICOLON>${CMAKE_CURRENT_LIST_DIR}/patches/slang-rhi-metal-acceleration-structures.patch$<SEMICOLON>${CMAKE_CURRENT_LIST_DIR}/patches/slang-rhi-metal-texture-view-format.patch$<SEMICOLON>${CMAKE_CURRENT_LIST_DIR}/patches/slang-rhi-cuda-driver-symbols.patch"
                    -P "${CMAKE_CURRENT_LIST_DIR}/patches/apply.cmake"
     UPDATE_DISCONNECTED TRUE
     SYSTEM)

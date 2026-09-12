@@ -137,6 +137,15 @@ Result<std::unique_ptr<Context>> Context::create(const ContextDesc& desc) {
 
     Impl* raw = &impl;
     impl.worker = std::thread([raw] {
+        // A CUDA context is current per thread, and this thread is new. gpe
+        // binds the context for its own calls, but the work queued here
+        // reaches the same context through slang-rhi, whose allocations would
+        // otherwise be the first driver calls on a thread that has no context
+        // at all -- which the driver reports as a failure to allocate, on a
+        // card with everything free.
+        if (raw->compute != nullptr) {
+            raw->compute->bindThread();
+        }
         for (;;) {
             Job* job = nullptr;
             {

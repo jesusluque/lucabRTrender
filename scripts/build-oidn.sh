@@ -29,6 +29,17 @@ if [[ "$(uname)" == "Darwin" ]]; then
     DEVICES+=(-DOIDN_DEVICE_METAL=ON)
 else
     DEVICES+=(-DOIDN_DEVICE_CUDA=ON)
+    # OIDN's CUDA device wants CUDA 12.8 or later; distributions ship older
+    # toolkits in /usr. LRT_CUDA_ROOT, else the newest NVIDIA toolkit in
+    # /usr/local, is found first (its nvcc on PATH and as CUDAToolkit_ROOT,
+    # which the device's own configure step inherits).
+    CUDA_ROOT="${LRT_CUDA_ROOT:-$(ls -d /usr/local/cuda-* 2>/dev/null | sort -V | tail -1)}"
+    if [[ -n "$CUDA_ROOT" ]]; then
+        export PATH="$CUDA_ROOT/bin:$PATH"
+        export CUDAToolkit_ROOT="$CUDA_ROOT"
+        DEVICES+=(-DCMAKE_CUDA_COMPILER="$CUDA_ROOT/bin/nvcc")
+        echo "OIDN: CUDA toolkit at $CUDA_ROOT"
+    fi
 fi
 
 cmake -S "$SRC" -B "$SRC/build" -G Ninja \

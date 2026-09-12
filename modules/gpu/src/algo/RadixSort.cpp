@@ -94,6 +94,7 @@ Result<void> RadixSort::sort(CommandBatch& batch, SortBuffers& buffers, uint32_t
     const uint32_t chunk = chunkFor(count);
     const uint32_t chunks = (count + chunk - 1) / chunk;
     LRT_TRY(reserve(chunks));
+    chunks_ = chunks;
 
     Buffer* srcLo = &buffers.keysLo;
     Buffer* srcHi = wide ? &buffers.keysHi : &dummy_;

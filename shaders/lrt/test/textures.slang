@@ -150,3 +150,84 @@ void textureTexelIds(uint3 tid: SV_DispatchThreadID) {
     counts[2] = v.z;
     counts[3] = v.w;
 }
+
+/// A colour exactly representable in eight bits, written through an
+/// RWTexture2D<float4> and read back as the texture actually holds it. Metal
+/// converts a float4 store into the texture's format; a backend whose store
+/// writes the float's own bytes instead shows up here, one kernel away from
+/// the texture store's decode rather than four. The bits are reported raw so
+/// that whatever comes back stays visible.
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void formatWrite(uint3 tid: SV_DispatchThreadID) {
+    if (tid.x != 0) {
+        return;
+    }
+    written[uint2(0, 0)] = float4(1.0, 0.0, 64.0 / 255.0, 1.0);
+}
+
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void formatRead(uint3 tid: SV_DispatchThreadID) {
+    if (tid.x != 0) {
+        return;
+    }
+    const float4 v = texture.Load(int3(0, 0, 0));
+    counts[0] = asuint(v.r);
+    counts[1] = asuint(v.g);
+    counts[2] = asuint(v.b);
+    counts[3] = asuint(v.a);
+}
+
+/// The same colour, packed into the texture's own bytes and stored through a
+/// uint view of it. Four bytes, written as four bytes, asking neither backend
+/// to convert anything -- which is what an eight-bit texture written from a
+/// compute kernel needs if the two targets disagree about what a float4 store
+/// means. Read back through the ordinary view, it should be the colour again.
+RWTexture2D<uint> packed;
+
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void packedWrite(uint3 tid: SV_DispatchThreadID) {
+    if (tid.x != 0) {
+        return;
+    }
+    const float4 colour = float4(1.0, 0.0, 64.0 / 255.0, 1.0);
+    const uint4 byte = uint4(round(saturate(colour) * 255.0));
+    packed[uint2(0, 0)] = byte.x | (byte.y << 8) | (byte.z << 16) | (byte.w << 24);
+}
+
+/// The pattern written over every texel through the uint view, and checked
+/// back through the ordinary one. The single-texel probe above writes (0, 0),
+/// which is the one coordinate a stride or addressing mistake cannot show.
+[shader("compute")]
+[numthreads(16, 16, 1)]
+void packedFill(uint3 tid: SV_DispatchThreadID) {
+    if (tid.x >= params.width || tid.y >= params.height) {
+        return;
+    }
+    const uint4 byte = uint4(round(saturate(patternAt(tid.x, tid.y)) * 255.0));
+    packed[tid.xy] = byte.x | (byte.y << 8) | (byte.z << 16) | (byte.w << 24);
+}
+
+/// The same check, read back through the uint view rather than the colour one.
+/// If this agrees while packedVerify does not, the store landed and it is the
+/// aliasing of the two views that differs; if it disagrees too, the store
+/// never landed.
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void packedVerifyUint(uint3 tid: SV_DispatchThreadID) {
+    if (tid.x != 0) {
+        return;
+    }
+    uint mismatches = 0;
+    for (uint y = 0; y < params.height; ++y) {
+        for (uint x = 0; x < params.width; ++x) {
+            const uint4 want = uint4(round(saturate(patternAt(x, y)) * 255.0));
+            const uint wantPacked = want.x | (want.y << 8) | (want.z << 16) | (want.w << 24);
+            mismatches += packed[uint2(x, y)] != wantPacked ? 1u : 0u;
+        }
+    }
+    counts[0] = mismatches;
+    counts[1] = params.width * params.height;
+}
