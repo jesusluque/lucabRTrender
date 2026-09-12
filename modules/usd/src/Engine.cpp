@@ -181,6 +181,10 @@ void Engine::setLightSamples(uint32_t samples) { lightSamples_.store(std::max(sa
 
 void Engine::setChooseLights(bool choose) { chooseLights_.store(choose); }
 
+void Engine::setPathSamples(uint32_t samples) { pathSamples_.store(std::max(samples, 1u)); }
+
+void Engine::setPathBounces(uint32_t bounces) { pathBounces_.store(bounces); }
+
 void Engine::removeLight(const pxr::SdfPath& id) {
     const std::lock_guard<std::mutex> held(guard_);
     lights_.erase(id);
@@ -776,12 +780,21 @@ Result<void> Engine::render(const render::Projection& projection, const render::
             }
         }
     }
-    if (technique == Technique::RayTraced) {
+    // Opaque layers first -- meshes, points -- then splats blended over them.
+    const bool drawMeshes = !meshInstances.empty() || !meshSets.empty();
+    const gpu::Caps& caps = device_->caps();
+    // A frame of nothing but splats is GaussianRayTracer's, and it writes the
+    // whole image: there is no layer to compose under it, so it returns here.
+    // With meshes in the frame the traced technique means something else --
+    // the surfaces are path traced below and the splats composed over them by
+    // the rasteriser, because the tracer takes no `under` layer. Splats inside
+    // the rays is still to be written (docs/decisions.md, M6).
+    if (technique == Technique::RayTraced && !drawMeshes) {
         if (!points.empty()) {
             static bool warned = false;
             if (!warned) {
                 warned = true;
-                log::warn("hdLrt: the ray traced technique draws splats only; points are left out");
+                log::warn("hdLrt: a traced frame of splats alone leaves the points out");
             }
         }
         if (!rayTracer_.has_value()) {
@@ -792,9 +805,6 @@ Result<void> Engine::render(const render::Projection& projection, const render::
         LRT_TRY(rayTracer_->render(projection, splats, settings, targets));
         return ok();
     }
-    // Opaque layers first -- meshes, points -- then splats blended over them.
-    const bool drawMeshes = !meshInstances.empty() || !meshSets.empty();
-    const gpu::Caps& caps = device_->caps();
     if (visibility == MeshVisibility::Automatic) {
         // Rays first: a draw costs the host a few microseconds to record, and
         // Kitchen_set's 1800 of them outweigh a frame of rays at any size
@@ -810,6 +820,7 @@ Result<void> Engine::render(const render::Projection& projection, const render::
         return Error(ErrorCode::Unsupported, "mesh visibility by rays: the device has no ray queries");
     }
     const bool meshLayer = drawMeshes;
+    const bool pathTracing = meshLayer && technique == Technique::RayTraced;
     if (meshLayer) {
         LRT_TRY(scene_->update(meshInstances, projection, meshSets));
         // The frame's lights, and what a shadow ray traces against: rays
@@ -847,8 +858,12 @@ Result<void> Engine::render(const render::Projection& projection, const render::
             }
         }
         LRT_TRY(lightTable_->set(lamps));
-        bool shadowsWanted = false;
-        if (lightTable_->anyShadow() && caps.rayQuery && caps.accelerationStructure) {
+        // A path traced surface needs a structure whatever the lights do --
+        // its bounce is a ray -- while shading needs one only where a light
+        // casts a shadow. The same structure serves both, and a path traced
+        // frame without it would trace against nothing and never know.
+        bool raysWanted = false;
+        if ((lightTable_->anyShadow() || pathTracing) && caps.rayQuery && caps.accelerationStructure) {
             if (!rayTracingScene_.has_value()) {
                 auto accel = world::RayTracingScene::create(*library_);
                 if (!accel) return std::move(accel).error();
@@ -857,7 +872,7 @@ Result<void> Engine::render(const render::Projection& projection, const render::
             if (visibility != MeshVisibility::Rays) {
                 LRT_TRY(rayTracingScene_->build(*scene_));   // the rays route builds it in the pass below
             }
-            shadowsWanted = true;
+            raysWanted = true;
         }
         // What a material needs wherever it is evaluated: shading always,
         // visibility only where a material cuts its samples away.
@@ -914,8 +929,25 @@ Result<void> Engine::render(const render::Projection& projection, const render::
         // rebuilds this structure there, and the one it replaces is released
         // with it -- taking the pointer earlier left shading tracing against
         // a freed structure.
-        frame.shadows = shadowsWanted ? rayTracingScene_->topLevel() : nullptr;
-        LRT_TRY(materialShading_->shade(batch, visibility_, projection, frame, meshLayer_));
+        frame.shadows = raysWanted ? rayTracingScene_->topLevel() : nullptr;
+        if (pathTracing) {
+            if (!pathTracer_.has_value()) {
+                auto made = technique::PathTracer::create(*library_);
+                if (!made) return std::move(made).error();
+                pathTracer_.emplace(std::move(*made));
+            }
+            LRT_TRY(pathTracer_->setPrograms(*materialPrograms_));
+            technique::PathSettings paths;
+            paths.samples = pathSamples_.load();
+            paths.bounces = pathBounces_.load();
+            // A frame of its own, not a sample of the last one: the camera and
+            // the scene may both have moved. Progressive accumulation is the
+            // render thread's to ask for (M6, not done).
+            paths.seed = pathSeed_++ * 7919u;
+            LRT_TRY(pathTracer_->trace(batch, visibility_, projection, frame, paths, meshLayer_));
+        } else {
+            LRT_TRY(materialShading_->shade(batch, visibility_, projection, frame, meshLayer_));
+        }
         if (aovRequest.ids || aovRequest.normals || !aovRequest.primvars.empty()) {
             if (!aovShading_.has_value()) {
                 auto made = technique::AovShading::create(*library_);

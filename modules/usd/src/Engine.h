@@ -41,6 +41,7 @@
 #include "lrt/material/TextureStore.h"
 #include "lrt/light/LightTable.h"
 #include "lrt/technique/MaterialShading.h"
+#include "lrt/technique/PathTracer.h"
 #include "lrt/render/GaussianRayTracer.h"
 #include "lrt/render/PointRasterizer.h"
 #include "lrt/render/TileRasterizer.h"
@@ -144,7 +145,11 @@ struct AovRequest {
 /// How the engine draws a frame.
 enum class Technique {
     Raster,     ///< tile rasteriser, points composited
-    RayTraced,  ///< GaussianRayTracer, the device's faster route; splats only
+    /// Rays. A frame of nothing but splats is GaussianRayTracer's, whole.
+    /// With meshes in it the surfaces are path traced and the splats
+    /// composed over them by the rasteriser, since the tracer takes no
+    /// `under` layer: splats inside the rays is still to be written.
+    RayTraced,
 };
 
 /// Which route finds what meshes a pixel sees. All three fill the same
@@ -189,6 +194,11 @@ public:
     /// One light per sample, chosen by power, instead of every light at every
     /// pixel: exact either way, and which is cheaper is a measurement.
     void setChooseLights(bool choose);
+    /// Paths a pixel a path traced frame gathers, and how many bounces each
+    /// one takes after its first hit. One of each is what an interactive
+    /// frame affords.
+    void setPathSamples(uint32_t samples);
+    void setPathBounces(uint32_t bounces);
     void setInstancer(const pxr::SdfPath& id, const pxr::SdfPath& parent, InstancerArrays arrays);
     void removeInstancer(const pxr::SdfPath& id);
     void remove(const pxr::SdfPath& id);
@@ -257,11 +267,15 @@ private:
     std::optional<technique::VisibilityBvh>    visibilityBvh_;
     std::optional<technique::MaterialPrograms> materialPrograms_;
     std::optional<technique::MaterialShading> materialShading_;
+    std::optional<technique::PathTracer>      pathTracer_;   ///< made on first use
     std::map<pxr::SdfPath, MaterialEntry>     materials_;
     std::map<pxr::SdfPath, light::Light>      lights_;
     std::optional<light::LightTable>          lightTable_;
     std::atomic<uint32_t>                     lightSamples_{1};
     std::atomic<bool>                         chooseLights_{false};
+    std::atomic<uint32_t>                     pathSamples_{1};
+    std::atomic<uint32_t>                     pathBounces_{1};
+    uint32_t                                  pathSeed_ = 0;   ///< which samples a path traced frame takes
     /// A bit per category name, as they are first seen: a prim's mask and a
     /// light's link have to agree on the numbering, and this is the only
     /// place that sees both. Past 64 names a category cannot be represented

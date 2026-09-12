@@ -55,6 +55,10 @@ public:
     [[nodiscard]] uint32_t GetLightSamples() const;
     /// Whether to choose one light a sample ("lrt:chooseLights").
     [[nodiscard]] bool GetChooseLights() const;
+    /// Paths a pixel a path traced frame gathers ("lrt:pathSamples"), at
+    /// least one, and bounces after the first hit ("lrt:pathBounces").
+    [[nodiscard]] uint32_t GetPathSamples() const;
+    [[nodiscard]] uint32_t GetPathBounces() const;
     /// `lrt:visibility`: "automatic" (default), "raster", "rays" or "bvh".
     [[nodiscard]] lrt::usd::MeshVisibility GetMeshVisibility() const;
 

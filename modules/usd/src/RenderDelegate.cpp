@@ -113,6 +113,7 @@ HdRenderPassSharedPtr HdLrtRenderDelegate::CreateRenderPass(HdRenderIndex* index
 
 TF_DEFINE_PRIVATE_TOKENS(_lrtSettings, ((technique, "lrt:technique"))((settleStreams, "lrt:settleStreams"))
                                            ((visibility, "lrt:visibility"))((lightSamples, "lrt:lightSamples"))((chooseLights, "lrt:chooseLights"))
+                                           ((pathSamples, "lrt:pathSamples"))((pathBounces, "lrt:pathBounces"))
                                            (raster)(rt)(automatic)(rays)(bvh));
 
 HdRenderSettingDescriptorList HdLrtRenderDelegate::GetRenderSettingDescriptors() const {
@@ -136,7 +137,15 @@ HdRenderSettingDescriptorList HdLrtRenderDelegate::GetRenderSettingDescriptors()
     choose.name = "One light per sample, chosen by power";
     choose.key = _lrtSettings->chooseLights;
     choose.defaultValue = VtValue(false);
-    return {technique, settle, visibility, samples, choose};
+    HdRenderSettingDescriptor paths;
+    paths.name = "Paths per pixel (rt)";
+    paths.key = _lrtSettings->pathSamples;
+    paths.defaultValue = VtValue(1);
+    HdRenderSettingDescriptor bounces;
+    bounces.name = "Bounces after the first hit (rt)";
+    bounces.key = _lrtSettings->pathBounces;
+    bounces.defaultValue = VtValue(1);
+    return {technique, settle, visibility, samples, choose, paths, bounces};
 }
 
 lrt::usd::MeshVisibility HdLrtRenderDelegate::GetMeshVisibility() const {
@@ -167,6 +176,27 @@ uint32_t HdLrtRenderDelegate::GetLightSamples() const {
         return std::max(value.UncheckedGet<unsigned int>(), 1u);
     }
     return 1;
+}
+
+namespace {
+/// An int render setting, however the host spelled its type.
+uint32_t _UintSetting(const VtValue& value, uint32_t fallback, uint32_t least) {
+    if (value.IsHolding<int>()) {
+        return std::max(static_cast<uint32_t>(std::max(value.UncheckedGet<int>(), 0)), least);
+    }
+    if (value.IsHolding<unsigned int>()) {
+        return std::max(value.UncheckedGet<unsigned int>(), least);
+    }
+    return fallback;
+}
+}   // namespace
+
+uint32_t HdLrtRenderDelegate::GetPathSamples() const {
+    return _UintSetting(GetRenderSetting(_lrtSettings->pathSamples), 1, 1);
+}
+
+uint32_t HdLrtRenderDelegate::GetPathBounces() const {
+    return _UintSetting(GetRenderSetting(_lrtSettings->pathBounces), 1, 0);
 }
 
 bool HdLrtRenderDelegate::GetSettleStreams() const {

@@ -1064,3 +1064,135 @@ TEST_CASE("a path traced frame of one bounce agrees with the raster's direct lig
     // the noise both estimators still carry.
     CHECK(diff->p99 <= 2);
 }
+
+// The case above proves the bounce takes nothing away where there is nothing
+// to find -- which is also what an unbound acceleration structure would look
+// like. This one puts a surface where the bounce can reach it, and holds the
+// same frame at nought bounces against itself at one: same seeds, same direct
+// light, so the only thing left between them is the bounce. The control is the
+// scene without the wall, where the two must come out identical.
+TEST_CASE("the bounce carries light from a second surface", "[technique][path]") {
+    LRT_REQUIRE_GPU(gpu);
+    const gpu::Caps& caps = gpu->device->caps();
+    if (!caps.rasterization) {
+        SKIP("no rasterisation on this device");
+    }
+    if (!caps.rayQuery || !caps.accelerationStructure) {
+        SKIP("no ray queries on this device: the kernel is generated without a bounce");
+    }
+    std::vector<std::filesystem::path> shaderPaths;
+    for (const std::string& path : gpu->device->shaderSearchPaths()) {
+        shaderPaths.emplace_back(path);
+    }
+    auto compiler = material::MaterialCompiler::create({LRT_MATERIALX_ROOT}, shaderPaths);
+    auto textures = material::TextureStore::create(*gpu->library);
+    auto builder = geom::MeshBuilder::create(*gpu->library);
+    auto scene = world::GpuScene::create(*gpu->library);
+    auto accel = world::RayTracingScene::create(*gpu->library);
+    auto raster = technique::VisibilityRaster::create(*gpu->library);
+    auto programs = technique::MaterialPrograms::create(*gpu->library);
+    auto tracer = technique::PathTracer::create(*gpu->library);
+    auto table = light::LightTable::create(*gpu->device);
+    if (!compiler) FAIL(compiler.error().toString());
+    if (!textures) FAIL(textures.error().toString());
+    if (!builder) FAIL(builder.error().toString());
+    if (!scene) FAIL(scene.error().toString());
+    if (!accel) FAIL(accel.error().toString());
+    if (!raster) FAIL(raster.error().toString());
+    if (!programs) FAIL(programs.error().toString());
+    if (!tracer) FAIL(tracer.error().toString());
+    if (!table) FAIL(table.error().toString());
+    auto lambert = (*compiler)->compileXml(
+        "<?xml version=\"1.0\"?>\n<materialx version=\"1.39\">\n"
+        "  <oren_nayar_diffuse_bsdf name=\"d\" type=\"BSDF\">\n"
+        "    <input name=\"color\" type=\"color3\" value=\"0.8, 0.8, 0.8\" />\n"
+        "    <input name=\"roughness\" type=\"float\" value=\"0\" />\n"
+        "  </oren_nayar_diffuse_bsdf>\n"
+        "  <surface name=\"shader\" type=\"surfaceshader\"><input name=\"bsdf\" type=\"BSDF\" nodename=\"d\" /></surface>\n"
+        "  <surfacematerial name=\"material\" type=\"material\">\n"
+        "    <input name=\"surfaceshader\" type=\"surfaceshader\" nodename=\"shader\" />\n"
+        "  </surfacematerial>\n</materialx>\n");
+    if (!lambert) FAIL(lambert.error().toString());
+    REQUIRE(programs->setModules(std::span<const material::CompiledMaterial>(&*lambert, 1)));
+    REQUIRE(tracer->setPrograms(*programs));
+    const std::vector<float> blob = material::MaterialCompiler::parameters(
+        *lambert, **textures, [](const std::string&) { return 0xFFFFFFFFu; });
+    REQUIRE((*textures)->commit());
+    const std::vector<technique::MaterialRecord> rows{{0, 0, 0, 0}, {1, 0, 0, 0}};
+    auto records = gpu::Buffer::fromSpan<technique::MaterialRecord>(*gpu->device, rows, "materials.records");
+    auto blobBuffer = gpu::Buffer::fromSpan<float>(*gpu->device, blob, "materials.blob");
+    REQUIRE(records);
+    REQUIRE(blobBuffer);
+
+    const uint32_t w = 161;
+    const uint32_t h = 121;
+    render::Camera camera = render::Camera::lookingAt({0.0, 0.0, 0.0}, {0.0, 0.0, -1.0});
+    camera.lens.focal = 35.0;
+    const render::Projection projection = render::projectionFor(camera, w, h);
+    std::array<world::MeshInstance, 2> both;
+    both[0].mesh = lambertSquare(*builder, 1.0F);
+    both[0].objectToWorld = aofx::xform::translation({0.0, 0.0, -5.0});
+    both[0].material = 1;
+    // A wall along the plane's right edge, turned to face it: these matrices
+    // take column vectors and apply the rightmost factor first, and
+    // rotationY(-90) sends local +z to world -x and local +x to world +z, so
+    // the square stands at x 1 from z -5 to z -3, its face towards the plane.
+    both[1].mesh = lambertSquare(*builder, 1.0F);
+    both[1].objectToWorld = aofx::xform::translation({1.0, 0.0, -4.0}) * aofx::xform::rotationY(-90.0);
+    both[1].material = 1;
+    light::Light lamp;
+    lamp.kind = light::LightKind::Sphere;
+    lamp.lightToWorld = aofx::xform::translation({0.0, 0.0, -3.0});
+    lamp.radius = 0.4F;
+    lamp.shadow = false;   // the direct term must not differ between the two
+    REQUIRE(table->set(std::span<const light::Light>(&lamp, 1)));
+
+    // Nought bounces against one, over the same seeds, for a given scene.
+    const auto difference = [&](size_t instances) {
+        REQUIRE(scene->update(std::span<const world::MeshInstance>(both.data(), instances), projection));
+        REQUIRE(accel->build(*scene));
+        technique::VisibilityTargets visibility;
+        technique::MaterialFrame frame;
+        frame.programs = &*programs;
+        frame.scene = &*scene;
+        frame.records = &*records;
+        frame.blob = &*blobBuffer;
+        frame.textures = &**textures;
+        frame.lights = &*table;
+        frame.shadows = accel->topLevel();
+        frame.samples = 1;
+        {
+            gpu::CommandBatch batch(*gpu->device);
+            REQUIRE(raster->render(batch, *scene, projection, w, h, visibility));
+            REQUIRE(batch.submit(true));
+        }
+        render::RenderTargets out[2];
+        for (uint32_t bounces = 0; bounces < 2; ++bounces) {
+            tracer->restart();
+            technique::PathSettings paths;
+            paths.samples = 64;
+            paths.bounces = bounces;
+            paths.accumulate = true;
+            for (uint32_t pass = 0; pass < 8; ++pass) {
+                paths.seed = pass * 7919u;
+                gpu::CommandBatch batch(*gpu->device);
+                REQUIRE(tracer->trace(batch, visibility, projection, frame, paths, out[bounces]));
+                REQUIRE(batch.submit(true));
+            }
+        }
+        auto diff = render::compareImages(*gpu->library, out[0].colour, out[1].colour, w, h);
+        REQUIRE(diff);
+        return *diff;
+    };
+
+    const auto withWall = difference(2);
+    std::printf("  a wall beside the plane, 0 bounces against 1: p99 %u, max %u, %llu pixels beyond 2\n",
+                withWall.p99, withWall.max, static_cast<unsigned long long>(withWall.over2));
+    // The bounce reaches the wall and brings its light back.
+    CHECK(withWall.max > 0);
+    const auto alone = difference(1);
+    std::printf("  the plane alone, 0 bounces against 1:         p99 %u, max %u, %llu pixels beyond 2\n",
+                alone.p99, alone.max, static_cast<unsigned long long>(alone.over2));
+    // Nothing to find, and the same seeds: the two frames are the same frame.
+    CHECK(alone.max == 0);
+}

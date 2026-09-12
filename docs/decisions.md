@@ -1367,12 +1367,40 @@ two can be told apart by exactly one thing: the bounce.
 - **Where the device does not trace**, there is no bounce to trace: the kernel
   is generated without one and gathers direct light alone.
 
+### Where it runs from
+
+The `rt` technique used to trace splats and return, which left every mesh and
+every material out of a traced frame. Now it returns early only where there is
+nothing to compose under: a frame of splats alone is still `GaussianRayTracer`
+writing the whole image, at the tolerances `test_ray_tracing` already held it
+to. With meshes in the frame the surfaces are path traced and the splats
+composed over them by the rasteriser, because the tracer takes no `under`
+layer -- splats inside the rays is still to be written.
+
+A path traced surface gets an acceleration structure whatever the lights do,
+since its bounce is a ray. Shading needs one only where a light casts a shadow,
+and the same structure serves both; without that, a traced frame would trace
+against nothing and no test would say so.
+
+`lrt:pathSamples` is how many paths a pixel a frame gathers and
+`lrt:pathBounces` how many bounces each takes after the first hit, one of each
+by default -- what an interactive frame affords.
+
 ### How it is checked
 
 - **One bounce against the raster's direct light**, in a scene with nothing
   for a bounce to find: p99 1 and max 1, with no pixel beyond 2, over 4096
   accumulated paths. That is the plan's check, and it holds the two
   estimators to each other rather than to a tolerance of their own.
+- **The bounce carries light from a second surface.** The check above proves
+  the bounce takes nothing away where there is nothing to find -- which is
+  also exactly what an unbound acceleration structure would look like, and
+  that test binds none. So a wall stands along a plane's edge, turned to face
+  it, and the same frame is held at nought bounces against itself at one, over
+  the same seeds: the direct term is identical, so what is left between them is
+  the bounce alone. p99 41 and max 73 over 4688 pixels. The control is the
+  scene without the wall, where the two come out at max 0 -- identical frames,
+  which is what makes the 73 the bounce and not the noise.
 
 ### Three things the ground did not turn out to be
 
@@ -1392,9 +1420,9 @@ the rest of M6 has to build:
 
 ### Not done
 
-- Progressive rendering through `HdRenderThread` and `IsConverged`, and the
-  `rt` technique still takes a shortcut in the engine: it traces splats and
-  returns, leaving meshes and materials out.
+- Progressive rendering through `HdRenderThread` and `IsConverged`: a path
+  traced frame starts its mean again every time, since the camera and the
+  scene may both have moved and nothing here yet knows whether they did.
 - Albedo and normal AOVs, adaptive sampling, and the denoiser itself.
 - Splats in rays, points as spheres, depth of field, lens distortion and
   exposure.
