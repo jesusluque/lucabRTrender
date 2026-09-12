@@ -1582,6 +1582,45 @@ the setting and the total not reached, none.
 Not done here: un-premultiplying the colour before the filter and
 re-premultiplying after (the scene's opacity is 1 everywhere a test looks).
 
+### Adaptive sampling
+
+A pixel keeps its luminance's second moment beside its sum, and stops taking
+paths once the relative standard error of its mean -- `sqrt((E[l^2] - E[l]^2)
+/ N) / mean` -- falls below a target after at least `minSamples` paths. The
+decision is a kernel of its own after each pass (`pathDecide`), one thread a
+pixel, which also counts the covered and the stopped pixels by atomics; the
+trace kernel skips a stopped pixel. The frame is gathered when every covered
+pixel has stopped or `lrt:pathTotal` is reached, whichever first
+(`lrt:pathAdaptive`, `lrt:pathError`).
+
+What matters is not that it stops but that the estimate is truthful, and the
+check was built to separate two questions: whether the *means* are right, and
+whether each pixel's *own error estimate* is. Against a 4096-path reference,
+with the reference's own moments kept for the true per-sample spread:
+
+- **The means are right.** 10 of 4212 stopped pixels beyond three true
+  standard errors at a minimum of 16 paths (0.24%, worst 4.0 sigma) and 15 at
+  a minimum of 64 (0.36%, worst 4.5) -- three sigma leaves 0.27% by chance.
+- **A pixel's own estimate is optimistic where it has not yet seen what is
+  rare.** Under a bright bounce that a pixel meets in one path in a hundred,
+  its first N paths may all miss it, and the spread they show is the direct
+  light's alone, a hundred times too small. Measured before any remedy: 526 of
+  4212 stopped pixels beyond three of their own sigma, worst 133, every one
+  of them below the reference. The remedy is the standard one: the variance a
+  pixel stops on is the larger of its own and the mean of its 3x3
+  neighbours', since a neighbour that did see the event stands in. After it:
+  100 beyond three of their own sigma (2.4%), and 14 (0.3%) with an estimate
+  more than threefold optimistic against the truth. Raising the minimum to 64
+  does not move that much (96 and 8): the residual is pixels whose whole
+  neighbourhood missed the event, and no per-pixel statistic can see it. That
+  is the method's known weakness, and the test bounds it at what it measures.
+- Second moments never fall below the mean squared (0 of 4212), and the
+  1/sqrt(N) ladder pins `adaptive = false`, since a sampler built to beat the
+  law would break its window from the other side.
+
+Through Hydra, an image with `lrt:pathAdaptive` at 10% and a total of 100000
+gathers 16 paths a pixel and reports itself converged.
+
 ### Three things the ground did not turn out to be
 
 Measured while surveying, and worth writing down because each one changes what
@@ -1604,7 +1643,6 @@ the rest of M6 has to build:
   it. `StageRenderer::render` does draw until the path traced frame holds its
   total (checked: a total of 32 at 4 a pass leaves 32 gathered), so an image
   from the CLI is a gathered one; a viewport is the host's to keep asking for.
-- Adaptive sampling.
 - Splats in rays and points as spheres.
 - Depth of field and lens distortion. Exposure is done: UsdGeomCamera's
   `exposure` reaches the engine through `HdCamera` and scales the composed

@@ -109,6 +109,8 @@ void HdLrtRenderPass::_Execute(HdRenderPassStateSharedPtr const& state, TfTokenV
         _engine->setPathBounces(_delegate->GetPathBounces());
         _engine->setPathTotal(_delegate->GetPathTotal());
         _engine->setDenoise(_delegate->GetDenoise());
+        _engine->setPathAdaptive(_delegate->GetPathAdaptive());
+        _engine->setPathError(_delegate->GetPathError());
     }
     if (auto drawn =
             _engine->render(projection, settings, *_targets, technique, settle, &renderTags, request, visibility);

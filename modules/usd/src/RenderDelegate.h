@@ -64,6 +64,10 @@ public:
     [[nodiscard]] uint32_t GetPathTotal() const;
     /// Denoise a path traced frame once it is gathered ("lrt:denoise").
     [[nodiscard]] bool GetDenoise() const;
+    /// Adaptive sampling ("lrt:pathAdaptive") and its relative error target
+    /// ("lrt:pathError").
+    [[nodiscard]] bool GetPathAdaptive() const;
+    [[nodiscard]] float GetPathError() const;
     /// `lrt:visibility`: "automatic" (default), "raster", "rays" or "bvh".
     [[nodiscard]] lrt::usd::MeshVisibility GetMeshVisibility() const;
 

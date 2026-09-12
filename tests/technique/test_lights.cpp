@@ -2424,3 +2424,207 @@ TEST_CASE("the denoiser lowers a path traced frame's error against a deep refere
     CHECK(without->relMse < 0.5 * before->relMse);
 }
 
+// Adaptive sampling: a pixel stops when its own relative standard error falls
+// below a target. What matters is not that it stops but that its estimate is
+// truthful -- so the converged pixels are held against a deep reference at
+// three of their own standard errors, and their second moments must never
+// fall below their mean squared.
+TEST_CASE("adaptive sampling stops a pixel where its error estimate says, and the estimate is truthful",
+          "[technique][path][adaptive]") {
+    LRT_REQUIRE_GPU(gpu);
+    const gpu::Caps& caps = gpu->device->caps();
+    if (!caps.rasterization) {
+        SKIP("no rasterisation on this device");
+    }
+    if (!caps.rayQuery || !caps.accelerationStructure) {
+        SKIP("no ray queries on this device");
+    }
+    std::vector<std::filesystem::path> shaderPaths;
+    for (const std::string& path : gpu->device->shaderSearchPaths()) {
+        shaderPaths.emplace_back(path);
+    }
+    auto compiler = material::MaterialCompiler::create({LRT_MATERIALX_ROOT}, shaderPaths);
+    auto textures = material::TextureStore::create(*gpu->library);
+    auto builder = geom::MeshBuilder::create(*gpu->library);
+    auto scene = world::GpuScene::create(*gpu->library);
+    auto accel = world::RayTracingScene::create(*gpu->library);
+    auto raster = technique::VisibilityRaster::create(*gpu->library);
+    auto programs = technique::MaterialPrograms::create(*gpu->library);
+    auto tracer = technique::PathTracer::create(*gpu->library);
+    auto table = light::LightTable::create(*gpu->device);
+    if (!compiler) FAIL(compiler.error().toString());
+    if (!textures) FAIL(textures.error().toString());
+    if (!builder) FAIL(builder.error().toString());
+    if (!scene) FAIL(scene.error().toString());
+    if (!accel) FAIL(accel.error().toString());
+    if (!raster) FAIL(raster.error().toString());
+    if (!programs) FAIL(programs.error().toString());
+    if (!tracer) FAIL(tracer.error().toString());
+    if (!table) FAIL(table.error().toString());
+    auto lambert = (*compiler)->compileXml(
+        "<?xml version=\"1.0\"?>\n<materialx version=\"1.39\">\n"
+        "  <oren_nayar_diffuse_bsdf name=\"d\" type=\"BSDF\">\n"
+        "    <input name=\"color\" type=\"color3\" value=\"0.8, 0.8, 0.8\" />\n"
+        "    <input name=\"roughness\" type=\"float\" value=\"0\" />\n"
+        "  </oren_nayar_diffuse_bsdf>\n"
+        "  <surface name=\"shader\" type=\"surfaceshader\"><input name=\"bsdf\" type=\"BSDF\" nodename=\"d\" /></surface>\n"
+        "  <surfacematerial name=\"material\" type=\"material\">\n"
+        "    <input name=\"surfaceshader\" type=\"surfaceshader\" nodename=\"shader\" />\n"
+        "  </surfacematerial>\n</materialx>\n");
+    if (!lambert) FAIL(lambert.error().toString());
+    REQUIRE(programs->setModules(std::span<const material::CompiledMaterial>(&*lambert, 1)));
+    REQUIRE(tracer->setPrograms(*programs));
+    const std::vector<float> blob = material::MaterialCompiler::parameters(
+        *lambert, **textures, [](const std::string&) { return 0xFFFFFFFFu; });
+    REQUIRE((*textures)->commit());
+    const std::vector<technique::MaterialRecord> rows{{0, 0, 0, 0}, {1, 0, 0, 0}};
+    auto records = gpu::Buffer::fromSpan<technique::MaterialRecord>(*gpu->device, rows, "materials.records");
+    auto blobBuffer = gpu::Buffer::fromSpan<float>(*gpu->device, blob, "materials.blob");
+    REQUIRE(records);
+    REQUIRE(blobBuffer);
+
+    const uint32_t w = 96;
+    const uint32_t h = 72;
+    render::Camera camera = render::Camera::lookingAt({0.0, 0.0, 0.0}, {0.0, 0.0, -1.0});
+    camera.lens.focal = 35.0;
+    const render::Projection projection = render::projectionFor(camera, w, h);
+    std::array<world::MeshInstance, 2> both;
+    both[0].mesh = lambertSquare(*builder, 1.0F);
+    both[0].objectToWorld = aofx::xform::translation({0.0, 0.0, -5.0});
+    both[0].material = 1;
+    both[1].mesh = lambertSquare(*builder, 1.0F);
+    both[1].objectToWorld = aofx::xform::translation({1.0, 0.0, -4.0}) * aofx::xform::rotationY(-90.0);
+    both[1].material = 1;
+    REQUIRE(scene->update(std::span<const world::MeshInstance>(both.data(), both.size()), projection));
+    REQUIRE(accel->build(*scene));
+    light::Light lamp;
+    lamp.kind = light::LightKind::Sphere;
+    lamp.lightToWorld = aofx::xform::translation({0.0, 0.0, -3.0});
+    lamp.radius = 0.4F;
+    lamp.shadow = false;
+    REQUIRE(table->set(std::span<const light::Light>(&lamp, 1)));
+
+    technique::VisibilityTargets visibility;
+    technique::MaterialFrame frame;
+    frame.programs = &*programs;
+    frame.scene = &*scene;
+    frame.records = &*records;
+    frame.blob = &*blobBuffer;
+    frame.textures = &**textures;
+    frame.lights = &*table;
+    frame.shadows = accel->topLevel();
+    frame.samples = 1;
+    {
+        gpu::CommandBatch batch(*gpu->device);
+        REQUIRE(raster->render(batch, *scene, projection, w, h, visibility));
+        REQUIRE(batch.submit(true));
+    }
+    // The reference, uniform and deep.
+    render::RenderTargets reference;
+    {
+        tracer->restart();
+        technique::PathSettings paths;
+        paths.samples = 512;
+        paths.bounces = 1;
+        paths.accumulate = true;
+        paths.seed = 100000u;
+        for (uint32_t taken = 0; taken < 4096; taken += 512) {
+            gpu::CommandBatch batch(*gpu->device);
+            REQUIRE(tracer->trace(batch, visibility, projection, frame, paths, reference));
+            REQUIRE(batch.submit(true));
+        }
+    }
+    // The reference's own moments, kept before the adaptive runs overwrite
+    // them: the true per-sample spread, against which a pixel's own estimate
+    // can be judged.
+    gpu::Buffer referenceSum = test::uintBuffer(*gpu->device, uint64_t{w} * h * 4, "reference.sum");
+    gpu::Buffer referenceSquares = test::uintBuffer(*gpu->device, uint64_t{w} * h, "reference.squares");
+    {
+        auto copier = gpu::ComputeKernel::create(*gpu->library, "lrt/technique/buffer_copy", "copyWords");
+        if (!copier) FAIL(copier.error().toString());
+        gpu::CommandBatch batch(*gpu->device);
+        copier->dispatch(batch, {w * h * 4, 1, 1}, [&](rhi::ShaderCursor cursor) {
+            cursor["src"].setBinding(tracer->sum().rhi());
+            cursor["dst"].setBinding(referenceSum.rhi());
+            cursor["copy"]["words"].setData(w * h * 4);
+        });
+        copier->dispatch(batch, {w * h, 1, 1}, [&](rhi::ShaderCursor cursor) {
+            cursor["src"].setBinding(tracer->sumSquares().rhi());
+            cursor["dst"].setBinding(referenceSquares.rhi());
+            cursor["copy"]["words"].setData(w * h);
+        });
+        REQUIRE(batch.submit(true));
+    }
+    auto made = gpu::ComputeKernel::create(*gpu->library, "lrt/test/adaptive_check", "adaptiveCheck");
+    if (!made) FAIL(made.error().toString());
+    gpu::Buffer counts = test::uintBuffer(*gpu->device, 7, "adaptive.counts");
+    gpu::Buffer worst = test::uintBuffer(*gpu->device, 2, "adaptive.worst");
+    for (const uint32_t minSamples : {16u, 64u}) {
+            render::RenderTargets adaptiveOut;
+        tracer->restart();
+        technique::PathSettings paths;
+        paths.samples = 4;
+        paths.bounces = 1;
+        paths.accumulate = true;
+        paths.seed = 1u + minSamples;
+        paths.adaptive = true;
+        paths.errorTarget = 0.05F;
+        paths.minSamples = minSamples;
+        technique::PathProgress progress;
+        uint32_t passes = 0;
+        for (; passes < 512; ++passes) {
+            gpu::CommandBatch batch(*gpu->device);
+            REQUIRE(tracer->trace(batch, visibility, projection, frame, paths, adaptiveOut));
+            REQUIRE(batch.submit(true));
+            auto p = tracer->progress(visibility);
+            REQUIRE(p);
+            progress = *p;
+            if (progress.covered > 0 && progress.converged == progress.covered) {
+                break;
+            }
+        }
+        std::printf("  min %u, target 5%%: %u of %u covered pixels stopped after %u passes (%u paths a pixel at most)\n",
+                    minSamples, progress.converged, progress.covered, passes + 1, tracer->accumulated());
+        CHECK(progress.covered > 0);
+        CHECK(progress.converged == progress.covered);
+        {
+            gpu::CommandBatch batch(*gpu->device);
+            made->dispatch(batch, {1, 1, 1}, [&](rhi::ShaderCursor cursor) {
+                cursor["colour"].setBinding(adaptiveOut.colour.rhi());
+                cursor["reference"].setBinding(reference.colour.rhi());
+                cursor["sum"].setBinding(tracer->sum().rhi());
+                cursor["sumSquares"].setBinding(tracer->sumSquares().rhi());
+                cursor["done"].setBinding(tracer->done().rhi());
+                cursor["referenceSum"].setBinding(referenceSum.rhi());
+                cursor["referenceSquares"].setBinding(referenceSquares.rhi());
+                cursor["counts"].setBinding(counts.rhi());
+                cursor["worst"].setBinding(worst.rhi());
+                cursor["adaptive"]["pixels"].setData(w * h);
+                cursor["adaptive"]["referencePaths"].setData(4096.0F);
+            });
+            REQUIRE(batch.submit(true));
+        }
+        uint32_t c[7] = {0, 0, 0, 0, 0, 0, 0};
+        float largest[2] = {0.0F, 0.0F};
+        REQUIRE(counts.read(*gpu->device, 0, sizeof(c), c));
+        REQUIRE(worst.read(*gpu->device, 0, sizeof(largest), largest));
+        std::printf("    %u converged: %u beyond 3 of their OWN sigma (%u below the reference, worst %.1f); "
+                    "%u beyond 3 TRUE sigma (worst %.1f); own sigma optimistic by 3x in %u; %u negative variances; "
+                    "fewest paths %u\n",
+                    c[0], c[1], c[4], static_cast<double>(largest[0]), c[5], static_cast<double>(largest[1]), c[6],
+                    c[2], c[3]);
+        // The means, against the true spread: three sigma leaves 0.27% by
+        // chance, and these read 0.24% and 0.36%. The pixel's own estimate is
+        // optimistic by threefold in 0.2-0.3% -- the paths that never saw the
+        // wall -- and beyond three of its own sigma in 2.3%, down from 12%
+        // before the neighbourhood floor. That last number is the method's
+        // known weakness, bounded here at what it measures with room, and
+        // written up rather than hidden.
+        CHECK(c[5] * 100 <= c[0]);
+        CHECK(c[6] * 100 <= c[0]);
+        CHECK(c[1] * 20 <= c[0]);
+        CHECK(c[2] == 0);
+        CHECK(c[3] >= minSamples);
+    }
+}
+

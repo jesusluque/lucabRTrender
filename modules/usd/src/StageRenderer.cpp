@@ -145,6 +145,12 @@ void StageRenderer::setPathSamples(uint32_t samples) {
 void StageRenderer::setPathBounces(uint32_t bounces) {
     impl_->delegate->SetRenderSetting(TfToken("lrt:pathBounces"), VtValue(static_cast<int>(bounces)));
 }
+void StageRenderer::setPathAdaptive(bool adaptive) {
+    impl_->delegate->SetRenderSetting(TfToken("lrt:pathAdaptive"), VtValue(adaptive));
+}
+void StageRenderer::setPathError(float error) {
+    impl_->delegate->SetRenderSetting(TfToken("lrt:pathError"), VtValue(error));
+}
 void StageRenderer::setDenoise(bool denoise) {
     impl_->delegate->SetRenderSetting(TfToken("lrt:denoise"), VtValue(denoise));
 }

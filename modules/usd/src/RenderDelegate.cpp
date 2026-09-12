@@ -113,7 +113,7 @@ HdRenderPassSharedPtr HdLrtRenderDelegate::CreateRenderPass(HdRenderIndex* index
 
 TF_DEFINE_PRIVATE_TOKENS(_lrtSettings, ((technique, "lrt:technique"))((settleStreams, "lrt:settleStreams"))
                                            ((visibility, "lrt:visibility"))((lightSamples, "lrt:lightSamples"))((chooseLights, "lrt:chooseLights"))
-                                           ((pathSamples, "lrt:pathSamples"))((pathBounces, "lrt:pathBounces"))((pathTotal, "lrt:pathTotal"))((denoise, "lrt:denoise"))
+                                           ((pathSamples, "lrt:pathSamples"))((pathBounces, "lrt:pathBounces"))((pathTotal, "lrt:pathTotal"))((denoise, "lrt:denoise"))((pathAdaptive, "lrt:pathAdaptive"))((pathError, "lrt:pathError"))
                                            (raster)(rt)(automatic)(rays)(bvh));
 
 HdRenderSettingDescriptorList HdLrtRenderDelegate::GetRenderSettingDescriptors() const {
@@ -153,7 +153,15 @@ HdRenderSettingDescriptorList HdLrtRenderDelegate::GetRenderSettingDescriptors()
     denoise.name = "Denoise the path traced frame once gathered (rt)";
     denoise.key = _lrtSettings->denoise;
     denoise.defaultValue = VtValue(false);
-    return {technique, settle, visibility, samples, choose, paths, bounces, total, denoise};
+    HdRenderSettingDescriptor adaptive;
+    adaptive.name = "Adaptive: a pixel stops once its error is below the target (rt)";
+    adaptive.key = _lrtSettings->pathAdaptive;
+    adaptive.defaultValue = VtValue(false);
+    HdRenderSettingDescriptor error;
+    error.name = "Adaptive: relative standard error a pixel stops at (rt)";
+    error.key = _lrtSettings->pathError;
+    error.defaultValue = VtValue(0.02f);
+    return {technique, settle, visibility, samples, choose, paths, bounces, total, denoise, adaptive, error};
 }
 
 lrt::usd::MeshVisibility HdLrtRenderDelegate::GetMeshVisibility() const {
@@ -205,6 +213,18 @@ uint32_t HdLrtRenderDelegate::GetPathSamples() const {
 
 uint32_t HdLrtRenderDelegate::GetPathBounces() const {
     return _UintSetting(GetRenderSetting(_lrtSettings->pathBounces), 1, 0);
+}
+
+bool HdLrtRenderDelegate::GetPathAdaptive() const {
+    const VtValue value = GetRenderSetting(_lrtSettings->pathAdaptive);
+    return value.IsHolding<bool>() && value.UncheckedGet<bool>();
+}
+
+float HdLrtRenderDelegate::GetPathError() const {
+    const VtValue value = GetRenderSetting(_lrtSettings->pathError);
+    if (value.IsHolding<float>()) return value.UncheckedGet<float>();
+    if (value.IsHolding<double>()) return static_cast<float>(value.UncheckedGet<double>());
+    return 0.02F;
 }
 
 bool HdLrtRenderDelegate::GetDenoise() const {

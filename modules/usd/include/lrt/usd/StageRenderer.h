@@ -119,6 +119,9 @@ public:
     void setPathTotal(uint32_t total);
     /// Denoise a path traced frame once it has gathered its total.
     void setDenoise(bool denoise);
+    /// Adaptive sampling, and the relative error a pixel stops at.
+    void setPathAdaptive(bool adaptive);
+    void setPathError(float error);
 
     /// How many paths a pixel the frame on the device holds, and whether it
     /// holds all it is going to. A frame that is not path traced has nothing

@@ -210,6 +210,10 @@ void Engine::setPathTotal(uint32_t total) { pathTotal_.store(std::max(total, 1u)
 
 void Engine::setDenoise(bool denoise) { denoise_.store(denoise); }
 
+void Engine::setPathAdaptive(bool adaptive) { pathAdaptive_.store(adaptive); }
+
+void Engine::setPathError(float error) { pathError_.store(std::max(error, 1.0e-4F)); }
+
 uint32_t Engine::pathAccumulated() const noexcept {
     return pathTracer_.has_value() && pathState_.traced ? pathTracer_->accumulated() : 0;
 }
@@ -218,7 +222,10 @@ bool Engine::pathConverged() const noexcept {
     if (!pathState_.traced) {
         return true;   // nothing being gathered
     }
-    return pathAccumulated() >= pathTotal_.load();
+    if (pathAccumulated() >= pathTotal_.load()) {
+        return true;
+    }
+    return pathState_.adaptive && pathProgress_.covered > 0 && pathProgress_.converged == pathProgress_.covered;
 }
 
 void Engine::removeLight(const pxr::SdfPath& id) {
@@ -998,6 +1005,8 @@ Result<void> Engine::render(const render::Projection& projection, const render::
             technique::PathSettings paths;
             paths.samples = pathSamples_.load();
             paths.bounces = pathBounces_.load();
+            paths.adaptive = pathAdaptive_.load();
+            paths.errorTarget = pathError_.load();
             PathState now;
             now.worldToView = projection.worldToView;
             now.focalX = projection.focalX;
@@ -1011,6 +1020,8 @@ Result<void> Engine::render(const render::Projection& projection, const render::
             now.height = settings.height;
             now.samples = paths.samples;
             now.bounces = paths.bounces;
+            now.adaptive = paths.adaptive;
+            now.error = paths.errorTarget;
             now.revision = revision_.load();
             now.traced = true;
             // The same frame continued, or a new one: a camera that moved, a
@@ -1044,6 +1055,13 @@ Result<void> Engine::render(const render::Projection& projection, const render::
             aovsValid_ = true;
         }
         LRT_TRY(batch.submit(true));
+        // The adaptive gate's counters, after the pass: which covered pixels
+        // have stopped. Its own dispatch and readback, so after the batch.
+        if (pathTracing && pathState_.adaptive) {
+            auto progress = pathTracer_->progress(visibility_);
+            if (!progress) return std::move(progress).error();
+            pathProgress_ = *progress;
+        }
         // After the frame's batch, never inside it: the denoiser submits work
         // of its own and waits for OIDN. It runs on a path traced frame that
         // has gathered what it was asked for, in place over the mean -- the

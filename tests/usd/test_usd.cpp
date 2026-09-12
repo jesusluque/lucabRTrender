@@ -2036,6 +2036,18 @@ TEST_CASE("a path traced frame accumulates over passes and starts again when it 
                 (*renderer)->pathAccumulated());
     CHECK((*renderer)->pathAccumulated() == 32);
     CHECK((*renderer)->pathConverged());
+
+    // Adaptive: with a total no image would reach, render() ends when every
+    // covered pixel's error is below the target -- the other gate.
+    (*renderer)->setPathTotal(100000);
+    (*renderer)->setPathAdaptive(true);
+    (*renderer)->setPathError(0.1F);
+    auto adaptive = (*renderer)->render("/Camera", 0.0, w, h, "rt");
+    if (!adaptive) FAIL(adaptive.error().toString());
+    std::printf("  adaptive at 10%% against a total of 100000: gathered %u a pixel at most, converged %s\n",
+                (*renderer)->pathAccumulated(), (*renderer)->pathConverged() ? "yes" : "no");
+    CHECK((*renderer)->pathConverged());
+    CHECK((*renderer)->pathAccumulated() < 100000);
 }
 
 // The denoiser from the engine: lrt:denoise runs OIDN over a path traced

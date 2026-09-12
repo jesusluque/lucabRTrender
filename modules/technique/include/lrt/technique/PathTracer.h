@@ -39,6 +39,19 @@ struct PathSettings {
     uint32_t bounces = 1;     ///< indirect bounces after the first hit
     uint32_t seed = 0;        ///< which samples these are: the frame's index
     bool     accumulate = false;   ///< add to what is there rather than replace it
+    /// Adaptive: a pixel whose mean's relative standard error has fallen
+    /// below `errorTarget` after at least `minSamples` paths takes no more.
+    /// The estimate is the pixel's own, from its luminance's second moment.
+    bool     adaptive = false;
+    float    errorTarget = 0.02F;
+    uint32_t minSamples = 16;
+};
+
+/// How much of a frame has converged, for the adaptive gate: pixels the
+/// visibility buffer covers, and those of them that have stopped.
+struct PathProgress {
+    uint32_t covered = 0;
+    uint32_t converged = 0;
 };
 
 /// What the denoiser wants beside the colour: the first hit's albedo and its
@@ -67,11 +80,23 @@ public:
                                      const PathSettings& settings, render::RenderTargets& out,
                                      PathAux* aux = nullptr);
 
-    /// How many paths a pixel the accumulation holds.
+    /// How many paths a pixel the accumulation holds -- the frame's count;
+    /// an adaptive pixel that stopped holds fewer.
     [[nodiscard]] uint32_t accumulated() const noexcept { return accumulated_; }
+
+    /// Counts the frame's covered and converged pixels on the device and
+    /// reads the two counters back. Meaningful after an adaptive trace.
+    [[nodiscard]] Result<PathProgress> progress(const VisibilityTargets& targets);
 
     /// Forgets them, so the next trace starts the mean again.
     void restart() noexcept { accumulated_ = 0; }
+
+    /// The accumulation as it stands, for a check that reads the moments: the
+    /// sum of colour times opacity (float4 a pixel, its w the paths' opacity
+    /// summed), the luminance's second moment, and the adaptive stop flags.
+    [[nodiscard]] const gpu::Buffer& sum() const noexcept { return sum_; }
+    [[nodiscard]] const gpu::Buffer& sumSquares() const noexcept { return sumSquares_; }
+    [[nodiscard]] const gpu::Buffer& done() const noexcept { return done_; }
 
 private:
     gpu::ShaderLibrary*               library_ = nullptr;
@@ -79,6 +104,12 @@ private:
     std::optional<gpu::ComputeKernel> kernel_;
     std::string                       module_;
     gpu::Buffer                       sum_;           ///< float4 a pixel: the paths added so far
+    gpu::Buffer                       sumSquares_;    ///< float a pixel: the luminance's second moment
+    gpu::Buffer                       done_;          ///< uint a pixel: 1 once adaptive sampling stopped it
+    gpu::Buffer                       progress_;      ///< [covered, converged]
+    std::optional<gpu::ComputeKernel> progressKernel_;   ///< pathDecide: the stop rule and the counters
+    float                             lastErrorTarget_ = 0.02F;
+    uint32_t                          lastMinSamples_ = 16;
     uint32_t                          accumulated_ = 0;
     uint32_t                          width_ = 0;
     uint32_t                          height_ = 0;

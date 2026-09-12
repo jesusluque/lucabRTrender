@@ -207,6 +207,11 @@ public:
     /// Denoise a path traced frame once it has gathered `pathTotal` paths
     /// (every frame, when the total is one). Off by default.
     void setDenoise(bool denoise);
+    /// Adaptive: a pixel stops taking paths once its relative standard error
+    /// falls below `error`; the frame is gathered when every covered pixel
+    /// has stopped or `pathTotal` is reached, whichever first.
+    void setPathAdaptive(bool adaptive);
+    void setPathError(float error);
 
     /// How many paths a pixel the path traced frame on screen has gathered,
     /// and whether that is all it is going to gather. A frame that is not a
@@ -295,6 +300,9 @@ private:
     std::atomic<uint32_t>                     pathSamples_{1};
     std::atomic<uint32_t>                     pathBounces_{1};
     std::atomic<uint32_t>                     pathTotal_{1};
+    std::atomic<bool>                         pathAdaptive_{false};
+    std::atomic<float>                        pathError_{0.02F};
+    technique::PathProgress                   pathProgress_;   ///< after the last adaptive pass
     uint32_t                                  pathSeed_ = 0;   ///< which samples a path traced frame takes
     /// What the last path traced frame was of. A frame that matches it in
     /// every particular is the same frame continued, and its paths are added
@@ -314,6 +322,8 @@ private:
         uint32_t     height = 0;
         uint32_t     samples = 0;
         uint32_t     bounces = 0;
+        bool         adaptive = false;
+        float        error = 0.0F;
         uint64_t     revision = 0;
         bool         traced = false;   ///< the last frame was path traced at all
         /// Mat4 has no comparison of its own, so the camera is compared
@@ -328,8 +338,8 @@ private:
             }
             return focalX == o.focalX && focalY == o.focalY && centreX == o.centreX && centreY == o.centreY &&
                    nearZ == o.nearZ && farZ == o.farZ && orthographic == o.orthographic && width == o.width &&
-                   height == o.height && samples == o.samples && bounces == o.bounces && revision == o.revision &&
-                   traced == o.traced;
+                   height == o.height && samples == o.samples && bounces == o.bounces && adaptive == o.adaptive &&
+                   error == o.error && revision == o.revision && traced == o.traced;
         }
     };
     PathState                                 pathState_;
