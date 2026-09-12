@@ -1691,7 +1691,7 @@ TEST_CASE("a dome light's image lights a Lambert plane, and shows where nothing 
     if (!renderer) FAIL(renderer.error().toString());
     const uint32_t w = 161;
     const uint32_t h = 121;
-    (*renderer)->setLightSamples(1024);
+    (*renderer)->setLightSamples(std::getenv("LRT_DOME_SAMPLES") != nullptr ? 16384u : 1024u);
     auto image = (*renderer)->render("/Camera", 0.0, w, h);
     if (!image) FAIL(image.error().toString());
 

@@ -1150,8 +1150,34 @@ depth, and giving it one would make the background read as covered, so it is
 painted where the frame drew nothing, opaque, after everything else.
 
 What a dome does not do yet is follow its image's own brightness. The warp
-the plan asks for is still to come, and a dome with a sun in it is noisy
-without it.
+the plan asks for is written and switched off, because it draws directions
+its own density does not describe.
+
+- **What it does.** It descends the mip chain the texture store already
+  built, choosing between a cell's children by luminance, and its density
+  needs no walk at all: a lat-long texel covers 2 pi^2 sin(theta) du dv, and
+  a texel's share is its luminance over the image's total, which the 1x1
+  level holds as an average -- so pdf = luminance / (average * 2 pi^2 *
+  sin(theta)).
+- **Why it is off.** A chi-square binned in the image itself, where the warp
+  works and no grid artefact can explain it, reads z 61543 over a million
+  samples; a square image reads 127965, so the 2:1 shape of a lat-long is not
+  the cause. What is right, measured rather than assumed: the chain
+  telescopes to 0.7% (a parent against its four children), uv survives a turn
+  through a direction exactly (0 of 4032), and every sample agrees with
+  lightPdf -- which only proves the per-sample check compares a density with
+  itself. What is left is the split: left from right and then top from bottom
+  off one level does not give the four children their own probabilities. An
+  explicit choice among four weights is the fix.
+- **What runs meanwhile.** The cosine around the surface, which is unbiased
+  for any dome and the better estimator for a flat one: 0.08% against the
+  warp's 20% at the same count, since a uv-uniform sample crowds the poles
+  and drops the cosine.
+
+The three instruments that settled this stay: the chi-square bins a dome in
+its image, a cone in its own solid angle and an area light on its own
+surface; a round trip checks the mapping without statistics; and a pyramid
+check measures whether the chain telescopes at all.
 
 ### In Hydra
 
@@ -1224,8 +1250,8 @@ enough that what is left is the light and not the noise.
   frame, and every light is visited at every pixel.
 - **No MIS.** Lights are sampled, the material is not sampled back at them.
   That is the path tracer's, M6.
-- **A dome's image is not importance sampled**, so a dome with a sun in it is
-  noisy.
+- **A dome's image is not importance sampled** -- the warp is written, off
+  and diagnosed above -- so a dome with a sun in it is noisy.
 - **No light or shadow linking**, no light instancing, no IES profiles and no
   cylinder lights.
 - **Splats are not relit.** `LrtSplatLightingAPI` is not implemented; splats

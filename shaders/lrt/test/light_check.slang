@@ -22,6 +22,8 @@ RWStructuredBuffer<float>        observed;   // per bin
 RWStructuredBuffer<float>        expected;   // per bin
 RWStructuredBuffer<float4>       result;
 RWStructuredBuffer<uint>         mismatches;   // [samples whose reported pdf differs from lightPdf]
+RWStructuredBuffer<uint>         roundTrip;    // [uv that do not survive a turn through a direction]
+RWStructuredBuffer<float>        pyramid;      // [worst relative gap between a parent and its four children]
 RWStructuredBuffer<float>        worst;        // [the worst relative difference]
 ConstantBuffer<LightCheckParams> params;
 
@@ -128,6 +130,17 @@ uint areaBinOf(LightRecord l, float2 half, float3 w) {
     return u * params.phiBins + v;
 }
 
+/// A dome with an image is binned in the image, where the warp does its
+/// work: a sampler following luminance must fill a bin in proportion to the
+/// luminance in it. Angles in world axes cannot resolve a sun a few texels
+/// wide, which is the artefact that made a cone's statistic meaningless.
+uint domeBinOf(LightRecord l, float3 w) {
+    const float2 uv = domeUv(l, w);
+    const uint u = min(uint(uv.x * float(params.phiBins)), params.phiBins - 1);
+    const uint v = min(uint(uv.y * float(params.thetaBins)), params.thetaBins - 1);
+    return v * params.phiBins + u;
+}
+
 uint binOf(float3 w) {
     const float theta = acos(clamp(w.z, -1.0, 1.0));
     float phi = atan2(w.y, w.x);
@@ -152,11 +165,65 @@ void lightDraw(uint3 tid: SV_DispatchThreadID) {
     float2 half;
     const bool cone = coneOf(lights[0], axis, cosMax);
     const bool area = areaOf(lights[0], half);
+    const bool warped = lights[0].kind == kLightDome && domeHasImage(lights[0]);
     uint bin = params.thetaBins * params.phiBins;
     if (s.valid && !s.delta) {
-        bin = cone ? coneBinOf(axis, cosMax, s.wi) : (area ? areaBinOf(lights[0], half, s.wi) : binOf(s.wi));
+        bin = warped  ? domeBinOf(lights[0], s.wi)
+              : cone  ? coneBinOf(axis, cosMax, s.wi)
+              : area  ? areaBinOf(lights[0], half, s.wi)
+                      : binOf(s.wi);
     }
     bins[i] = bin;
+}
+
+/// Does the chain telescope? A descent that splits by luminance is only
+/// unbiased if a parent is the sum of its four children. These mips are
+/// filtered in uv and decoded as sRGB, neither of which preserves a sum, so
+/// this measures the gap rather than assuming it away.
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void lightPyramid(uint3 tid: SV_DispatchThreadID) {
+    const LightRecord l = lights[0];
+    const TextureRecord record = gTextures.records[l.texture];
+    const float levels = ceil(log2(max(max(record.width, record.height), 1.0)));
+    float worstGap = 0.0;
+    for (float level = 1.0; level <= levels; level += 1.0) {
+        const uint mip = uint(level);
+        const int2 size = int2(max(int(record.width) >> mip, 1), max(int(record.height) >> mip, 1));
+        for (int y = 0; y < size.y; ++y) {
+            for (int x = 0; x < size.x; ++x) {
+                const float parent = domeTexelOf(l, int2(x, y), mip) * 4.0;
+                const float children = domeTexelOf(l, int2(x * 2, y * 2), mip - 1) +
+                                       domeTexelOf(l, int2(x * 2 + 1, y * 2), mip - 1) +
+                                       domeTexelOf(l, int2(x * 2, y * 2 + 1), mip - 1) +
+                                       domeTexelOf(l, int2(x * 2 + 1, y * 2 + 1), mip - 1);
+                const float scale = max(max(parent, children), 1.0e-6);
+                worstGap = max(worstGap, abs(parent - children) / scale);
+            }
+        }
+    }
+    pyramid[0] = worstGap;
+}
+
+/// A direction is where the image says it is: uv into a direction and back
+/// again must land where it started. A statistic would fold a mapping error
+/// into its noise; this cannot.
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void lightRoundTrip(uint3 tid: SV_DispatchThreadID) {
+    uint differ = 0;
+    const uint steps = 64;
+    for (uint j = 1; j < steps; ++j) {
+        for (uint i = 0; i < steps; ++i) {
+            const float2 uv = float2((float(i) + 0.5) / float(steps), (float(j) + 0.5) / float(steps));
+            const float2 back = domeUv(lights[0], domeDirection(lights[0], uv));
+            // u wraps, so a difference of one whole turn is no difference.
+            float du = abs(back.x - uv.x);
+            du = min(du, 1.0 - du);
+            differ += (du > 1.0e-4 || abs(back.y - uv.y) > 1.0e-4) ? 1u : 0u;
+        }
+    }
+    roundTrip[0] = differ;
 }
 
 /// The density a sample was drawn with, against the density the same
@@ -203,6 +270,7 @@ void lightExpect(uint3 tid: SV_DispatchThreadID) {
     const bool cone = coneOf(light, axis, cosMax);
     float2 half;
     const bool area = areaOf(light, half);
+    const bool warped = light.kind == kLightDome && domeHasImage(light);
     float3 coneX, coneY;
     lightFrame(axis, coneX, coneY);
     // Over the same parametrisation the samples were binned in, so the
@@ -214,6 +282,25 @@ void lightExpect(uint3 tid: SV_DispatchThreadID) {
     for (uint t = 0; t < params.thetaBins; ++t) {
         for (uint p = 0; p < params.phiBins; ++p) {
             float sum = 0.0;
+            if (warped) {
+                // In the image's own measure: du dv, with the solid angle the
+                // density is written against folded back in.
+                const float du = 1.0 / float(params.phiBins * sub);
+                const float dv = 1.0 / float(params.thetaBins * sub);
+                for (uint j = 0; j < sub; ++j) {
+                    const float v = (float(t * sub + j) + 0.5) * dv;
+                    const float sinTheta = sin(v * kPiCheck);
+                    for (uint k = 0; k < sub; ++k) {
+                        const float u = (float(p * sub + k) + 0.5) * du;
+                        const float3 w = domeDirection(light, float2(u, v));
+                        sum += lightPdf(light, params.point.xyz, params.normal.xyz, w) * kPiCheck * 2.0 * kPiCheck *
+                               sinTheta * du * dv;
+                    }
+                }
+                expected[t * params.phiBins + p] = sum * float(params.samples);
+                integral += sum;
+                continue;
+            }
             if (area) {
                 // Uniform in area: what a bin should hold is the part of it
                 // that lies on the light, over the light's whole area.

@@ -172,6 +172,180 @@ public void lightFrame(float3 z, out float3 x, out float3 y) {
     y = float3(b, sign + z.y * z.y * a, -z.y);
 }
 
+/// One texel of one level, read exactly. Filtering would blend neighbours,
+/// and then the four children of a cell would not sum to their parent: the
+/// descent's probabilities would stop telescoping and the closed-form density
+/// would no longer be the one the samples were drawn with.
+public float domeTexelOf(LightRecord l, int2 xy, uint level) {
+    const TextureRecord record = gTextures.records[l.texture];
+    const int2 size = int2(max(int(record.width) >> level, 1), max(int(record.height) >> level, 1));
+    const int2 at = clamp(xy, int2(0, 0), size - 1);
+    const float3 rgb = gTextures.textures[record.slot].Load(int3(at, int(level))).rgb;
+    return dot(rgb, float3(0.2126, 0.7152, 0.0722));
+}
+
+/// The same by uv, for a density that is asked about a direction.
+float domeLuminance(LightRecord l, float2 uv, float level) {
+    const TextureRecord record = gTextures.records[l.texture];
+    const uint mip = uint(max(level, 0.0));
+    const int2 size = int2(max(int(record.width) >> mip, 1), max(int(record.height) >> mip, 1));
+    return domeTexelOf(l, int2(int(uv.x * float(size.x)), int(uv.y * float(size.y))), mip);
+}
+
+/// A dome's image, importance sampled.
+///
+/// A lat-long texel covers 2 pi^2 sin(theta) du dv of solid angle, and the
+/// probability of landing on one is its luminance over the image's total --
+/// which the 1x1 level already holds as an average. So the density needs no
+/// walk at all:
+///
+///     pdf(wi) = luminance(wi) / (average * 2 pi^2 * sin(theta))
+///
+/// and only the sampling descends the mip pyramid, choosing between the four
+/// children of a cell by their luminance. Nothing is precomputed: the chain
+/// the texture store already built is the distribution.
+static const float kTwoPiSquared = 2.0 * 3.14159265358979 * 3.14159265358979;
+
+/// The image's mean luminance, from the top of its chain.
+float domeAverage(LightRecord l) {
+    const TextureRecord record = gTextures.records[l.texture];
+    const float top = log2(max(max(record.width, record.height), 1.0));
+    return domeLuminance(l, float2(0.5, 0.5), ceil(top));
+}
+
+/// Whether a dome is worth sampling by its image rather than around the
+/// surface. An image that barely varies is better served by the cosine: the
+/// warp is uniform in uv, which crowds the poles and drops the cosine
+/// altogether, and a plane under a flat dome came out sixteen times noisier
+/// that way. One with a sun in it is the opposite. The 1x1 level gives the
+/// mean and a middle level the spread, so the choice costs two samples.
+public bool domeHasImage(LightRecord l) {
+    // Off until the descent is right. It draws directions its own density
+    // does not describe: a chi-square binned in the image itself -- where the
+    // warp works, so no grid artefact can explain it -- reads z 61543 over a
+    // million samples, and 127965 with a square image, so the asymmetry of a
+    // lat-long is not the cause either. The chain telescopes to 0.7%, the uv
+    // round trip is exact, and every sample agrees with lightPdf, which only
+    // shows that the per-sample test compares the density with itself. What
+    // is left is the split: left/right then top/bottom off one level does not
+    // give the four children their own probabilities. A cosine around the
+    // surface is unbiased meanwhile, and for a flat sky it is the better
+    // estimator anyway (0.08% against 20% at the same count).
+    return false;
+    /*
+    if (l.texture == 0xFFFFFFFF) {
+        return false;
+    }
+    if ((gTextures.records[l.texture].flags & 1u) == 0) {
+        return false;
+    }
+    const TextureRecord record = gTextures.records[l.texture];
+    const float top = ceil(log2(max(max(record.width, record.height), 1.0)));
+    const float average = domeLuminance(l, float2(0.5, 0.5), top);
+    if (!(average > 0.0)) {
+        return false;
+    }
+    // Four quarters of the image against its mean: enough to tell a sky with
+    // a sun from a sky without one, and it reads the chain already built.
+    const float level = max(top - 1.0, 0.0);
+    float spread = 0.0;
+    for (uint k = 0; k < 4; ++k) {
+        const float2 uv = float2(k % 2 == 0 ? 0.25 : 0.75, k < 2 ? 0.25 : 0.75);
+        spread = max(spread, abs(domeLuminance(l, uv, level) - average));
+    }
+    return spread > 0.25 * average;
+    */
+}
+
+/// Where a direction lands in the image, and back again.
+public float3 domeDirection(LightRecord l, float2 uv) {
+    const float phi = (uv.x - 0.5) * 2.0 * 3.14159265358979;
+    const float theta = uv.y * 3.14159265358979;
+    const float sinTheta = sin(theta);
+    // The inverse of domeUv: x and -z around the light's own axes, y up.
+    const float3 local = float3(sinTheta * sin(phi), cos(theta), -sinTheta * cos(phi));
+    return normalize(lightAxisX(l) * local.x + lightAxisY(l) * local.y + lightAxisZ(l) * local.z);
+}
+
+public float domeImagePdf(LightRecord l, float3 wi) {
+    if (!domeHasImage(l)) {
+        return 0.0;
+    }
+    const float average = domeAverage(l);
+    if (!(average > 0.0)) {
+        return 0.0;
+    }
+    const float2 uv = domeUv(l, wi);
+    const float sinTheta = sin(uv.y * 3.14159265358979);
+    if (sinTheta <= 1.0e-6) {
+        return 0.0;
+    }
+    return domeLuminance(l, uv, 0.0) / (average * kTwoPiSquared * sinTheta);
+}
+
+/// Down the pyramid, one level at a time: within the current cell, split left
+/// from right by luminance and take u.x with it, then top from bottom with
+/// u.y. What comes out is a texel drawn in proportion to its luminance, and
+/// the two numbers are spent rather than merely consumed.
+public LightSample domeImageSample(LightRecord l, float2 u) {
+    LightSample s;
+    s.wi = float3(0.0, 0.0, 1.0);
+    s.distance = 1.0e30;
+    s.radiance = float3(0.0);
+    s.pdf = 0.0;
+    s.delta = false;
+    s.valid = false;
+    const TextureRecord record = gTextures.records[l.texture];
+    const float levels = ceil(log2(max(max(record.width, record.height), 1.0)));
+    float2 lo = float2(0.0, 0.0);
+    float2 size = float2(1.0, 1.0);
+    // Cell coordinates on the level being split, doubling each step down.
+    int2 cell = int2(0, 0);
+    for (float level = levels - 1.0; level >= 0.0; level -= 1.0) {
+        const uint mip = uint(level);
+        const float2 half = size * 0.5;
+        cell *= 2;
+        const float left = domeTexelOf(l, cell, mip) + domeTexelOf(l, cell + int2(0, 1), mip);
+        const float right = domeTexelOf(l, cell + int2(1, 0), mip) + domeTexelOf(l, cell + int2(1, 1), mip);
+        const float across = left + right;
+        if (across > 0.0) {
+            const float pLeft = left / across;
+            if (u.x < pLeft) {
+                u.x = u.x / max(pLeft, 1.0e-9);
+            } else {
+                u.x = (u.x - pLeft) / max(1.0 - pLeft, 1.0e-9);
+                lo.x += half.x;
+            }
+        } else if (u.x >= 0.5) {
+            lo.x += half.x;
+            cell.x += 1;
+        }
+        const float top = domeTexelOf(l, cell, mip);
+        const float bottom = domeTexelOf(l, cell + int2(0, 1), mip);
+        const float down = top + bottom;
+        if (down > 0.0) {
+            const float pTop = top / down;
+            if (u.y < pTop) {
+                u.y = u.y / max(pTop, 1.0e-9);
+            } else {
+                u.y = (u.y - pTop) / max(1.0 - pTop, 1.0e-9);
+                lo.y += half.y;
+                cell.y += 1;
+            }
+        } else if (u.y >= 0.5) {
+            lo.y += half.y;
+            cell.y += 1;
+        }
+        size = half;
+    }
+    const float2 uv = lo + size * u;
+    s.wi = domeDirection(l, uv);
+    s.pdf = domeImagePdf(l, s.wi);
+    s.radiance = lightEmission(l) * domeImage(l, s.wi);
+    s.valid = s.pdf > 0.0 && any(s.radiance > float3(0.0));
+    return s;
+}
+
 /// The density `sampleLight` draws `wi` with, as a function of direction:
 /// what a chi-square asks for, and what MIS will weigh a hit by. Zero where
 /// the light cannot be reached that way, and zero for a delta light, which
@@ -186,8 +360,9 @@ public float lightPdf(LightRecord l, float3 p, float3 n, float3 wi) {
         return dot(wi, lightAxisZ(l)) >= cosMax ? 1.0 / (2.0 * 3.14159265358979 * (1.0 - cosMax)) : 0.0;
     }
     case kLightDome:
-        // Cosine weighted around the surface, as the dome is sampled.
-        return max(dot(n, wi), 0.0) / 3.14159265358979;
+        // By the image where it has one, and cosine weighted around the
+        // surface where it does not.
+        return domeHasImage(l) ? domeImagePdf(l, wi) : max(dot(n, wi), 0.0) / 3.14159265358979;
     case kLightSphere: {
         const float3 offset = lightOrigin(l) - p;
         const float distance2 = dot(offset, offset);
@@ -270,6 +445,9 @@ public LightSample sampleLight(LightRecord l, float3 p, float3 n, float2 u) {
         break;
     }
     case kLightDome: {
+        if (domeHasImage(l)) {
+            return domeImageSample(l, u);
+        }
         // Cosine weighted around the surface, which is where a dome's light
         // reaches it from: uniform over the sphere throws half its samples
         // below the horizon, and a plane under a constant dome came out with

@@ -8,10 +8,16 @@
 
 #include <array>
 #include <cmath>
+#include <filesystem>
 #include <cstdio>
+#include <cstdlib>
 #include <vector>
 
+#include <pxr/imaging/hio/image.h>
+#include <pxr/imaging/hio/types.h>
+
 #include "lrt/geom/Mesh.h"
+#include "lrt/material/TextureStore.h"
 #include "lrt/light/LightTable.h"
 #include "lrt/material/MaterialCompiler.h"
 #include "lrt/material/TextureStore.h"
@@ -23,6 +29,13 @@
 using namespace lrt;
 
 namespace {
+
+/// Where this file's generated images go, as the other suites keep theirs.
+std::filesystem::path scratch(const std::string& name) {
+    const std::filesystem::path dir = std::filesystem::temp_directory_path() / "lrt-tests" / "technique";
+    std::filesystem::create_directories(dir);
+    return dir / name;
+}
 
 std::shared_ptr<const geom::GpuMesh> lambertSquare(geom::MeshBuilder& builder, float half) {
     static std::vector<float> points;
@@ -289,6 +302,7 @@ TEST_CASE("each light's samples follow the density it reports", "[technique][lig
     gpu::ComputeKernel expect = kernel("lightExpect");
     gpu::ComputeKernel statistic = kernel("lightStatistic");
     gpu::ComputeKernel consistent = kernel("lightConsistent");
+    gpu::ComputeKernel roundTrip = kernel("lightRoundTrip");
 
     // Fine enough that a light of small support is resolved by its bins and
     // not smeared across one: the coarse grid a lobe needs is not enough here.
@@ -309,6 +323,7 @@ TEST_CASE("each light's samples follow the density it reports", "[technique][lig
     auto result = gpu::Buffer::fromSpan<float>(*gpu->device, resultZeros, "light.result");
     gpu::Buffer mismatches = test::uintBuffer(*gpu->device, 1, "light.mismatches");
     gpu::Buffer worstPdf = test::uintBuffer(*gpu->device, 1, "light.worstPdf");
+    gpu::Buffer mapping = test::uintBuffer(*gpu->device, 1, "light.mapping");
     REQUIRE(observed);
     REQUIRE(expected);
     REQUIRE(result);
@@ -344,6 +359,7 @@ TEST_CASE("each light's samples follow the density it reports", "[technique][lig
             cursor["result"].setBinding(result->rhi());
             cursor["mismatches"].setBinding(mismatches.rhi());
             cursor["worst"].setBinding(worstPdf.rhi());
+            cursor["roundTrip"].setBinding(mapping.rhi());
             rhi::ShaderCursor p = cursor["params"];
             p["thetaBins"].setData(thetaBins);
             p["phiBins"].setData(phiBins);
@@ -356,6 +372,7 @@ TEST_CASE("each light's samples follow the density it reports", "[technique][lig
         {
             gpu::CommandBatch batch(*gpu->device);
             consistent.dispatch(batch, {1, 1, 1}, bind);
+            roundTrip.dispatch(batch, {1, 1, 1}, bind);
             draw.dispatch(batch, {samples, 1, 1}, bind);
             count.dispatch(batch, {1, 1, 1}, bind);
             expect.dispatch(batch, {1, 1, 1}, bind);
@@ -378,9 +395,145 @@ TEST_CASE("each light's samples follow the density it reports", "[technique][lig
                     "disagree with lightPdf (worst %.2e)\n",
                     c.name, double(chi2), double(dof), double(z), double(integral), double(drawn), differ,
                     double(worstRelative));
+        uint32_t mapped = 0;
+        REQUIRE(mapping.read(*gpu->device, 0, sizeof(mapped), &mapped));
+        if (c.kind == light::LightKind::Dome) {
+            // A direction is where the image says it is: 63 x 64 uv through a
+            // direction and back. Only a dome maps one at all.
+            std::printf("  %-13s: %u of 4032 uv do not survive a turn through a direction\n", c.name, mapped);
+            CHECK(mapped == 0);
+        }
         CHECK(differ == 0);
         CHECK(std::abs(z) < 4.0F);
         // The pdf integrates to the fraction of samples the light drew.
         CHECK(std::abs(integral - drawn) < 0.02F);
     }
+}
+
+TEST_CASE("a dome with a sun in it samples what its density describes",
+          "[technique][lights][chi2]") {
+    LRT_REQUIRE_GPU(gpu);
+    // A sky that varies: dark everywhere but one bright patch. A flat image
+    // is better served by the cosine and takes that path instead, so only an
+    // image like this one exercises the warp at all.
+    const std::filesystem::path png = scratch("dome_sun.png");
+    // Square unless asked otherwise: a lat-long is 2:1, and whether that
+    // asymmetry is what the descent trips on is exactly what this asks.
+    const uint32_t w = std::getenv("LRT_DOME_WIDE") != nullptr ? 64u : 32u;
+    const uint32_t h = 32;
+    {
+        std::filesystem::remove(png);
+        std::vector<uint32_t> texels(size_t{w} * h, 0xFF101010u);   // ABGR, a dim sky
+        for (uint32_t y = 10; y < 14; ++y) {
+            for (uint32_t x = w / 2; x < w / 2 + 6 && x < w; ++x) {
+                texels[y * w + x] = 0xFFFFFFFFu;   // the sun
+            }
+        }
+        pxr::HioImageSharedPtr made = pxr::HioImage::OpenForWriting(png.string());
+        REQUIRE(made);
+        pxr::HioImage::StorageSpec spec;
+        spec.width = static_cast<int>(w);
+        spec.height = static_cast<int>(h);
+        spec.depth = 1;
+        spec.format = pxr::HioFormatUNorm8Vec4;
+        spec.data = texels.data();
+        REQUIRE(made->Write(spec));
+    }
+    auto textures = material::TextureStore::create(*gpu->library);
+    if (!textures) FAIL(textures.error().toString());
+    light::Light lamp;
+    lamp.kind = light::LightKind::Dome;
+    lamp.texture = png.string();
+    lamp.textureId = (*textures)->request(png.string(), material::ColourSpace::Auto);
+    lamp.sampler = (*textures)->sampler(material::Wrap::Repeat, material::Wrap::Clamp);
+    lamp.shadow = false;
+    REQUIRE((*textures)->commit());
+    auto table = light::LightTable::create(*gpu->device);
+    if (!table) FAIL(table.error().toString());
+    REQUIRE(table->set(std::span<const light::Light>(&lamp, 1)));
+
+    const auto kernel = [&](const char* entry) {
+        auto made = gpu::ComputeKernel::create(*gpu->library, "lrt/test/light_check", entry);
+        if (!made) FAIL(made.error().toString());
+        return std::move(*made);
+    };
+    gpu::ComputeKernel draw = kernel("lightDraw");
+    gpu::ComputeKernel count = kernel("lightCount");
+    gpu::ComputeKernel expect = kernel("lightExpect");
+    gpu::ComputeKernel statistic = kernel("lightStatistic");
+    gpu::ComputeKernel consistent = kernel("lightConsistent");
+    gpu::ComputeKernel pyramidCheck = kernel("lightPyramid");
+
+    const uint32_t thetaBins = 32;
+    const uint32_t phiBins = 64;
+    const uint32_t bins = thetaBins * phiBins;
+    const uint32_t samples = 1u << 20;
+    gpu::BufferDesc binDesc;
+    binDesc.bytes = uint64_t{samples} * 4;
+    binDesc.elementBytes = 4;
+    binDesc.label = "dome.bins";
+    auto binBuffer = gpu::Buffer::create(*gpu->device, binDesc);
+    REQUIRE(binBuffer);
+    const std::vector<float> zeros(size_t{bins} + 1, 0.0F);
+    auto observed = gpu::Buffer::fromSpan<float>(*gpu->device, zeros, "dome.observed");
+    auto expected = gpu::Buffer::fromSpan<float>(*gpu->device, zeros, "dome.expected");
+    auto result = gpu::Buffer::fromSpan<float>(*gpu->device, std::vector<float>(8, 0.0F), "dome.result");
+    gpu::Buffer mismatches = test::uintBuffer(*gpu->device, 1, "dome.mismatches");
+    gpu::Buffer worstPdf = test::uintBuffer(*gpu->device, 1, "dome.worstPdf");
+    gpu::Buffer mapping = test::uintBuffer(*gpu->device, 1, "dome.mapping");
+    auto pyramid = gpu::Buffer::fromSpan<float>(*gpu->device, std::vector<float>(1, 0.0F), "dome.pyramid");
+    REQUIRE(pyramid);
+    REQUIRE(observed);
+    REQUIRE(expected);
+    REQUIRE(result);
+    const auto bind = [&](rhi::ShaderCursor cursor) {
+        cursor["lights"].setBinding(table->records().rhi());
+        (*textures)->bind(cursor["gTextures"]);
+        cursor["bins"].setBinding(binBuffer->rhi());
+        cursor["observed"].setBinding(observed->rhi());
+        cursor["expected"].setBinding(expected->rhi());
+        cursor["result"].setBinding(result->rhi());
+        cursor["mismatches"].setBinding(mismatches.rhi());
+        cursor["worst"].setBinding(worstPdf.rhi());
+        cursor["roundTrip"].setBinding(mapping.rhi());
+        cursor["pyramid"].setBinding(pyramid->rhi());
+        rhi::ShaderCursor p = cursor["params"];
+        p["thetaBins"].setData(thetaBins);
+        p["phiBins"].setData(phiBins);
+        p["samples"].setData(samples);
+        const float point[4] = {0.0F, 0.0F, 0.0F, 0.0F};
+        const float normal[4] = {0.0F, 0.0F, 1.0F, 0.0F};
+        p["point"].setData(point, sizeof(point));
+        p["normal"].setData(normal, sizeof(normal));
+    };
+    {
+        gpu::CommandBatch batch(*gpu->device);
+        consistent.dispatch(batch, {1, 1, 1}, bind);
+        pyramidCheck.dispatch(batch, {1, 1, 1}, bind);
+        draw.dispatch(batch, {samples, 1, 1}, bind);
+        count.dispatch(batch, {1, 1, 1}, bind);
+        expect.dispatch(batch, {1, 1, 1}, bind);
+        statistic.dispatch(batch, {1, 1, 1}, bind);
+        REQUIRE(batch.submit(true));
+    }
+    float r[8] = {};
+    uint32_t differ = 0;
+    float worstRelative = 0.0F;
+    REQUIRE(result->read(*gpu->device, 0, sizeof(r), r));
+    REQUIRE(mismatches.read(*gpu->device, 0, sizeof(differ), &differ));
+    REQUIRE(worstPdf.read(*gpu->device, 0, sizeof(worstRelative), &worstRelative));
+    const float chi2 = r[4];
+    const float dof = r[5];
+    const float drawn = r[6];
+    float gap = 0.0F;
+    REQUIRE(pyramid->read(*gpu->device, 0, sizeof(gap), &gap));
+    std::printf("  the chain telescopes to within %.4f (a parent against its four children)\n", double(gap));
+    const float z = (chi2 - dof) / std::sqrt(2.0F * dof);
+    // While the image warp is parked (lights.slang), this is the cosine path
+    // with an image on it: the statistic still has to hold.
+    std::printf("  dome with a sun: chi2 %.1f on %.0f dof (z %.2f), pdf integral %.4f against %.4f drawn; %u "
+                "samples disagree (worst %.2e)\n",
+                double(chi2), double(dof), double(z), double(r[0]), double(drawn), differ, double(worstRelative));
+    CHECK(differ == 0);
+    CHECK(std::abs(z) < 4.0F);
 }
