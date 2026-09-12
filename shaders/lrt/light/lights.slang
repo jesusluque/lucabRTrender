@@ -231,8 +231,6 @@ public bool domeHasImage(LightRecord l) {
     // give the four children their own probabilities. A cosine around the
     // surface is unbiased meanwhile, and for a flat sky it is the better
     // estimator anyway (0.08% against 20% at the same count).
-    return false;
-    /*
     if (l.texture == 0xFFFFFFFF) {
         return false;
     }
@@ -254,7 +252,6 @@ public bool domeHasImage(LightRecord l) {
         spread = max(spread, abs(domeLuminance(l, uv, level) - average));
     }
     return spread > 0.25 * average;
-    */
 }
 
 /// Where a direction lands in the image, and back again.
@@ -299,44 +296,53 @@ public LightSample domeImageSample(LightRecord l, float2 u) {
     const float levels = ceil(log2(max(max(record.width, record.height), 1.0)));
     float2 lo = float2(0.0, 0.0);
     float2 size = float2(1.0, 1.0);
-    // Cell coordinates on the level being split, doubling each step down.
+    // Down the pyramid, one level at a time. A chain over a lat-long is not
+    // square: 64 x 32 reaches one row while it still has columns, and from
+    // there a cell has two children rather than four -- splitting an axis
+    // that has no resolution left hands probability to texels that are not
+    // there. So each level splits only the axes that still divide.
+    const int2 full = int2(max(int(record.width), 1), max(int(record.height), 1));
     int2 cell = int2(0, 0);
     for (float level = levels - 1.0; level >= 0.0; level -= 1.0) {
         const uint mip = uint(level);
-        const float2 half = size * 0.5;
-        cell *= 2;
-        const float left = domeTexelOf(l, cell, mip) + domeTexelOf(l, cell + int2(0, 1), mip);
-        const float right = domeTexelOf(l, cell + int2(1, 0), mip) + domeTexelOf(l, cell + int2(1, 1), mip);
-        const float across = left + right;
-        if (across > 0.0) {
-            const float pLeft = left / across;
-            if (u.x < pLeft) {
-                u.x = u.x / max(pLeft, 1.0e-9);
-            } else {
-                u.x = (u.x - pLeft) / max(1.0 - pLeft, 1.0e-9);
-                lo.x += half.x;
-            }
-        } else if (u.x >= 0.5) {
-            lo.x += half.x;
-            cell.x += 1;
+        const int2 size2 = int2(max(full.x >> mip, 1), max(full.y >> mip, 1));
+        const int2 parent = int2(max(full.x >> (mip + 1), 1), max(full.y >> (mip + 1), 1));
+        const bool splitX = size2.x > parent.x;
+        const bool splitY = size2.y > parent.y;
+        cell = int2(splitX ? cell.x * 2 : cell.x, splitY ? cell.y * 2 : cell.y);
+        const uint children = (splitX ? 2u : 1u) * (splitY ? 2u : 1u);
+        float w[4];
+        float total = 0.0;
+        for (uint k = 0; k < children; ++k) {
+            const int2 step = int2(splitX ? int(k & 1u) : 0, splitY ? int(splitX ? (k >> 1) : k) : 0);
+            w[k] = domeTexelOf(l, cell + step, mip);
+            total += w[k];
         }
-        const float top = domeTexelOf(l, cell, mip);
-        const float bottom = domeTexelOf(l, cell + int2(0, 1), mip);
-        const float down = top + bottom;
-        if (down > 0.0) {
-            const float pTop = top / down;
-            if (u.y < pTop) {
-                u.y = u.y / max(pTop, 1.0e-9);
-            } else {
-                u.y = (u.y - pTop) / max(1.0 - pTop, 1.0e-9);
-                lo.y += half.y;
-                cell.y += 1;
+        uint chosen = children - 1;
+        float before = 0.0;
+        if (total > 0.0) {
+            float target = u.x * total;
+            for (uint k = 0; k + 1 < children; ++k) {
+                if (target < w[k]) {
+                    chosen = k;
+                    break;
+                }
+                target -= w[k];
+                before += w[k];
             }
-        } else if (u.y >= 0.5) {
-            lo.y += half.y;
-            cell.y += 1;
+            if (chosen == children - 1) {
+                before = total - w[chosen];
+            }
+            // What is left of the number, inside the child it chose.
+            u.x = saturate((u.x * total - before) / max(w[chosen], 1.0e-9));
+        } else {
+            chosen = min(uint(u.x * float(children)), children - 1);
+            u.x = saturate(u.x * float(children) - float(chosen));
         }
-        size = half;
+        const int2 step = int2(splitX ? int(chosen & 1u) : 0, splitY ? int(splitX ? (chosen >> 1) : chosen) : 0);
+        cell += step;
+        size *= float2(splitX ? 0.5 : 1.0, splitY ? 0.5 : 1.0);
+        lo += size * float2(float(step.x), float(step.y));
     }
     const float2 uv = lo + size * u;
     s.wi = domeDirection(l, uv);

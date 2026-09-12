@@ -1149,30 +1149,46 @@ sample, mapped around the light's own axes. It is not a layer: it has no
 depth, and giving it one would make the background read as covered, so it is
 painted where the frame drew nothing, opaque, after everything else.
 
-What a dome does not do yet is follow its image's own brightness. The warp
-the plan asks for is written and switched off, because it draws directions
-its own density does not describe.
+A dome follows its image's own brightness. The warp descends the mip chain
+the texture store already built, choosing among a cell's children by
+luminance, and its density needs no walk at all: a lat-long texel covers
+2 pi^2 sin(theta) du dv, and a texel's share is its luminance over the
+image's total, which the 1x1 level holds as an average -- so
 
-- **What it does.** It descends the mip chain the texture store already
-  built, choosing between a cell's children by luminance, and its density
-  needs no walk at all: a lat-long texel covers 2 pi^2 sin(theta) du dv, and
-  a texel's share is its luminance over the image's total, which the 1x1
-  level holds as an average -- so pdf = luminance / (average * 2 pi^2 *
-  sin(theta)).
-- **Why it is off.** A chi-square binned in the image itself, where the warp
-  works and no grid artefact can explain it, reads z 61543 over a million
-  samples; a square image reads 127965, so the 2:1 shape of a lat-long is not
-  the cause. What is right, measured rather than assumed: the chain
-  telescopes to 0.7% (a parent against its four children), uv survives a turn
-  through a direction exactly (0 of 4032), and every sample agrees with
-  lightPdf -- which only proves the per-sample check compares a density with
-  itself. What is left is the split: left from right and then top from bottom
-  off one level does not give the four children their own probabilities. An
-  explicit choice among four weights is the fix.
-- **What runs meanwhile.** The cosine around the surface, which is unbiased
-  for any dome and the better estimator for a flat one: 0.08% against the
-  warp's 20% at the same count, since a uv-uniform sample crowds the poles
-  and drops the cosine.
+    pdf = luminance / (average * 2 pi^2 * sin(theta))
+
+Nothing is precomputed, and the choice between warping and sampling around
+the surface is made by how much the image varies: the 1x1 level gives the
+mean and a middle level the spread. A flat sky is better served by the
+cosine, which the numbers below say plainly.
+
+It took two bugs to get there, and the chi-square binned in the image itself
+-- where the warp works, so no grid artefact could be blamed -- found both:
+
+- **Splitting left from right and then top from bottom off one level** does
+  not give the four children their own probabilities: z 61543 over a million
+  samples. An explicit choice among four weights fixed it.
+- **Splitting an axis that has no resolution left.** With that fixed a square
+  image passed at once (z 0.84) while a 64 x 32 one still read z 1164589: a
+  lat-long chain reaches one row while it still has columns, and from there a
+  cell has two children rather than four, so probability was being handed to
+  texels that are not there. Each level now splits only the axes that still
+  divide.
+
+What was never wrong, measured rather than assumed: the chain telescopes to
+0.7% (a parent against its four children), uv survives a turn through a
+direction exactly (0 of 4032), and every sample agrees with `lightPdf` --
+that last one passed throughout, which is the lesson: a per-sample check
+compares a density with itself and cannot see a sampler drawing the wrong
+distribution.
+
+- **Verified**: z 0.84 with a square image and 2.41 with a 2:1 one, a million
+  samples each, against the density integrated over the same bins.
+- **Against the cosine**: on a plane under a flat sky the warp is 20% out
+  where the cosine is 0.08% at the same count, since a uv-uniform sample
+  crowds the poles and drops the cosine. Which is why the rule picks by
+  variation, and why a dome with a sun in it is the warp's case, not this
+  one.
 
 The three instruments that settled this stay: the chi-square bins a dome in
 its image, a cone in its own solid angle and an area light on its own
@@ -1250,8 +1266,9 @@ enough that what is left is the light and not the noise.
   frame, and every light is visited at every pixel.
 - **No MIS.** Lights are sampled, the material is not sampled back at them.
   That is the path tracer's, M6.
-- **A dome's image is not importance sampled** -- the warp is written, off
-  and diagnosed above -- so a dome with a sun in it is noisy.
+- **The two dome densities are not combined.** A dome is sampled either by
+  its image or around the surface, whichever its variation calls for, and
+  never both with MIS weighing between them: that is the path tracer's, M6.
 - **No light or shadow linking**, no light instancing, no IES profiles and no
   cylinder lights.
 - **Splats are not relit.** `LrtSplatLightingAPI` is not implemented; splats
