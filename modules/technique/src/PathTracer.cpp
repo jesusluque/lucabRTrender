@@ -34,25 +34,49 @@ StructuredBuffer<LightRecord>  lights;
 uniform uint                   lightCount;
 ConstantBuffer<PathParams>     path;
 
-/// Hash of everything that makes a sample: the pixel, which path it is, and
-/// which bounce. Cheap, and independent enough for a mean to converge.
+/// One round of PCG's output permutation over an LCG step: a hash of a
+/// counter whose every input bit reaches every output bit.
+uint pcgHash(uint input) {
+    const uint state = input * 747796405u + 2891336453u;
+    const uint word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+    return (word >> 22u) ^ word;
+}
+
+/// Everything that makes a sample -- the pixel, the frame's stream, which path
+/// it is, which bounce, which dimension -- folded in one after another, each
+/// through the full hash, so no two inputs meet by XOR and no arithmetic
+/// progression in one survives into the output.
+///
+/// The path's index is absolute: `path.accumulated + sample`, so a frame
+/// gathered in one pass and in many draws the same samples (checked to 4e-15).
+///
+/// What was here before mixed the inputs by XOR before one avalanche. Every
+/// pixel had its own sequence and its own set (measured: 0 of 3072 shared
+/// either), and neighbours' errors were independent (block variance fell
+/// 4.42x and 15.94x for 2x2 and 4x4 against 4 and 16) -- and still the
+/// variance of a pixel's mean fell as N^-0.86 rather than N^-1, which is
+/// what samples correlated *within* a pixel look like. Fitted exponent on
+/// sqrt: -0.428 before this change; the number after it is in the test.
 float random(uint2 pixel, uint sample, uint bounce, uint which) {
-    uint h = pixel.x * 73856093u ^ pixel.y * 19349663u ^ (sample + path.seed) * 83492791u ^
-             bounce * 2654435761u ^ which * 40503u;
-    h ^= h >> 15; h *= 2246822519u; h ^= h >> 13; h *= 3266489917u; h ^= h >> 16;
-    return float(h >> 8) * (1.0 / 16777216.0);
+    uint key = pcgHash(pixel.y * camera.width + pixel.x);
+    key = pcgHash(key + path.seed);
+    key = pcgHash(key + path.accumulated + sample);
+    key = pcgHash(key + bounce);
+    key = pcgHash(key + which);
+    return float(key >> 8) * (1.0 / 16777216.0);
 }
 
 float2 random2(uint2 pixel, uint sample, uint bounce, uint which) {
     return float2(random(pixel, sample, bounce, which), random(pixel, sample, bounce, which + 1u));
 }
 
-/// The power heuristic, with the exponent everyone uses.
-float misWeight(float a, float b) {
-    const float a2 = a * a;
-    const float b2 = b * b;
-    return a2 + b2 > 0.0 ? a2 / (a2 + b2) : 0.0;
-}
+// There was a power heuristic here. It is gone rather than left unused,
+// because a function of that name invites being plugged back in: weighing
+// next event estimation against a strategy that covers no analytic light is
+// what lost half the dome. When mesh lights arrive the two strategies will
+// genuinely overlap and a weight will belong again -- with a "does this
+// direction reach light k, and with what radiance" beside lightPdf, which
+// does not exist yet.
 )";
 
 /// Where the device traces, an indirect ray finds the next surface and a
@@ -222,10 +246,21 @@ float3 gatherLight(Shaded sh, uint2 pixel, uint sample, uint bounce) {
         return float3(0.0);
     }
     const float density = ls.pdf * choice.probability;
-    // A delta light cannot be hit by a sampled direction, so it takes the
-    // whole weight; anything else shares it with the material's sampling.
-    const float weight = ls.delta ? 1.0 : misWeight(density, stackPdf(sh.stack, sh.toEye, ls.wi));
-    return f * ls.radiance * (weight / density);
+    // No weight. The two strategies cover disjoint sets of emitters, so there
+    // is nothing to share: next event estimation covers the analytic lights of
+    // the light table, and sampling the material covers emissive geometry. A
+    // light in the table has no geometry for a sampled direction to hit, and a
+    // bounce ray that escapes breaks without gathering the dome it passed
+    // through -- so a weight here would scale this estimator down and nothing
+    // would pay the remainder back. Measured before it was removed: a white
+    // furnace under an imageless dome, where the dome's density and the
+    // Lambert lobe's are the same function, read 0.5453 of what unweighted
+    // NEE reads.
+    //
+    // Real MIS belongs with mesh lights, where the two strategies genuinely
+    // overlap; it needs a "does this direction reach light k, and with what
+    // radiance" beside lightPdf, which does not exist yet.
+    return f * ls.radiance / density;
 }
 
 [shader("compute")]
@@ -247,7 +282,10 @@ void tracePaths(uint3 group: SV_GroupID, uint index: SV_GroupIndex) {
             continue;
         }
         hitDepth = sh.depth;
-        alpha += sh.stack.opacity;
+        // The first hit's, kept before the bounces: `sh` walks on to whatever
+        // the path finds, and it is this surface's opacity the pixel carries.
+        const float opacity = sh.stack.opacity;
+        alpha += opacity;
         float3 carried = sh.stack.emission + gatherLight(sh, tid, sample, 0u);
         float3 throughput = float3(1.0);
         // The bounces. Each one samples the material, traces where it points,
@@ -280,10 +318,15 @@ void tracePaths(uint3 group: SV_GroupID, uint index: SV_GroupIndex) {
             carried += throughput * gatherLight(next, tid, sample, bounce + 1u);
             sh = next;
         }
-        total += carried;
+        total += carried * opacity;
     }
-    const float3 mean = total / float(samples);
-    const float4 added = float4(mean * (alpha / float(samples)), alpha / float(samples));
+    // A mean of products, not a product of means: `total` already carries each
+    // sample's colour times that sample's opacity, so the sum is the sum. The
+    // two are the same while every sample is opaque -- which is every test
+    // there is today -- and differ as soon as opacity varies per sample, and
+    // the product form also broke the invariant that 256 paths in one pass
+    // must equal 64 in each of four.
+    const float4 added = float4(total, alpha) / float(samples);
     const float before = float(path.accumulated);
     const float4 kept = path.accumulated != 0 ? sum[at] : float4(0.0);
     const float4 now = kept + added * float(samples);

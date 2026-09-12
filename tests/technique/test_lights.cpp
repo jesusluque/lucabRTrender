@@ -6,6 +6,7 @@
 // with the renderer.
 #include "../gpu/GpuTest.h"
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <filesystem>
@@ -1201,3 +1202,760 @@ TEST_CASE("the bounce carries light from a second surface", "[technique][path]")
     // Nothing to find, and the same seeds: the two frames are the same frame.
     CHECK(alone.max == 0);
 }
+
+// The plan's last check for the integrator: the error against a converged
+// reference falls as 1/sqrt(N). It is worth more than holding the path tracer
+// against the raster, because two estimators wrong in the same way would agree
+// with each other and still both be wrong -- a slope is a prediction that can
+// fail.
+//
+// relMSE is a squared error, so sqrt(relMSE) is what falls as 1/sqrt(N):
+// quadrupling the paths must halve it. The check is the ratio between points
+// and not the value of any one of them; an absolute threshold here would be an
+// invented number (this engine asks relMSE < 1e-6 of two routes that should
+// agree exactly, and a noisy integrator lives orders above that).
+//
+// The reference is 8192 paths at 96 x 72, not the plan's 64k spp: 64k at the
+// resolution the other cases use measures ~80 s for one scene, most of the
+// suite on its own, and depth of reference is not what verifies the law.
+// Measured cost is in docs/decisions.md.
+TEST_CASE("the path traced error against a converged reference falls as one over root N",
+          "[technique][path]") {
+    LRT_REQUIRE_GPU(gpu);
+    const gpu::Caps& caps = gpu->device->caps();
+    if (!caps.rasterization) {
+        SKIP("no rasterisation on this device");
+    }
+    if (!caps.rayQuery || !caps.accelerationStructure) {
+        SKIP("no ray queries on this device: there would be no bounce to converge");
+    }
+    std::vector<std::filesystem::path> shaderPaths;
+    for (const std::string& path : gpu->device->shaderSearchPaths()) {
+        shaderPaths.emplace_back(path);
+    }
+    auto compiler = material::MaterialCompiler::create({LRT_MATERIALX_ROOT}, shaderPaths);
+    auto textures = material::TextureStore::create(*gpu->library);
+    auto builder = geom::MeshBuilder::create(*gpu->library);
+    auto scene = world::GpuScene::create(*gpu->library);
+    auto accel = world::RayTracingScene::create(*gpu->library);
+    auto raster = technique::VisibilityRaster::create(*gpu->library);
+    auto programs = technique::MaterialPrograms::create(*gpu->library);
+    auto tracer = technique::PathTracer::create(*gpu->library);
+    auto table = light::LightTable::create(*gpu->device);
+    if (!compiler) FAIL(compiler.error().toString());
+    if (!textures) FAIL(textures.error().toString());
+    if (!builder) FAIL(builder.error().toString());
+    if (!scene) FAIL(scene.error().toString());
+    if (!accel) FAIL(accel.error().toString());
+    if (!raster) FAIL(raster.error().toString());
+    if (!programs) FAIL(programs.error().toString());
+    if (!tracer) FAIL(tracer.error().toString());
+    if (!table) FAIL(table.error().toString());
+    auto lambert = (*compiler)->compileXml(
+        "<?xml version=\"1.0\"?>\n<materialx version=\"1.39\">\n"
+        "  <oren_nayar_diffuse_bsdf name=\"d\" type=\"BSDF\">\n"
+        "    <input name=\"color\" type=\"color3\" value=\"0.8, 0.8, 0.8\" />\n"
+        "    <input name=\"roughness\" type=\"float\" value=\"0\" />\n"
+        "  </oren_nayar_diffuse_bsdf>\n"
+        "  <surface name=\"shader\" type=\"surfaceshader\"><input name=\"bsdf\" type=\"BSDF\" nodename=\"d\" /></surface>\n"
+        "  <surfacematerial name=\"material\" type=\"material\">\n"
+        "    <input name=\"surfaceshader\" type=\"surfaceshader\" nodename=\"shader\" />\n"
+        "  </surfacematerial>\n</materialx>\n");
+    if (!lambert) FAIL(lambert.error().toString());
+    REQUIRE(programs->setModules(std::span<const material::CompiledMaterial>(&*lambert, 1)));
+    REQUIRE(tracer->setPrograms(*programs));
+    const std::vector<float> blob = material::MaterialCompiler::parameters(
+        *lambert, **textures, [](const std::string&) { return 0xFFFFFFFFu; });
+    REQUIRE((*textures)->commit());
+    const std::vector<technique::MaterialRecord> rows{{0, 0, 0, 0}, {1, 0, 0, 0}};
+    auto records = gpu::Buffer::fromSpan<technique::MaterialRecord>(*gpu->device, rows, "materials.records");
+    auto blobBuffer = gpu::Buffer::fromSpan<float>(*gpu->device, blob, "materials.blob");
+    REQUIRE(records);
+    REQUIRE(blobBuffer);
+
+    const uint32_t w = 96;
+    const uint32_t h = 72;
+    render::Camera camera = render::Camera::lookingAt({0.0, 0.0, 0.0}, {0.0, 0.0, -1.0});
+    camera.lens.focal = 35.0;
+    const render::Projection projection = render::projectionFor(camera, w, h);
+    // The wall is what gives the estimator something to be noisy about: a
+    // bounce that finds a surface, not just a light sample.
+    std::array<world::MeshInstance, 2> both;
+    both[0].mesh = lambertSquare(*builder, 1.0F);
+    both[0].objectToWorld = aofx::xform::translation({0.0, 0.0, -5.0});
+    both[0].material = 1;
+    both[1].mesh = lambertSquare(*builder, 1.0F);
+    both[1].objectToWorld = aofx::xform::translation({1.0, 0.0, -4.0}) * aofx::xform::rotationY(-90.0);
+    both[1].material = 1;
+    REQUIRE(scene->update(std::span<const world::MeshInstance>(both.data(), both.size()), projection));
+    REQUIRE(accel->build(*scene));
+    light::Light lamp;
+    lamp.kind = light::LightKind::Sphere;
+    lamp.lightToWorld = aofx::xform::translation({0.0, 0.0, -3.0});
+    lamp.radius = 0.4F;
+    lamp.shadow = false;
+    REQUIRE(table->set(std::span<const light::Light>(&lamp, 1)));
+
+    technique::VisibilityTargets visibility;
+    technique::MaterialFrame frame;
+    frame.programs = &*programs;
+    frame.scene = &*scene;
+    frame.records = &*records;
+    frame.blob = &*blobBuffer;
+    frame.textures = &**textures;
+    frame.lights = &*table;
+    frame.shadows = accel->topLevel();
+    frame.samples = 1;
+    {
+        gpu::CommandBatch batch(*gpu->device);
+        REQUIRE(raster->render(batch, *scene, projection, w, h, visibility));
+        REQUIRE(batch.submit(true));
+    }
+
+    // Absolute seeds: random() mixes (sample + path.seed) with sample local to
+    // the pass, so a seed that advances by the samples already taken makes a
+    // gather cover exactly [base, base + total) whatever its split (the case
+    // "the same paths gathered in one pass and in many" holds that to 4e-15).
+    // Every draw and the reference get a base of their own, far apart.
+    const auto gather = [&](uint32_t total, uint32_t perPass, uint32_t base, render::RenderTargets& out) {
+        tracer->restart();
+        technique::PathSettings paths;
+        paths.samples = perPass;
+        paths.bounces = 1;
+        paths.accumulate = true;
+        for (uint32_t taken = 0; taken < total; taken += perPass) {
+            paths.seed = base;   // the sample index is absolute; the seed picks the stream
+            gpu::CommandBatch batch(*gpu->device);
+            REQUIRE(tracer->trace(batch, visibility, projection, frame, paths, out));
+            REQUIRE(batch.submit(true));
+        }
+        REQUIRE(tracer->accumulated() == total);
+    };
+
+    // No reference. Two independent estimates at the same N differ by a
+    // quantity whose expected square is exactly twice the estimator's
+    // variance, so pairs measure 1/sqrt(N) with no floor at all -- where an
+    // error against a finite reference carries the reference's own noise and,
+    // worse, relMSE's noisy denominator (a-b)^2/(b^2+1e-2): measured against
+    // an 8192-path reference the ladder fitted relMSE = C/N + F with F at 46%
+    // of the 1024-path point while the reference's variance was 15% of F, so
+    // the floor was the metric, not the reference, and no depth would have
+    // removed it. Pairs sidestep both. The denominator's Jensen bias at 3%
+    // relative noise is of order 0.1% and is left where it is.
+    // The statistic is a plain mean squared difference, from the block-error
+    // kernel at block 1 -- not relMSE, whose 1/(b^2 + 1e-2) weight lets dark
+    // pixels dominate and gives it a tail heavy enough that four pairs fitted
+    // exponents of -0.43 twice with adjacent ratios scattered 1.2x to 2.3x
+    // around 2: reading that as a shortfall was reading noise. An unweighted
+    // square has the tail of the signal, not of the weight.
+    auto madeBlock = gpu::ComputeKernel::create(*gpu->library, "lrt/test/block_error", "blockError");
+    if (!madeBlock) FAIL(madeBlock.error().toString());
+    gpu::ComputeKernel blockError = std::move(*madeBlock);
+    gpu::BufferDesc momentsDesc;
+    momentsDesc.bytes = 3 * sizeof(float);
+    momentsDesc.elementBytes = sizeof(float);
+    momentsDesc.label = "ladder.moments";
+    auto moments = gpu::Buffer::create(*gpu->device, momentsDesc);
+    REQUIRE(moments);
+    const auto meanSquare = [&](const render::RenderTargets& a, const render::RenderTargets& b) {
+        gpu::CommandBatch batch(*gpu->device);
+        blockError.dispatch(batch, {1, 1, 1}, [&](rhi::ShaderCursor cursor) {
+            cursor["a"].setBinding(a.colour.rhi());
+            cursor["b"].setBinding(b.colour.rhi());
+            cursor["moments"].setBinding(moments->rhi());
+            cursor["params"]["width"].setData(w);
+            cursor["params"]["height"].setData(h);
+            cursor["params"]["block"].setData(uint32_t{1});
+        });
+        REQUIRE(batch.submit(true));
+        float m[3] = {0.0F, 0.0F, 0.0F};
+        REQUIRE(moments->read(*gpu->device, 0, sizeof(m), m));
+        return static_cast<double>(m[1]) / static_cast<double>(m[2]);
+    };
+
+    // Calibrated, not chosen: five runs of a shallow ladder (32..512, eight
+    // pairs) fitted -0.428, -0.435, -0.440, -0.448 and -0.448 with adjacent
+    // ratios scattered from 1.47 to 2.51 around the law's 2; a deep probe
+    // (256..4096, four pairs) fitted -0.488 and showed no floor -- 2048 paths
+    // gave 5.5e-7 where a floor would have held it at 1.25e-6. So the law
+    // holds and the shallow scatter is the statistic's. The window below is
+    // that scatter with room, and it still rejects no convergence (0), a floor
+    // (-0.3) and a linear law (-1).
+    const std::array<uint32_t, 5> counts{64, 128, 256, 512, 1024};
+    constexpr uint32_t kPairs = 6;
+    std::array<double, 5> rms{};
+    for (size_t k = 0; k < counts.size(); ++k) {
+        std::array<double, kPairs> variances{};
+        for (uint32_t pair = 0; pair < kPairs; ++pair) {
+            render::RenderTargets first;
+            render::RenderTargets second;
+            const uint32_t base = (static_cast<uint32_t>(k) * 32u + pair * 2u + 1u) * 1000000u;
+            gather(counts[k], counts[k], base, first);
+            gather(counts[k], counts[k], base + 500000u, second);
+            variances[pair] = meanSquare(first, second) / 2.0;
+        }
+        // The median over pairs, because the signal has a heavy tail of its
+        // own: a bounce that lands on the wall beside the light is rare and
+        // bright, and one such pair read 3.5x its seven neighbours. The mean
+        // of eight is at that pair's mercy; the median is not, and it is
+        // still the variance a typical pair sees.
+        std::sort(variances.begin(), variances.end());
+        const double median = 0.5 * (variances[kPairs / 2 - 1] + variances[kPairs / 2]);
+        double mean = 0.0;
+        for (double v : variances) {
+            mean += v / kPairs;
+        }
+        rms[k] = std::sqrt(median);
+        std::printf("  %5u paths: variance median %.4e, mean %.4e over %u pairs (%.4e to %.4e, spread %.2fx)\n",
+                    counts[k], median, mean, kPairs, variances.front(), variances.back(),
+                    variances.back() / variances.front());
+    }
+    // Least squares on log(rms) against log(N): the slope is the exponent.
+    double sx = 0.0, sy = 0.0, sxx = 0.0, sxy = 0.0;
+    for (size_t k = 0; k < counts.size(); ++k) {
+        const double x = std::log(static_cast<double>(counts[k]));
+        const double y = std::log(rms[k]);
+        sx += x; sy += y; sxx += x * x; sxy += x * y;
+    }
+    const double n = static_cast<double>(counts.size());
+    const double slope = (n * sxy - sx * sy) / (n * sxx - sx * sx);
+    std::printf("  fitted exponent over five points: %.3f (the law: -0.500)\n", slope);
+    CHECK(slope < -0.42);
+    CHECK(slope > -0.58);
+}
+
+// A white furnace: the path tracer and unweighted next event estimation must
+// gather the same light.
+//
+// This case was written as a prediction of a defect, before the defect was
+// fixed. gatherLight used to weigh every non-delta light sample by
+// misWeight(lightDensity, stackPdf) -- but the strategy that weight is shared
+// with never covered an analytic light. BSDF sampling collects emission from
+// *geometry*, a LightTable light has none, and a bounce ray that escapes
+// breaks without gathering the dome it passed through, so the estimator was
+// scaled down and nothing paid the remainder back.
+//
+// For an imageless dome the two densities are the same function: sampleLight
+// returns max(dot(n,wi),0)/pi (lights.slang, kLightDome) and Oren-Nayar's
+// pdfLocal returns wi.z * kInvPi (lobes.slang), and misWeight(a,a) is 0.5. The
+// prediction was that a white furnace reads half of what MaterialShading reads
+// with `sum += f * ls.radiance / (ls.pdf * choice.probability)`. Measured
+// before the fix: p99 relative 0.5453. The weight is gone, and what is left
+// here is agreement.
+TEST_CASE("a white furnace gathers the same light path traced as by next event estimation",
+          "[technique][path][mis]") {
+    LRT_REQUIRE_GPU(gpu);
+    const gpu::Caps& caps = gpu->device->caps();
+    if (!caps.rasterization) {
+        SKIP("no rasterisation on this device");
+    }
+    std::vector<std::filesystem::path> shaderPaths;
+    for (const std::string& path : gpu->device->shaderSearchPaths()) {
+        shaderPaths.emplace_back(path);
+    }
+    auto compiler = material::MaterialCompiler::create({LRT_MATERIALX_ROOT}, shaderPaths);
+    auto textures = material::TextureStore::create(*gpu->library);
+    auto builder = geom::MeshBuilder::create(*gpu->library);
+    auto scene = world::GpuScene::create(*gpu->library);
+    auto raster = technique::VisibilityRaster::create(*gpu->library);
+    auto programs = technique::MaterialPrograms::create(*gpu->library);
+    auto shading = technique::MaterialShading::create(*gpu->library);
+    auto tracer = technique::PathTracer::create(*gpu->library);
+    auto table = light::LightTable::create(*gpu->device);
+    if (!compiler) FAIL(compiler.error().toString());
+    if (!textures) FAIL(textures.error().toString());
+    if (!builder) FAIL(builder.error().toString());
+    if (!scene) FAIL(scene.error().toString());
+    if (!raster) FAIL(raster.error().toString());
+    if (!programs) FAIL(programs.error().toString());
+    if (!shading) FAIL(shading.error().toString());
+    if (!tracer) FAIL(tracer.error().toString());
+    if (!table) FAIL(table.error().toString());
+    // Albedo 1: a white furnace. Roughness 0 so the lobe is the Lambert whose
+    // pdf is exactly the dome's.
+    auto white = (*compiler)->compileXml(
+        "<?xml version=\"1.0\"?>\n<materialx version=\"1.39\">\n"
+        "  <oren_nayar_diffuse_bsdf name=\"d\" type=\"BSDF\">\n"
+        "    <input name=\"color\" type=\"color3\" value=\"1, 1, 1\" />\n"
+        "    <input name=\"roughness\" type=\"float\" value=\"0\" />\n"
+        "  </oren_nayar_diffuse_bsdf>\n"
+        "  <surface name=\"shader\" type=\"surfaceshader\"><input name=\"bsdf\" type=\"BSDF\" nodename=\"d\" /></surface>\n"
+        "  <surfacematerial name=\"material\" type=\"material\">\n"
+        "    <input name=\"surfaceshader\" type=\"surfaceshader\" nodename=\"shader\" />\n"
+        "  </surfacematerial>\n</materialx>\n");
+    if (!white) FAIL(white.error().toString());
+    REQUIRE(programs->setModules(std::span<const material::CompiledMaterial>(&*white, 1)));
+    REQUIRE(shading->setPrograms(*programs));
+    REQUIRE(tracer->setPrograms(*programs));
+    const std::vector<float> blob = material::MaterialCompiler::parameters(
+        *white, **textures, [](const std::string&) { return 0xFFFFFFFFu; });
+    REQUIRE((*textures)->commit());
+    const std::vector<technique::MaterialRecord> rows{{0, 0, 0, 0}, {1, 0, 0, 0}};
+    auto records = gpu::Buffer::fromSpan<technique::MaterialRecord>(*gpu->device, rows, "materials.records");
+    auto blobBuffer = gpu::Buffer::fromSpan<float>(*gpu->device, blob, "materials.blob");
+    REQUIRE(records);
+    REQUIRE(blobBuffer);
+
+    const uint32_t w = 96;
+    const uint32_t h = 72;
+    render::Camera camera = render::Camera::lookingAt({0.0, 0.0, 0.0}, {0.0, 0.0, -1.0});
+    camera.lens.focal = 35.0;
+    const render::Projection projection = render::projectionFor(camera, w, h);
+    world::MeshInstance instance;
+    instance.mesh = lambertSquare(*builder, 1.0F);
+    instance.objectToWorld = aofx::xform::translation({0.0, 0.0, -5.0});
+    instance.material = 1;
+    REQUIRE(scene->update(std::span<const world::MeshInstance>(&instance, 1), projection));
+    // An imageless dome: no texture, so domeHasImage is false and sampleLight
+    // gives the cosine density.
+    light::Light sky;
+    sky.kind = light::LightKind::Dome;
+    sky.shadow = false;
+    REQUIRE(table->set(std::span<const light::Light>(&sky, 1)));
+
+    technique::VisibilityTargets visibility;
+    render::RenderTargets direct;
+    render::RenderTargets traced;
+    technique::MaterialFrame frame;
+    frame.programs = &*programs;
+    frame.scene = &*scene;
+    frame.records = &*records;
+    frame.blob = &*blobBuffer;
+    frame.textures = &**textures;
+    frame.lights = &*table;
+    frame.samples = 4096;
+    {
+        gpu::CommandBatch batch(*gpu->device);
+        REQUIRE(raster->render(batch, *scene, projection, w, h, visibility));
+        REQUIRE(shading->shade(batch, visibility, projection, frame, direct));
+        REQUIRE(batch.submit(true));
+    }
+    // No bounce at all: the only thing under test is the direct term's weight.
+    technique::PathSettings paths;
+    paths.samples = 512;
+    paths.bounces = 0;
+    paths.accumulate = true;
+    for (uint32_t pass = 0; pass < 8; ++pass) {
+        paths.seed = pass * 7919u;
+        gpu::CommandBatch batch(*gpu->device);
+        REQUIRE(tracer->trace(batch, visibility, projection, frame, paths, traced));
+        REQUIRE(batch.submit(true));
+    }
+    auto diff = render::compareHdr(*gpu->library, traced.colour, direct.colour, w, h);
+    REQUIRE(diff);
+    std::printf("  white furnace, path traced against unweighted NEE: relMSE %.4e, p99 relative %.4f, max %.4f\n",
+                diff->relMse, diff->p99Relative, diff->maxRelative);
+    // Agreement, now that nothing is weighted away. Measured with the weight
+    // gone: relMSE 1.3e-11, p99 relative 0.0000, max 0.0003 -- so the bound is
+    // what 4096 light samples against 4096 paths actually leave, not a number
+    // chosen to pass. Before the fix this read 0.5453.
+    CHECK(diff->p99Relative < 0.01);
+    CHECK(diff->maxRelative < 0.01);
+}
+
+// D1: the same samples, gathered three ways, must give the same frame.
+//
+// random() mixes (sample + path.seed), and sample runs 0..samples-1 within a
+// pass, so a seed that advances per *pass* makes two splits of the same total
+// draw different sample sets -- which is why 1x256 and 4x64 are not comparable
+// as the ladder above gathers them. Advance the seed by the samples taken
+// instead and all three splits cover exactly [base, base + total), so what is
+// left between them is accumulation order alone.
+//
+// This separates the two live explanations for the 1/sqrt(N) anomaly. If the
+// three disagree materially, the fault is that a sample's index is relative to
+// its pass. If they agree, the sampler's per-pixel structure is what is left.
+TEST_CASE("the same paths gathered in one pass and in many give the same frame",
+          "[technique][path]") {
+    LRT_REQUIRE_GPU(gpu);
+    const gpu::Caps& caps = gpu->device->caps();
+    if (!caps.rasterization) {
+        SKIP("no rasterisation on this device");
+    }
+    if (!caps.rayQuery || !caps.accelerationStructure) {
+        SKIP("no ray queries on this device: the kernel is generated without a bounce");
+    }
+    std::vector<std::filesystem::path> shaderPaths;
+    for (const std::string& path : gpu->device->shaderSearchPaths()) {
+        shaderPaths.emplace_back(path);
+    }
+    auto compiler = material::MaterialCompiler::create({LRT_MATERIALX_ROOT}, shaderPaths);
+    auto textures = material::TextureStore::create(*gpu->library);
+    auto builder = geom::MeshBuilder::create(*gpu->library);
+    auto scene = world::GpuScene::create(*gpu->library);
+    auto accel = world::RayTracingScene::create(*gpu->library);
+    auto raster = technique::VisibilityRaster::create(*gpu->library);
+    auto programs = technique::MaterialPrograms::create(*gpu->library);
+    auto tracer = technique::PathTracer::create(*gpu->library);
+    auto table = light::LightTable::create(*gpu->device);
+    if (!compiler) FAIL(compiler.error().toString());
+    if (!textures) FAIL(textures.error().toString());
+    if (!builder) FAIL(builder.error().toString());
+    if (!scene) FAIL(scene.error().toString());
+    if (!accel) FAIL(accel.error().toString());
+    if (!raster) FAIL(raster.error().toString());
+    if (!programs) FAIL(programs.error().toString());
+    if (!tracer) FAIL(tracer.error().toString());
+    if (!table) FAIL(table.error().toString());
+    auto lambert = (*compiler)->compileXml(
+        "<?xml version=\"1.0\"?>\n<materialx version=\"1.39\">\n"
+        "  <oren_nayar_diffuse_bsdf name=\"d\" type=\"BSDF\">\n"
+        "    <input name=\"color\" type=\"color3\" value=\"0.8, 0.8, 0.8\" />\n"
+        "    <input name=\"roughness\" type=\"float\" value=\"0\" />\n"
+        "  </oren_nayar_diffuse_bsdf>\n"
+        "  <surface name=\"shader\" type=\"surfaceshader\"><input name=\"bsdf\" type=\"BSDF\" nodename=\"d\" /></surface>\n"
+        "  <surfacematerial name=\"material\" type=\"material\">\n"
+        "    <input name=\"surfaceshader\" type=\"surfaceshader\" nodename=\"shader\" />\n"
+        "  </surfacematerial>\n</materialx>\n");
+    if (!lambert) FAIL(lambert.error().toString());
+    REQUIRE(programs->setModules(std::span<const material::CompiledMaterial>(&*lambert, 1)));
+    REQUIRE(tracer->setPrograms(*programs));
+    const std::vector<float> blob = material::MaterialCompiler::parameters(
+        *lambert, **textures, [](const std::string&) { return 0xFFFFFFFFu; });
+    REQUIRE((*textures)->commit());
+    const std::vector<technique::MaterialRecord> rows{{0, 0, 0, 0}, {1, 0, 0, 0}};
+    auto records = gpu::Buffer::fromSpan<technique::MaterialRecord>(*gpu->device, rows, "materials.records");
+    auto blobBuffer = gpu::Buffer::fromSpan<float>(*gpu->device, blob, "materials.blob");
+    REQUIRE(records);
+    REQUIRE(blobBuffer);
+
+    const uint32_t w = 64;
+    const uint32_t h = 48;
+    render::Camera camera = render::Camera::lookingAt({0.0, 0.0, 0.0}, {0.0, 0.0, -1.0});
+    camera.lens.focal = 35.0;
+    const render::Projection projection = render::projectionFor(camera, w, h);
+    std::array<world::MeshInstance, 2> both;
+    both[0].mesh = lambertSquare(*builder, 1.0F);
+    both[0].objectToWorld = aofx::xform::translation({0.0, 0.0, -5.0});
+    both[0].material = 1;
+    both[1].mesh = lambertSquare(*builder, 1.0F);
+    both[1].objectToWorld = aofx::xform::translation({1.0, 0.0, -4.0}) * aofx::xform::rotationY(-90.0);
+    both[1].material = 1;
+    REQUIRE(scene->update(std::span<const world::MeshInstance>(both.data(), both.size()), projection));
+    REQUIRE(accel->build(*scene));
+    light::Light lamp;
+    lamp.kind = light::LightKind::Sphere;
+    lamp.lightToWorld = aofx::xform::translation({0.0, 0.0, -3.0});
+    lamp.radius = 0.4F;
+    lamp.shadow = false;
+    REQUIRE(table->set(std::span<const light::Light>(&lamp, 1)));
+
+    technique::VisibilityTargets visibility;
+    technique::MaterialFrame frame;
+    frame.programs = &*programs;
+    frame.scene = &*scene;
+    frame.records = &*records;
+    frame.blob = &*blobBuffer;
+    frame.textures = &**textures;
+    frame.lights = &*table;
+    frame.shadows = accel->topLevel();
+    frame.samples = 1;
+    {
+        gpu::CommandBatch batch(*gpu->device);
+        REQUIRE(raster->render(batch, *scene, projection, w, h, visibility));
+        REQUIRE(batch.submit(true));
+    }
+
+    // The seed advances by the samples already taken, so every split covers
+    // exactly [base, base + total).
+    const uint32_t kBase = 4242u;
+    const uint32_t kTotal = 256u;
+    const auto gatherAbsolute = [&](uint32_t perPass, render::RenderTargets& out) {
+        tracer->restart();
+        technique::PathSettings paths;
+        paths.samples = perPass;
+        paths.bounces = 1;
+        paths.accumulate = true;
+        for (uint32_t taken = 0; taken < kTotal; taken += perPass) {
+            paths.seed = kBase;   // the sample index is absolute; the seed picks the stream
+            gpu::CommandBatch batch(*gpu->device);
+            REQUIRE(tracer->trace(batch, visibility, projection, frame, paths, out));
+            REQUIRE(batch.submit(true));
+        }
+        REQUIRE(tracer->accumulated() == kTotal);
+    };
+
+    render::RenderTargets onePass;
+    render::RenderTargets fourPasses;
+    render::RenderTargets sixteenPasses;
+    gatherAbsolute(256, onePass);
+    gatherAbsolute(64, fourPasses);
+    gatherAbsolute(16, sixteenPasses);
+
+    auto four = render::compareHdr(*gpu->library, fourPasses.colour, onePass.colour, w, h);
+    auto sixteen = render::compareHdr(*gpu->library, sixteenPasses.colour, onePass.colour, w, h);
+    REQUIRE(four);
+    REQUIRE(sixteen);
+    std::printf("  1x256 against 4x64:  relMSE %.4e, max relative %.4e\n", four->relMse, four->maxRelative);
+    std::printf("  1x256 against 16x16: relMSE %.4e, max relative %.4e\n", sixteen->relMse, sixteen->maxRelative);
+    // Float addition is not associative, so the three differ in accumulation
+    // order and nothing else.
+    CHECK(four->relMse < 1e-9);
+    CHECK(sixteen->relMse < 1e-9);
+}
+
+// D5: does each pixel get its own sample sequence?
+//
+// The 1/sqrt(N) ladder's 256-path point spreads by a factor 3.4 between draws
+// while its neighbours spread by 14% and 5%. The mechanism on the table is that
+// random() mixes pixel, sample, bounce and dimension with XOR before its
+// avalanche, so a pixel's pre-avalanche values are the sample's contribution
+// XORed with a per-pixel constant: pixels can share sample sets, which leaves
+// the mean alone and multiplies the variance of the mean over the frame.
+//
+// What this instrument can and cannot see, stated before it is read: the
+// fingerprint folds a pixel's draws in order, so it catches pixels walking the
+// same *sequence*. It does not catch pixels walking the same *set* in another
+// order -- and that is the shape the XOR would produce. So a zero here narrows
+// the question, it does not clear the sampler. The within-pixel counter is the
+// armed control and must be 0.
+TEST_CASE("each pixel's first path samples are its own", "[technique][path][rng]") {
+    LRT_REQUIRE_GPU(gpu);
+    auto sort = gpu::RadixSort::create(*gpu->library);
+    if (!sort) FAIL(sort.error().toString());
+    // test::kernel derives the entry from the module name; this probe has three
+    // entries, so they are named outright.
+    auto madeFingerprint = gpu::ComputeKernel::create(*gpu->library, "lrt/test/rng_probe", "rngFingerprint");
+    auto madeDuplicates = gpu::ComputeKernel::create(*gpu->library, "lrt/test/rng_probe", "rngDuplicates");
+    auto madeWithin = gpu::ComputeKernel::create(*gpu->library, "lrt/test/rng_probe", "rngWithinPixel");
+    auto madeSetPrint = gpu::ComputeKernel::create(*gpu->library, "lrt/test/rng_probe", "rngSetPrint");
+    if (!madeSetPrint) FAIL(madeSetPrint.error().toString());
+    if (!madeFingerprint) FAIL(madeFingerprint.error().toString());
+    if (!madeDuplicates) FAIL(madeDuplicates.error().toString());
+    if (!madeWithin) FAIL(madeWithin.error().toString());
+    gpu::ComputeKernel fingerprint = std::move(*madeFingerprint);
+    gpu::ComputeKernel duplicates = std::move(*madeDuplicates);
+    gpu::ComputeKernel withinPixel = std::move(*madeWithin);
+    gpu::ComputeKernel setPrint = std::move(*madeSetPrint);
+
+    const uint32_t w = 64;
+    const uint32_t h = 48;
+    const uint32_t pixels = w * h;
+    const uint32_t draws = 16;
+    gpu::SortBuffers buffers;
+    buffers.keysLo = test::uintBuffer(*gpu->device, pixels, "rng.keysLo");
+    buffers.keysHi = test::uintBuffer(*gpu->device, pixels, "rng.keysHi");
+    buffers.values = test::uintBuffer(*gpu->device, pixels, "rng.values");
+    buffers.scratchKeysLo = test::uintBuffer(*gpu->device, pixels, "rng.scratchKeysLo");
+    buffers.scratchKeysHi = test::uintBuffer(*gpu->device, pixels, "rng.scratchKeysHi");
+    buffers.scratchValues = test::uintBuffer(*gpu->device, pixels, "rng.scratchValues");
+    gpu::Buffer counts = test::uintBuffer(*gpu->device, 2, "rng.counts");
+
+    // The seeds the ladder's 256-path point actually used.
+    for (const uint32_t seed : {15633u * 7919u, 16610u * 7919u, 4242u}) {
+        const auto bindProbe = [&](rhi::ShaderCursor cursor) {
+            cursor["keysLo"].setBinding(buffers.keysLo.rhi());
+            cursor["keysHi"].setBinding(buffers.keysHi.rhi());
+            cursor["values"].setBinding(buffers.values.rhi());
+            cursor["counts"].setBinding(counts.rhi());
+            cursor["probe"]["width"].setData(w);
+            cursor["probe"]["height"].setData(h);
+            cursor["probe"]["seed"].setData(seed);
+            cursor["probe"]["draws"].setData(draws);
+        };
+        {
+            gpu::CommandBatch batch(*gpu->device);
+            fingerprint.dispatch(batch, {pixels, 1, 1}, bindProbe);
+            REQUIRE(batch.submit(true));
+        }
+        {
+            gpu::CommandBatch batch(*gpu->device);
+            REQUIRE(sort->sort(batch, buffers, pixels, 64));
+            REQUIRE(batch.submit(true));
+        }
+        {
+            gpu::CommandBatch batch(*gpu->device);
+            duplicates.dispatch(batch, {1, 1, 1}, bindProbe);
+            withinPixel.dispatch(batch, {1, 1, 1}, bindProbe);
+            REQUIRE(batch.submit(true));
+        }
+        uint32_t c[2] = {0, 0};
+        REQUIRE(counts.read(*gpu->device, 0, sizeof(c), c));
+        std::printf("  seed %10u: %u of %u pixels share a sequence, %u repeats within a pixel\n", seed, c[0],
+                    pixels, c[1]);
+        // The control: the sample index is bijective through the avalanche.
+        CHECK(c[1] == 0);
+
+        // And again with an order-independent fingerprint, which is the one
+        // that can see what the ordered one cannot: two pixels drawing the same
+        // SET of values in a different order. That is the shape a GF(2) mix of
+        // pixel and sample would produce.
+        {
+            gpu::CommandBatch batch(*gpu->device);
+            setPrint.dispatch(batch, {pixels, 1, 1}, bindProbe);
+            REQUIRE(batch.submit(true));
+        }
+        {
+            gpu::CommandBatch batch(*gpu->device);
+            REQUIRE(sort->sort(batch, buffers, pixels, 64));
+            REQUIRE(batch.submit(true));
+        }
+        {
+            gpu::CommandBatch batch(*gpu->device);
+            duplicates.dispatch(batch, {1, 1, 1}, bindProbe);
+            REQUIRE(batch.submit(true));
+        }
+        uint32_t sets[2] = {0, 0};
+        REQUIRE(counts.read(*gpu->device, 0, sizeof(sets), sets));
+        std::printf("  seed %10u: %u of %u pixels share a sample SET\n", seed, sets[0], pixels);
+    }
+}
+
+// D4: are neighbouring pixels' errors independent?
+//
+// The sampler is cleared by the fingerprints above: no two pixels share a
+// sequence or a set. This asks the same question from the other end -- the
+// image. If per-pixel errors are independent, the variance of a block's mean
+// error falls as 1/pixelsInBlock: a 2x2 block quarters it, a 4x4 sixteenths
+// it. Correlated errors do not average away like that. The mean is the same
+// either way, which is why the ladder's means look sane while its spread does
+// not.
+TEST_CASE("neighbouring pixels' path traced errors average away as independent errors do",
+          "[technique][path][rng]") {
+    LRT_REQUIRE_GPU(gpu);
+    const gpu::Caps& caps = gpu->device->caps();
+    if (!caps.rasterization) {
+        SKIP("no rasterisation on this device");
+    }
+    if (!caps.rayQuery || !caps.accelerationStructure) {
+        SKIP("no ray queries on this device");
+    }
+    std::vector<std::filesystem::path> shaderPaths;
+    for (const std::string& path : gpu->device->shaderSearchPaths()) {
+        shaderPaths.emplace_back(path);
+    }
+    auto compiler = material::MaterialCompiler::create({LRT_MATERIALX_ROOT}, shaderPaths);
+    auto textures = material::TextureStore::create(*gpu->library);
+    auto builder = geom::MeshBuilder::create(*gpu->library);
+    auto scene = world::GpuScene::create(*gpu->library);
+    auto accel = world::RayTracingScene::create(*gpu->library);
+    auto raster = technique::VisibilityRaster::create(*gpu->library);
+    auto programs = technique::MaterialPrograms::create(*gpu->library);
+    auto tracer = technique::PathTracer::create(*gpu->library);
+    auto table = light::LightTable::create(*gpu->device);
+    if (!compiler) FAIL(compiler.error().toString());
+    if (!textures) FAIL(textures.error().toString());
+    if (!builder) FAIL(builder.error().toString());
+    if (!scene) FAIL(scene.error().toString());
+    if (!accel) FAIL(accel.error().toString());
+    if (!raster) FAIL(raster.error().toString());
+    if (!programs) FAIL(programs.error().toString());
+    if (!tracer) FAIL(tracer.error().toString());
+    if (!table) FAIL(table.error().toString());
+    auto lambert = (*compiler)->compileXml(
+        "<?xml version=\"1.0\"?>\n<materialx version=\"1.39\">\n"
+        "  <oren_nayar_diffuse_bsdf name=\"d\" type=\"BSDF\">\n"
+        "    <input name=\"color\" type=\"color3\" value=\"0.8, 0.8, 0.8\" />\n"
+        "    <input name=\"roughness\" type=\"float\" value=\"0\" />\n"
+        "  </oren_nayar_diffuse_bsdf>\n"
+        "  <surface name=\"shader\" type=\"surfaceshader\"><input name=\"bsdf\" type=\"BSDF\" nodename=\"d\" /></surface>\n"
+        "  <surfacematerial name=\"material\" type=\"material\">\n"
+        "    <input name=\"surfaceshader\" type=\"surfaceshader\" nodename=\"shader\" />\n"
+        "  </surfacematerial>\n</materialx>\n");
+    if (!lambert) FAIL(lambert.error().toString());
+    REQUIRE(programs->setModules(std::span<const material::CompiledMaterial>(&*lambert, 1)));
+    REQUIRE(tracer->setPrograms(*programs));
+    const std::vector<float> blob = material::MaterialCompiler::parameters(
+        *lambert, **textures, [](const std::string&) { return 0xFFFFFFFFu; });
+    REQUIRE((*textures)->commit());
+    const std::vector<technique::MaterialRecord> rows{{0, 0, 0, 0}, {1, 0, 0, 0}};
+    auto records = gpu::Buffer::fromSpan<technique::MaterialRecord>(*gpu->device, rows, "materials.records");
+    auto blobBuffer = gpu::Buffer::fromSpan<float>(*gpu->device, blob, "materials.blob");
+    REQUIRE(records);
+    REQUIRE(blobBuffer);
+
+    const uint32_t w = 64;
+    const uint32_t h = 48;
+    render::Camera camera = render::Camera::lookingAt({0.0, 0.0, 0.0}, {0.0, 0.0, -1.0});
+    camera.lens.focal = 35.0;
+    const render::Projection projection = render::projectionFor(camera, w, h);
+    std::array<world::MeshInstance, 2> both;
+    both[0].mesh = lambertSquare(*builder, 1.0F);
+    both[0].objectToWorld = aofx::xform::translation({0.0, 0.0, -5.0});
+    both[0].material = 1;
+    both[1].mesh = lambertSquare(*builder, 1.0F);
+    both[1].objectToWorld = aofx::xform::translation({1.0, 0.0, -4.0}) * aofx::xform::rotationY(-90.0);
+    both[1].material = 1;
+    REQUIRE(scene->update(std::span<const world::MeshInstance>(both.data(), both.size()), projection));
+    REQUIRE(accel->build(*scene));
+    light::Light lamp;
+    lamp.kind = light::LightKind::Sphere;
+    lamp.lightToWorld = aofx::xform::translation({0.0, 0.0, -3.0});
+    lamp.radius = 0.4F;
+    lamp.shadow = false;
+    REQUIRE(table->set(std::span<const light::Light>(&lamp, 1)));
+
+    technique::VisibilityTargets visibility;
+    technique::MaterialFrame frame;
+    frame.programs = &*programs;
+    frame.scene = &*scene;
+    frame.records = &*records;
+    frame.blob = &*blobBuffer;
+    frame.textures = &**textures;
+    frame.lights = &*table;
+    frame.shadows = accel->topLevel();
+    frame.samples = 1;
+    {
+        gpu::CommandBatch batch(*gpu->device);
+        REQUIRE(raster->render(batch, *scene, projection, w, h, visibility));
+        REQUIRE(batch.submit(true));
+    }
+    // Absolute seeds: the estimate's samples and the reference's never overlap.
+    const auto gather = [&](uint32_t total, uint32_t perPass, uint32_t base, render::RenderTargets& out) {
+        tracer->restart();
+        technique::PathSettings paths;
+        paths.samples = perPass;
+        paths.bounces = 1;
+        paths.accumulate = true;
+        for (uint32_t taken = 0; taken < total; taken += perPass) {
+            paths.seed = base;   // the sample index is absolute; the seed picks the stream
+            gpu::CommandBatch batch(*gpu->device);
+            REQUIRE(tracer->trace(batch, visibility, projection, frame, paths, out));
+            REQUIRE(batch.submit(true));
+        }
+    };
+    render::RenderTargets reference;
+    render::RenderTargets estimate;
+    gather(4096, 512, 1000000u, reference);
+    gather(256, 256, 0u, estimate);
+
+    auto made = gpu::ComputeKernel::create(*gpu->library, "lrt/test/block_error", "blockError");
+    if (!made) FAIL(made.error().toString());
+    gpu::ComputeKernel blockError = std::move(*made);
+    gpu::BufferDesc desc;
+    desc.bytes = 3 * sizeof(float);
+    desc.elementBytes = sizeof(float);
+    desc.label = "block.moments";
+    auto moments = gpu::Buffer::create(*gpu->device, desc);
+    REQUIRE(moments);
+    double variance[3] = {0.0, 0.0, 0.0};
+    const uint32_t blocks[3] = {1, 2, 4};
+    for (size_t k = 0; k < 3; ++k) {
+        gpu::CommandBatch batch(*gpu->device);
+        blockError.dispatch(batch, {1, 1, 1}, [&](rhi::ShaderCursor cursor) {
+            cursor["a"].setBinding(estimate.colour.rhi());
+            cursor["b"].setBinding(reference.colour.rhi());
+            cursor["moments"].setBinding(moments->rhi());
+            cursor["params"]["width"].setData(w);
+            cursor["params"]["height"].setData(h);
+            cursor["params"]["block"].setData(blocks[k]);
+        });
+        REQUIRE(batch.submit(true));
+        float m[3] = {0.0F, 0.0F, 0.0F};
+        REQUIRE(moments->read(*gpu->device, 0, sizeof(m), m));
+        const double mean = m[0] / m[2];
+        variance[k] = m[1] / m[2] - mean * mean;
+        std::printf("  block %u: %5.0f blocks, mean error %.3e, variance of block mean %.4e\n", blocks[k], m[2],
+                    mean, variance[k]);
+    }
+    const double fall2 = variance[0] / variance[1];
+    const double fall4 = variance[0] / variance[2];
+    std::printf("  variance fell by %.2fx at 2x2 (independent: 4) and %.2fx at 4x4 (independent: 16)\n", fall2,
+                fall4);
+    // Independent errors average away as 1/pixels; anything markedly less says
+    // neighbours share their noise. Blocks that straddle the wall's edge carry
+    // a real mean-error step, which keeps the fall a little under ideal.
+    CHECK(fall2 > 2.5);
+    CHECK(fall4 > 8.0);
+}
+

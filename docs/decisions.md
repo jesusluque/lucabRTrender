@@ -1356,14 +1356,21 @@ two can be told apart by exactly one thing: the bounce.
   `material_surface.slang`, its material evaluated into the same lobe stack,
   and its direct light gathered by next event estimation with the light chosen
   by power -- all of it the machinery M5 left behind.
-- **MIS** by the power heuristic between sampling a light and sampling the
-  material, so the two strategies do not double count. A delta light takes the
-  whole weight, since no sampled direction can find it.
+- **No MIS, on purpose.** Next event estimation covers the analytic lights of
+  the light table and sampling the material covers emissive geometry: disjoint
+  sets, so neither strategy is weighed against the other. There was a power
+  heuristic here, and it was wrong -- see below.
 - **The bounce** samples the material (`stackSample`), traces where it points,
   shades what it lands on, and carries that surface's emission and direct
   light back through the path's throughput.
-- **Accumulation** is a running mean: a call adds its samples to a sum and
-  says how many the frame holds, which is what a progressive render needs.
+- **Accumulation** is a running mean of each sample's colour times its
+  opacity: a call adds its samples to a sum and says how many the frame holds,
+  which is what a progressive render needs.
+- **The sampler** folds pixel, stream, absolute path index, bounce and
+  dimension through a PCG hash one after another. The path index is absolute
+  (`accumulated + sample`), so a frame gathered in one pass and in many draws
+  the same samples: 256 paths in one pass against 64 in each of four differ by
+  relMSE 3.9e-15, accumulation order alone.
 - **Where the device does not trace**, there is no bounce to trace: the kernel
   is generated without one and gathers direct light alone.
 
@@ -1411,10 +1418,24 @@ finished.
 
 ### How it is checked
 
+- **A white furnace** under an imageless dome, path traced against unweighted
+  NEE: p99 relative 0.0000, max 0.0003 at 4096 light samples against 4096
+  paths. The first of the plan's checks, and the one the MIS weight failed.
 - **One bounce against the raster's direct light**, in a scene with nothing
   for a bounce to find: p99 1 and max 1, with no pixel beyond 2, over 4096
   accumulated paths. That is the plan's check, and it holds the two
   estimators to each other rather than to a tolerance of their own.
+- **The error falls as 1/sqrt(N)**, measured without a reference: pairs of
+  independent estimates at 64 to 1024 paths, six pairs a point, the median
+  of their mean squared difference, and a least-squares exponent on the
+  square root: -0.449, window -0.42 to -0.58 calibrated as above. The
+  plan asked for a 64k spp reference; measured, that is ~80 s for one scene
+  at the other cases' resolution, and depth of reference is not what verifies
+  a law -- the ratio between points is, and a reference only adds a floor.
+- **The sampler**, three ways: the same 256 paths in one, four and sixteen
+  passes agree to 3.9e-15; no two of 3072 pixels share a sample sequence or a
+  sample set, at the seeds the ladder used; and block-averaged errors fall as
+  independent errors do (4.42x and 15.94x for 2x2 and 4x4).
 - **The bounce carries light from a second surface.** The check above proves
   the bounce takes nothing away where there is nothing to find -- which is
   also exactly what an unbound acceleration structure would look like, and
@@ -1441,6 +1462,52 @@ finished.
   says the revision is armed rather than decorative: a revision nothing raised
   would go on averaging over a scene that had changed, and no image would look
   wrong enough to say so.
+
+### What was wrong, and what was not
+
+Two defects, found by reading before any new test was run, and then measured.
+
+- **The MIS weight was one-sided and lost half the dome.** `gatherLight`
+  weighed every non-delta light sample by the power heuristic against the
+  material's pdf -- but the strategy it was sharing with never covered an
+  analytic light: sampling the material collects emission from geometry, a
+  table light has none, and a bounce ray that escapes broke without gathering
+  the dome it passed through. The estimator was scaled down and nothing paid
+  the remainder. For an imageless dome and a Lambert lobe the two densities
+  are the same function (`cos/pi`), so the weight was exactly one half.
+  Predicted and then measured: a white furnace, path traced against
+  MaterialShading's unweighted NEE, read p99 relative **0.5453** before and
+  **0.0000** (relMSE 1.3e-11, max 0.0003) after. Every earlier path check had
+  passed because it used a sphere of radius 0.4 at distance 2, where the
+  weight is 0.9984 -- invisible at p99 1 in eight bits. That is the "two
+  estimators wrong in the same way" the bounce test warns about, met in the
+  flesh.
+- **The accumulation was a product of means.** `mean(colour) * mean(alpha)`
+  rather than `mean(colour * alpha)`: identical while every sample is opaque,
+  which was every test, and biased the moment opacity varied.
+
+And one anomaly that took fourteen hypotheses to close, each killed by a
+measurement. The 1/sqrt(N) ladder read exponents of -0.43 with one point
+spreading 3.4x between draws. In order, and what killed each: the running mean
+(read: algebraically right); the hash (read: a full avalanche); overlapping
+seeds (computed: disjoint); the split into passes (D1: 3.9e-15); the MIS weight
+and the premultiply (fixed, and the ladder did not move to its fourth
+significant figure); pixels sharing a sample *sequence* (fingerprints sorted:
+0 of 3072); pixels sharing a sample *set* in another order (a commutative
+fingerprint: 0 of 3072); neighbours' errors correlated (block variance fell
+4.42x at 2x2 and 15.94x at 4x4 against 4 and 16); the sampler itself (replaced
+by the PCG chain: -0.435 before, -0.435 after); the metric (relMSE's
+`1/(b^2 + 1e-2)` weight has a tail heavy enough that four draws are few --
+swapped for a plain mean square: -0.448); the reference (dropped: two
+independent estimates at the same N have `E[(a - b)^2] = 2 Var`, no floor by
+construction); and the mean over pairs (a bright rare bounce skews it: the
+median). What was left was the statistic's own scatter: adjacent ratios of
+1.47 to 2.51 around the law's 2, and a deep probe over 256 to 4096 paths that
+fitted **-0.488** with no floor (2048 paths at 5.5e-7 where a floor would have
+held it at 1.25e-6). The 3.4x spread was four draws of a skewed statistic on a
+lattice of seeds, read as a switch. The lesson is written into the test: the
+window is the measured scatter, and it still rejects no convergence, a floor
+and a linear law.
 
 ### Three things the ground did not turn out to be
 
@@ -1470,3 +1537,7 @@ the rest of M6 has to build:
   exposure.
 - More than one bounce is a parameter away (`PathSettings::bounces`) and has
   no check of its own yet.
+- **Real MIS**, for when the two strategies overlap: mesh lights. It needs a
+  "does this direction reach light k, and with what radiance" beside
+  `lightPdf`, which does not exist. Until then the disjointness above is the
+  argument, and a weight here would be the defect again.
