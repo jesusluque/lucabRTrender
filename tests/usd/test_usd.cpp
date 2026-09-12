@@ -1861,3 +1861,169 @@ TEST_CASE("a UsdLux light's collection reaches only what it includes",
     CHECK(n[2] > 1000);
     CHECK(n[3] == 0);      // and nothing else
 }
+
+// The traced technique over a mesh, through Hydra: what used to trace splats
+// and return now path traces the surfaces. A plane alone under one light has
+// nothing for a bounce to find, so the traced frame and the raster frame are
+// two estimators of the same direct light and must agree to within the noise
+// the paths still carry. This says nothing about accumulation: every frame
+// here is gathered in one pass.
+TEST_CASE("the rt technique path traces a mesh and agrees with the raster's direct light",
+          "[usd][gpu][mesh][path]") {
+    LRT_REQUIRE_GPU(gpu);
+    if (!gpu->device->caps().rasterization) {
+        SKIP("no rasterisation on this device");
+    }
+    const fs::path path = scratch("rt_surface.usda");
+    {
+        std::ofstream out(path);
+        out << kSquareStage
+            << "def SphereLight \"Key\"\n{\n"
+               "    bool inputs:shadow:enable = 0\n"
+               "    float inputs:radius = 0.4\n"
+               "    float inputs:intensity = 1\n"
+               "    bool inputs:normalize = 0\n"
+               "    color3f inputs:color = (1, 1, 1)\n"
+               "    double3 xformOp:translate = (0, 0, -3)\n"
+               "    uniform token[] xformOpOrder = [\"xformOp:translate\"]\n}\n"
+               "def Scope \"Materials\"\n{\n"
+               "    def Material \"Mat\"\n    {\n"
+               "        token outputs:mtlx:surface.connect = </Materials/Mat/Surface.outputs:out>\n"
+               "        def Shader \"Surface\"\n        {\n"
+               "            uniform token info:id = \"ND_surface\"\n"
+               "            token inputs:bsdf.connect = </Materials/Mat/Diffuse.outputs:out>\n"
+               "            token outputs:out\n        }\n"
+               "        def Shader \"Diffuse\"\n        {\n"
+               "            uniform token info:id = \"ND_oren_nayar_diffuse_bsdf\"\n"
+               "            color3f inputs:color = (0.8, 0.8, 0.8)\n"
+               "            float inputs:roughness = 0\n"
+               "            token outputs:out\n        }\n    }\n}\n";
+    }
+    const uint32_t w = 161;
+    const uint32_t h = 121;
+    auto renderer = usd::StageRenderer::open(path);
+    if (!renderer) FAIL(renderer.error().toString());
+    (*renderer)->setLightSamples(64);
+    // Enough paths that what is left between the two frames is the estimator
+    // and not the noise: Monte Carlo error falls as 1/sqrt(N).
+    (*renderer)->setPathSamples(1024);
+    (*renderer)->setPathBounces(1);
+    auto rasterised = (*renderer)->render("/Camera", 0.0, w, h);
+    if (!rasterised) FAIL(rasterised.error().toString());
+    auto traced = (*renderer)->render("/Camera", 0.0, w, h, "rt");
+    if (!traced) FAIL(traced.error().toString());
+    // That the traced frame drew the surface where the surface is. Only the
+    // coverage is read here: squareMismatches compares colour against albedo
+    // times the cosine to the eye, which is the headlight's answer and not
+    // this scene's, and the closed form of a sphere light is what the M5 case
+    // checks with lrt/test/lambert_irradiance. What this case is for is the
+    // line below it.
+    const auto counts = squareMismatches(*gpu, *traced, {0.8F, 0.8F, 0.8F});
+    std::printf("  the rt technique over a mesh: %u covered, %u coverage mismatches\n", counts[2], counts[0]);
+    CHECK(counts[2] > 8000);
+    CHECK(counts[0] == 0);
+    gpu::BufferDesc desc;
+    desc.bytes = rasterised->rgba.size() * sizeof(float);
+    desc.elementBytes = 16;
+    auto rasterRgba = gpu::Buffer::create(*gpu->device, desc, rasterised->rgba.data());
+    auto tracedRgba = gpu::Buffer::create(*gpu->device, desc, traced->rgba.data());
+    REQUIRE(rasterRgba);
+    REQUIRE(tracedRgba);
+    auto diff = render::compareImages(*gpu->library, *rasterRgba, *tracedRgba, w, h);
+    REQUIRE(diff);
+    std::printf("  rt against raster over the same light: p99 %u, max %u, %llu pixels beyond 2\n", diff->p99,
+                diff->max, static_cast<unsigned long long>(diff->over2));
+    CHECK(diff->p99 <= 8);
+}
+
+// Progressive accumulation, through the whole chain: the delegate's settings,
+// the render pass, the engine's mean. Drawing the same camera again is the same
+// frame continued and its paths are added; moving the camera or changing a
+// setting is a different frame and the mean starts over. The second half is
+// what says the revision is armed rather than decorative -- a revision nothing
+// ever raises would let the mean keep accumulating over a scene that changed,
+// and no image would look wrong enough to say so.
+TEST_CASE("a path traced frame accumulates over passes and starts again when it must",
+          "[usd][gpu][mesh][path]") {
+    LRT_REQUIRE_GPU(gpu);
+    if (!gpu->device->caps().rasterization) {
+        SKIP("no rasterisation on this device");
+    }
+    const fs::path path = scratch("rt_progressive.usda");
+    {
+        std::ofstream out(path);
+        out << kSquareStage
+            << "def SphereLight \"Key\"\n{\n"
+               "    bool inputs:shadow:enable = 0\n"
+               "    float inputs:radius = 0.4\n"
+               "    float inputs:intensity = 1\n"
+               "    bool inputs:normalize = 0\n"
+               "    double3 xformOp:translate = (0, 0, -3)\n"
+               "    uniform token[] xformOpOrder = [\"xformOp:translate\"]\n}\n"
+               "def Scope \"Materials\"\n{\n"
+               "    def Material \"Mat\"\n    {\n"
+               "        token outputs:mtlx:surface.connect = </Materials/Mat/Surface.outputs:out>\n"
+               "        def Shader \"Surface\"\n        {\n"
+               "            uniform token info:id = \"ND_surface\"\n"
+               "            token inputs:bsdf.connect = </Materials/Mat/Diffuse.outputs:out>\n"
+               "            token outputs:out\n        }\n"
+               "        def Shader \"Diffuse\"\n        {\n"
+               "            uniform token info:id = \"ND_oren_nayar_diffuse_bsdf\"\n"
+               "            color3f inputs:color = (0.8, 0.8, 0.8)\n"
+               "            float inputs:roughness = 0\n"
+               "            token outputs:out\n        }\n    }\n}\n";
+    }
+    const uint32_t w = 96;
+    const uint32_t h = 72;
+    auto renderer = usd::StageRenderer::open(path);
+    if (!renderer) FAIL(renderer.error().toString());
+    (*renderer)->setPathSamples(4);
+    (*renderer)->setPathBounces(1);
+    (*renderer)->setPathTotal(32);
+    // Eight passes of four paths reach the thirty-two it was told to gather.
+    std::vector<uint32_t> held;
+    for (uint32_t pass = 0; pass < 8; ++pass) {
+        if (auto drawn = (*renderer)->draw("/Camera", 0.0, w, h, "rt"); !drawn) {
+            FAIL(drawn.error().toString());
+        }
+        held.push_back((*renderer)->pathAccumulated());
+    }
+    std::printf("  paths a pixel held after each pass:");
+    for (uint32_t n : held) {
+        std::printf(" %u", n);
+    }
+    std::printf("\n  converged: %s\n", (*renderer)->pathConverged() ? "yes" : "no");
+    for (uint32_t pass = 0; pass < 8; ++pass) {
+        CHECK(held[pass] == 4 * (pass + 1));
+    }
+    CHECK((*renderer)->pathConverged());
+
+    // A camera somewhere else: a different frame, and the mean starts again.
+    render::Camera moved = render::Camera::lookingAt({0.5, 0.25, 0.0}, {0.0, 0.0, -1.0});
+    moved.lens.focal = 35.0;
+    moved.lens.haperture = 24.576;
+    if (auto drawn = (*renderer)->draw(moved, 0.0, w, h, "rt"); !drawn) {
+        FAIL(drawn.error().toString());
+    }
+    const uint32_t afterMove = (*renderer)->pathAccumulated();
+    std::printf("  after the camera moved: %u\n", afterMove);
+    CHECK(afterMove == 4);
+    CHECK_FALSE((*renderer)->pathConverged());
+
+    // And a setting that changes what a path finds: the same again.
+    for (uint32_t pass = 0; pass < 3; ++pass) {
+        if (auto drawn = (*renderer)->draw(moved, 0.0, w, h, "rt"); !drawn) {
+            FAIL(drawn.error().toString());
+        }
+    }
+    const uint32_t beforeSetting = (*renderer)->pathAccumulated();
+    (*renderer)->setPathBounces(2);
+    if (auto drawn = (*renderer)->draw(moved, 0.0, w, h, "rt"); !drawn) {
+        FAIL(drawn.error().toString());
+    }
+    const uint32_t afterSetting = (*renderer)->pathAccumulated();
+    std::printf("  before the bounce count changed: %u, after: %u\n", beforeSetting, afterSetting);
+    CHECK(beforeSetting == 16);
+    CHECK(afterSetting == 4);
+}
+

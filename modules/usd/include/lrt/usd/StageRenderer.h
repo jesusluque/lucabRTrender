@@ -109,6 +109,20 @@ public:
     /// pixel.
     void setChooseLights(bool choose);
 
+    /// The path traced technique ("rt" over meshes): paths a pixel each pass
+    /// gathers, bounces after the first hit, and the paths a pixel at which
+    /// the frame is finished. A total of one -- the default -- never
+    /// accumulates, which is what a moving camera wants.
+    void setPathSamples(uint32_t samples);
+    void setPathBounces(uint32_t bounces);
+    void setPathTotal(uint32_t total);
+
+    /// How many paths a pixel the frame on the device holds, and whether it
+    /// holds all it is going to. A frame that is not path traced has nothing
+    /// to gather and reads as finished.
+    [[nodiscard]] uint32_t pathAccumulated() const;
+    [[nodiscard]] bool pathConverged() const;
+
     /// The Hydra outputs renders produce, colour and depth always among them
     /// ("primId", "instanceId", "elementId", "Neye", "normal", "primvars:st"...).
     void requestOutputs(const std::vector<std::string>& aovs);

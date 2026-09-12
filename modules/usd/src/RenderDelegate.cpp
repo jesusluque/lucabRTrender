@@ -113,7 +113,7 @@ HdRenderPassSharedPtr HdLrtRenderDelegate::CreateRenderPass(HdRenderIndex* index
 
 TF_DEFINE_PRIVATE_TOKENS(_lrtSettings, ((technique, "lrt:technique"))((settleStreams, "lrt:settleStreams"))
                                            ((visibility, "lrt:visibility"))((lightSamples, "lrt:lightSamples"))((chooseLights, "lrt:chooseLights"))
-                                           ((pathSamples, "lrt:pathSamples"))((pathBounces, "lrt:pathBounces"))
+                                           ((pathSamples, "lrt:pathSamples"))((pathBounces, "lrt:pathBounces"))((pathTotal, "lrt:pathTotal"))
                                            (raster)(rt)(automatic)(rays)(bvh));
 
 HdRenderSettingDescriptorList HdLrtRenderDelegate::GetRenderSettingDescriptors() const {
@@ -145,7 +145,11 @@ HdRenderSettingDescriptorList HdLrtRenderDelegate::GetRenderSettingDescriptors()
     bounces.name = "Bounces after the first hit (rt)";
     bounces.key = _lrtSettings->pathBounces;
     bounces.defaultValue = VtValue(1);
-    return {technique, settle, visibility, samples, choose, paths, bounces};
+    HdRenderSettingDescriptor total;
+    total.name = "Paths per pixel to converge to (rt)";
+    total.key = _lrtSettings->pathTotal;
+    total.defaultValue = VtValue(1);
+    return {technique, settle, visibility, samples, choose, paths, bounces, total};
 }
 
 lrt::usd::MeshVisibility HdLrtRenderDelegate::GetMeshVisibility() const {
@@ -197,6 +201,10 @@ uint32_t HdLrtRenderDelegate::GetPathSamples() const {
 
 uint32_t HdLrtRenderDelegate::GetPathBounces() const {
     return _UintSetting(GetRenderSetting(_lrtSettings->pathBounces), 1, 0);
+}
+
+uint32_t HdLrtRenderDelegate::GetPathTotal() const {
+    return _UintSetting(GetRenderSetting(_lrtSettings->pathTotal), 1, 1);
 }
 
 bool HdLrtRenderDelegate::GetSettleStreams() const {
@@ -260,11 +268,11 @@ HdSprim* HdLrtRenderDelegate::CreateFallbackSprim(TfToken const& typeId) {
 void HdLrtRenderDelegate::DestroySprim(HdSprim* sprim) { delete sprim; }
 
 HdBprim* HdLrtRenderDelegate::CreateBprim(TfToken const& typeId, SdfPath const& id) {
-    return typeId == HdPrimTypeTokens->renderBuffer ? new HdLrtRenderBuffer(id) : nullptr;
+    return typeId == HdPrimTypeTokens->renderBuffer ? new HdLrtRenderBuffer(id, _engine.get()) : nullptr;
 }
 
 HdBprim* HdLrtRenderDelegate::CreateFallbackBprim(TfToken const& typeId) {
-    return typeId == HdPrimTypeTokens->renderBuffer ? new HdLrtRenderBuffer(SdfPath::EmptyPath())
+    return typeId == HdPrimTypeTokens->renderBuffer ? new HdLrtRenderBuffer(SdfPath::EmptyPath(), _engine.get())
                                                     : nullptr;
 }
 

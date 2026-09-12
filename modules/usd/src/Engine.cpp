@@ -145,6 +145,7 @@ void Engine::setMaterial(const pxr::SdfPath& id, std::shared_ptr<void> mtlxDocum
 }
 
 void Engine::setLight(const pxr::SdfPath& id, const light::Light& lamp) {
+    revision_.fetch_add(1);
     const std::lock_guard<std::mutex> held(guard_);
     lights_[id] = lamp;
 }
@@ -177,15 +178,49 @@ uint64_t Engine::categoryMask(const std::vector<pxr::TfToken>& names) {
     return mask;
 }
 
-void Engine::setLightSamples(uint32_t samples) { lightSamples_.store(std::max(samples, 1u)); }
+// These four change what a path finds, so a mean gathered under the old ones
+// is not the same mean; each raises the revision and the accumulation starts
+// again. setPathTotal does not: moving the finish line leaves what has been
+// gathered still valid.
+void Engine::setLightSamples(uint32_t samples) {
+    if (lightSamples_.exchange(std::max(samples, 1u)) != std::max(samples, 1u)) {
+        revision_.fetch_add(1);
+    }
+}
 
-void Engine::setChooseLights(bool choose) { chooseLights_.store(choose); }
+void Engine::setChooseLights(bool choose) {
+    if (chooseLights_.exchange(choose) != choose) {
+        revision_.fetch_add(1);
+    }
+}
 
-void Engine::setPathSamples(uint32_t samples) { pathSamples_.store(std::max(samples, 1u)); }
+void Engine::setPathSamples(uint32_t samples) {
+    if (pathSamples_.exchange(std::max(samples, 1u)) != std::max(samples, 1u)) {
+        revision_.fetch_add(1);
+    }
+}
 
-void Engine::setPathBounces(uint32_t bounces) { pathBounces_.store(bounces); }
+void Engine::setPathBounces(uint32_t bounces) {
+    if (pathBounces_.exchange(bounces) != bounces) {
+        revision_.fetch_add(1);
+    }
+}
+
+void Engine::setPathTotal(uint32_t total) { pathTotal_.store(std::max(total, 1u)); }
+
+uint32_t Engine::pathAccumulated() const noexcept {
+    return pathTracer_.has_value() && pathState_.traced ? pathTracer_->accumulated() : 0;
+}
+
+bool Engine::pathConverged() const noexcept {
+    if (!pathState_.traced) {
+        return true;   // nothing being gathered
+    }
+    return pathAccumulated() >= pathTotal_.load();
+}
 
 void Engine::removeLight(const pxr::SdfPath& id) {
+    revision_.fetch_add(1);
     const std::lock_guard<std::mutex> held(guard_);
     lights_.erase(id);
 }
@@ -359,6 +394,11 @@ Result<size_t> Engine::commit() {
         }
         entry.pending.reset();
         ++uploaded;
+    }
+    // Anything uploaded is something a path could find: whatever a path traced
+    // frame had accumulated was of a scene that no longer exists.
+    if (uploaded > 0) {
+        revision_.fetch_add(1);
     }
     return uploaded;
 }
@@ -821,6 +861,9 @@ Result<void> Engine::render(const render::Projection& projection, const render::
     }
     const bool meshLayer = drawMeshes;
     const bool pathTracing = meshLayer && technique == Technique::RayTraced;
+    if (!pathTracing) {
+        pathState_.traced = false;
+    }
     if (meshLayer) {
         LRT_TRY(scene_->update(meshInstances, projection, meshSets));
         // The frame's lights, and what a shadow ray traces against: rays
@@ -940,9 +983,32 @@ Result<void> Engine::render(const render::Projection& projection, const render::
             technique::PathSettings paths;
             paths.samples = pathSamples_.load();
             paths.bounces = pathBounces_.load();
-            // A frame of its own, not a sample of the last one: the camera and
-            // the scene may both have moved. Progressive accumulation is the
-            // render thread's to ask for (M6, not done).
+            PathState now;
+            now.worldToView = projection.worldToView;
+            now.focalX = projection.focalX;
+            now.focalY = projection.focalY;
+            now.centreX = projection.centreX;
+            now.centreY = projection.centreY;
+            now.nearZ = projection.nearZ;
+            now.farZ = projection.farZ;
+            now.orthographic = projection.orthographic;
+            now.width = settings.width;
+            now.height = settings.height;
+            now.samples = paths.samples;
+            now.bounces = paths.bounces;
+            now.revision = revision_.load();
+            now.traced = true;
+            // The same frame continued, or a new one: a camera that moved, a
+            // scene that changed or a setting that did all start the mean
+            // again, and only an identical frame adds to it. This is what
+            // makes a viewport converge while it is left alone.
+            const bool same = now == pathState_;
+            paths.accumulate = same;
+            if (!same) {
+                pathTracer_->restart();
+                pathSeed_ = 0;
+                pathState_ = now;
+            }
             paths.seed = pathSeed_++ * 7919u;
             LRT_TRY(pathTracer_->trace(batch, visibility_, projection, frame, paths, meshLayer_));
         } else {

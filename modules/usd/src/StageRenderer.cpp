@@ -138,6 +138,26 @@ void StageRenderer::setLightSamples(uint32_t samples) {
 void StageRenderer::setChooseLights(bool choose) {
     impl_->delegate->SetRenderSetting(TfToken("lrt:chooseLights"), VtValue(choose));
 }
+void StageRenderer::setPathSamples(uint32_t samples) {
+    impl_->delegate->SetRenderSetting(TfToken("lrt:pathSamples"),
+                                      VtValue(static_cast<int>(std::max(samples, 1u))));
+}
+void StageRenderer::setPathBounces(uint32_t bounces) {
+    impl_->delegate->SetRenderSetting(TfToken("lrt:pathBounces"), VtValue(static_cast<int>(bounces)));
+}
+void StageRenderer::setPathTotal(uint32_t total) {
+    impl_->delegate->SetRenderSetting(TfToken("lrt:pathTotal"), VtValue(static_cast<int>(std::max(total, 1u))));
+}
+uint32_t StageRenderer::pathAccumulated() const {
+    auto* param = static_cast<HdLrtRenderParam*>(impl_->delegate->GetRenderParam());
+    const Engine* engine = param != nullptr ? param->GetEngine() : nullptr;
+    return engine != nullptr ? engine->pathAccumulated() : 0;
+}
+bool StageRenderer::pathConverged() const {
+    auto* param = static_cast<HdLrtRenderParam*>(impl_->delegate->GetRenderParam());
+    const Engine* engine = param != nullptr ? param->GetEngine() : nullptr;
+    return engine == nullptr || engine->pathConverged();
+}
 
 double StageRenderer::timeCodesPerSecond() const {
     return impl_->stage->GetTimeCodesPerSecond();

@@ -1382,9 +1382,32 @@ since its bounce is a ray. Shading needs one only where a light casts a shadow,
 and the same structure serves both; without that, a traced frame would trace
 against nothing and no test would say so.
 
-`lrt:pathSamples` is how many paths a pixel a frame gathers and
+`lrt:pathSamples` is how many paths a pixel a pass gathers and
 `lrt:pathBounces` how many bounces each takes after the first hit, one of each
 by default -- what an interactive frame affords.
+
+### Gathering a frame over several passes
+
+`lrt:pathTotal` is the paths a pixel at which a frame is finished; one, the
+default, never accumulates, so nothing that worked before behaves differently.
+Above one, drawing the same frame again adds its paths to the running mean and
+the pass reports itself unconverged until the total is reached, which is what
+makes a viewport quieten down while it is left alone.
+
+What counts as "the same frame" is the engine's to decide, since it is the only
+place that sees both the camera and the scene: it remembers the camera element
+by element (`Mat4` has no comparison of its own), the frame's size, the samples
+and bounces, and a revision. The revision is what says the scene itself moved
+-- `commit` raises it whenever it uploads anything, and so does every setting
+that changes what a path would find, each of those only when the value really
+changes, so a host that re-sends the same settings every frame does not reset
+the mean. Moving the finish line is the exception: `lrt:pathTotal` leaves what
+has been gathered still valid.
+
+The render buffer reports convergence from the engine too. It used to answer
+"always converged", which was true while there was no progressive mode and
+would now let a host stop asking for the rest of a frame the pass had not
+finished.
 
 ### How it is checked
 
@@ -1401,6 +1424,23 @@ by default -- what an interactive frame affords.
   the bounce alone. p99 41 and max 73 over 4688 pixels. The control is the
   scene without the wall, where the two come out at max 0 -- identical frames,
   which is what makes the 73 the bounce and not the noise.
+- **The traced technique over a mesh, through Hydra.** A plane under one sphere
+  light has nothing for a bounce to find, so the traced frame and the raster
+  frame are two estimators of the same direct light: p99 1 and max 1 at 1024
+  paths, with the surface drawn exactly where the surface is (8281 pixels
+  covered, no coverage mismatch). Only the coverage is read from
+  `squareMismatches` there: it compares colour against albedo times the cosine
+  to the eye, which is the headlight's answer and not a lit scene's -- reading
+  its colour count as a verdict on a light would have been reading the wrong
+  oracle, and the sphere light's closed form is what the M5 case checks with
+  `lrt/test/lambert_irradiance`.
+- **The accumulation, over the whole chain**: settings, render pass, mean.
+  Eight passes of four paths hold 4, 8, 12, 16, 20, 24, 28 and 32 and then
+  report converged; a camera somewhere else drops back to 4 and unconverged,
+  and changing the bounce count cuts 16 back to 4. That second half is what
+  says the revision is armed rather than decorative: a revision nothing raised
+  would go on averaging over a scene that had changed, and no image would look
+  wrong enough to say so.
 
 ### Three things the ground did not turn out to be
 
@@ -1420,9 +1460,11 @@ the rest of M6 has to build:
 
 ### Not done
 
-- Progressive rendering through `HdRenderThread` and `IsConverged`: a path
-  traced frame starts its mean again every time, since the camera and the
-  scene may both have moved and nothing here yet knows whether they did.
+- Nothing yet draws until convergence on its own. `StageRenderer::render`
+  executes the render pass once, so a converged image through it means calling
+  `draw` until `pathConverged`, which the tests do and the CLI does not. There
+  is no `HdRenderThread` here either: the pass still draws on the thread that
+  executes it.
 - Albedo and normal AOVs, adaptive sampling, and the denoiser itself.
 - Splats in rays, points as spheres, depth of field, lens distortion and
   exposure.

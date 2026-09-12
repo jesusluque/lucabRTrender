@@ -17,7 +17,9 @@ public:
                     lrt::usd::Engine* engine, const HdLrtRenderDelegate* delegate)
         : HdRenderPass(index, collection), _engine(engine), _delegate(delegate) {}
 
-    bool IsConverged() const override { return true; }
+    /// A path traced frame is gathered over as many passes as it takes; every
+    /// other frame is whole when it is drawn.
+    bool IsConverged() const override { return _engine == nullptr || _engine->pathConverged(); }
 
 protected:
     void _Execute(HdRenderPassStateSharedPtr const& renderPassState,

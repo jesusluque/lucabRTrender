@@ -9,18 +9,23 @@
 
 #include <pxr/imaging/hd/renderBuffer.h>
 
+#include "Engine.h"
+
 PXR_NAMESPACE_OPEN_SCOPE
 
 /// An AOV in host memory, for a host that maps it. After each frame the render
 /// pass leaves it a fill -- the device converts the AOV to the buffer's format
 /// and reads it back (Engine::writeAov) -- which runs when the buffer is first
 /// mapped: a host that never maps an output (a viewer showing it on the
-/// device) never reads it back. Always converged: the engine has no
-/// progressive mode. Mapped on the thread that executes the render pass, as
-/// hosts that render synchronously do.
+/// device) never reads it back. It reports convergence from the engine, the
+/// same answer the render pass gives: a path traced frame is gathered over
+/// several passes, and a buffer calling itself finished while the pass is not
+/// would stop a host asking for the rest. Mapped on the thread that executes
+/// the render pass, as hosts that render synchronously do.
 class HdLrtRenderBuffer final : public HdRenderBuffer {
 public:
-    explicit HdLrtRenderBuffer(SdfPath const& id) : HdRenderBuffer(id) {}
+    HdLrtRenderBuffer(SdfPath const& id, const lrt::usd::Engine* engine)
+        : HdRenderBuffer(id), _engine(engine) {}
 
     bool Allocate(GfVec3i const& dimensions, HdFormat format, bool multiSampled) override;
     unsigned int GetWidth() const override { return _width; }
@@ -32,7 +37,7 @@ public:
     void Unmap() override { --_mappers; }
     bool IsMapped() const override { return _mappers.load() != 0; }
     void Resolve() override {}
-    bool IsConverged() const override { return true; }
+    bool IsConverged() const override;
 
     /// What the next Map runs first: the last frame's conversion into the bytes.
     void SetPendingFill(std::function<void(std::span<uint8_t>)> fill);
@@ -40,6 +45,7 @@ public:
 private:
     void _Deallocate() override { _data.clear(); }
 
+    const lrt::usd::Engine* _engine = nullptr;
     unsigned int         _width = 0;
     unsigned int         _height = 0;
     HdFormat             _format = HdFormatInvalid;

@@ -5,6 +5,10 @@
 
 PXR_NAMESPACE_OPEN_SCOPE
 
+bool HdLrtRenderBuffer::IsConverged() const {
+    return _engine == nullptr || _engine->pathConverged();
+}
+
 bool HdLrtRenderBuffer::Allocate(GfVec3i const& dimensions, HdFormat format, bool) {
     _Deallocate();
     if (dimensions[2] != 1) {

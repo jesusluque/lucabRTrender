@@ -1037,6 +1037,11 @@ TEST_CASE("a path traced frame of one bounce agrees with the raster's direct lig
     frame.textures = &**textures;
     frame.lights = &*table;
     frame.samples = 4096;
+    // No structure is bound: this case traces against nothing, which is all
+    // right only because the scene holds nothing for a bounce to find, and is
+    // exactly why it cannot tell a bounce that returns empty-handed from one
+    // that was never traced. The case below binds a structure and puts a wall
+    // where the bounce can reach it; that is the one that tests the bounce.
     {
         gpu::CommandBatch batch(*gpu->device);
         REQUIRE(raster->render(batch, *scene, projection, w, h, visibility));

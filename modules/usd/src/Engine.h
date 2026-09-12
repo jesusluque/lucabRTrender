@@ -199,6 +199,16 @@ public:
     /// frame affords.
     void setPathSamples(uint32_t samples);
     void setPathBounces(uint32_t bounces);
+    /// Paths a pixel at which a path traced frame is finished. One -- the
+    /// default -- is a frame that never accumulates, which is what a viewport
+    /// showing a moving camera wants.
+    void setPathTotal(uint32_t total);
+
+    /// How many paths a pixel the path traced frame on screen has gathered,
+    /// and whether that is all it is going to gather. A frame that is not a
+    /// path traced one has nothing to gather and is always finished.
+    [[nodiscard]] uint32_t pathAccumulated() const noexcept;
+    [[nodiscard]] bool pathConverged() const noexcept;
     void setInstancer(const pxr::SdfPath& id, const pxr::SdfPath& parent, InstancerArrays arrays);
     void removeInstancer(const pxr::SdfPath& id);
     void remove(const pxr::SdfPath& id);
@@ -275,7 +285,46 @@ private:
     std::atomic<bool>                         chooseLights_{false};
     std::atomic<uint32_t>                     pathSamples_{1};
     std::atomic<uint32_t>                     pathBounces_{1};
+    std::atomic<uint32_t>                     pathTotal_{1};
     uint32_t                                  pathSeed_ = 0;   ///< which samples a path traced frame takes
+    /// What the last path traced frame was of. A frame that matches it in
+    /// every particular is the same frame continued, and its paths are added
+    /// to the mean; anything else starts the mean again. The revision is what
+    /// says the scene itself moved: `commit` raises it whenever it uploads,
+    /// and so does every setting that changes what a path would find.
+    struct PathState {
+        render::Mat4 worldToView{};
+        double       focalX = 0.0;
+        double       focalY = 0.0;
+        double       centreX = 0.0;
+        double       centreY = 0.0;
+        double       nearZ = 0.0;
+        double       farZ = 0.0;
+        bool         orthographic = false;
+        uint32_t     width = 0;
+        uint32_t     height = 0;
+        uint32_t     samples = 0;
+        uint32_t     bounces = 0;
+        uint64_t     revision = 0;
+        bool         traced = false;   ///< the last frame was path traced at all
+        /// Mat4 has no comparison of its own, so the camera is compared
+        /// element by element: identical bits are what "has not moved" means.
+        [[nodiscard]] bool operator==(const PathState& o) const {
+            for (int r = 0; r < 4; ++r) {
+                for (int c = 0; c < 4; ++c) {
+                    if (worldToView.at(r, c) != o.worldToView.at(r, c)) {
+                        return false;
+                    }
+                }
+            }
+            return focalX == o.focalX && focalY == o.focalY && centreX == o.centreX && centreY == o.centreY &&
+                   nearZ == o.nearZ && farZ == o.farZ && orthographic == o.orthographic && width == o.width &&
+                   height == o.height && samples == o.samples && bounces == o.bounces && revision == o.revision &&
+                   traced == o.traced;
+        }
+    };
+    PathState                                 pathState_;
+    std::atomic<uint64_t>                     revision_{1};   ///< raised by anything a path would see
     /// A bit per category name, as they are first seen: a prim's mask and a
     /// light's link have to agree on the numbering, and this is the only
     /// place that sees both. Past 64 names a category cannot be represented

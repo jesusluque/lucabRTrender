@@ -96,6 +96,7 @@ void HdLrtRenderPass::_Execute(HdRenderPassStateSharedPtr const& state, TfTokenV
         _engine->setChooseLights(_delegate->GetChooseLights());
         _engine->setPathSamples(_delegate->GetPathSamples());
         _engine->setPathBounces(_delegate->GetPathBounces());
+        _engine->setPathTotal(_delegate->GetPathTotal());
     }
     if (auto drawn =
             _engine->render(projection, settings, *_targets, technique, settle, &renderTags, request, visibility);
