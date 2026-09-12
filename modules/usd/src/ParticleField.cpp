@@ -111,6 +111,13 @@ lrt::render::SplatEdit editOf(HdSceneDelegate* delegate, SdfPath const& id) {
     return edit;
 }
 
+/// LrtSplatLightingAPI: whether this cloud is relit rather than shown as it
+/// was baked.
+bool relightOf(HdSceneDelegate* delegate, SdfPath const& id) {
+    static const TfToken kRelight("lrt:splat:relight");
+    return boolOf(delegate->Get(id, kRelight), false);
+}
+
 lrt::usd::StreamedAsset assetOf(HdSceneDelegate* delegate, SdfPath const& id) {
     lrt::usd::StreamedAsset asset;
     VtValue value = delegate->Get(id, _assetTokens->asset);
@@ -190,7 +197,8 @@ void HdLrtParticleField::Sync(HdSceneDelegate* delegate, HdRenderParam* renderPa
         _UpdateVisibility(delegate, dirtyBits);
         visible = IsVisible();
     }
-    engine->setSplats(id, std::move(raw), transformDirty ? &transform : nullptr, visible, edit, std::move(asset));
+    engine->setSplats(id, std::move(raw), transformDirty ? &transform : nullptr, visible, edit, std::move(asset),
+                      relightOf(delegate, id));
     *dirtyBits &= ~HdChangeTracker::AllSceneDirtyBits;
 }
 

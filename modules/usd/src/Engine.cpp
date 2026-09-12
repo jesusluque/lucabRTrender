@@ -47,7 +47,8 @@ std::unique_ptr<Engine> Engine::create(std::string& why) {
 
 void Engine::setSplats(const pxr::SdfPath& id, std::optional<ParticleFieldArrays> raw,
                        const render::Mat4* transform, std::optional<bool> visible,
-                       std::optional<render::SplatEdit> edit, std::optional<StreamedAsset> asset) {
+                       std::optional<render::SplatEdit> edit, std::optional<StreamedAsset> asset,
+                       std::optional<bool> relight) {
     const std::lock_guard<std::mutex> held(guard_);
     SplatEntry& entry = splats_[id];
     if (asset.has_value()) {
@@ -55,6 +56,9 @@ void Engine::setSplats(const pxr::SdfPath& id, std::optional<ParticleFieldArrays
     }
     if (edit.has_value()) {
         entry.edit = *edit;
+    }
+    if (relight) {
+        entry.relight = *relight;
     }
     if (raw.has_value()) {
         entry.pending = std::move(raw);
@@ -632,7 +636,7 @@ Result<void> Engine::render(const render::Projection& projection, const render::
                 continue;
             }
             if (entry.gpu != nullptr) {
-                splats.push_back({entry.gpu.get(), entry.objectToWorld, entry.edit});
+                splats.push_back({entry.gpu.get(), entry.objectToWorld, entry.edit, entry.relight});
             }
             const lod::LodCloud* cloud = entry.pool != nullptr ? &entry.pool->cloud() : entry.lodCloud.get();
             if (cloud == nullptr) {
@@ -642,7 +646,7 @@ Result<void> Engine::render(const render::Projection& projection, const render::
                 // A cut changes every frame, and the ray tracer would rebuild
                 // every frame: it draws the whole cloud, when it is whole.
                 if (entry.lodCloud != nullptr) {
-                    splats.push_back({&entry.lodCloud->splats, entry.objectToWorld, entry.edit});
+                    splats.push_back({&entry.lodCloud->splats, entry.objectToWorld, entry.edit, entry.relight});
                 } else {
                     log::warn("hdLrt: {}: a streamed asset is drawn by the rasteriser only", id.GetString());
                 }

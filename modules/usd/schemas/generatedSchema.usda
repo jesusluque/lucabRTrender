@@ -107,3 +107,21 @@ surface splatting (render::PointStyle)."""
         interpolation = "constant"
     )
 }
+
+class "LrtSplatLightingAPI" (
+    doc = """Whether the Gaussian splat clouds at and below this prim are relit
+by the scene's lights instead of showing the radiance they were baked with.
+Baked is the default: a cloud occludes, shadows and appears in reflections as
+it was captured. Relighting takes a splat's normal from its shortest axis and
+its albedo from the spherical harmonics' constant term, which is an
+approximation of a surface a splat never had -- useful where a capture has to
+sit under different light, wrong wherever the capture's own light was the
+point. Its property is a constant primvar, so it is inherited by every
+ParticleField under the prim it is authored on."""
+)
+{
+    bool primvars:lrt:splat:relight = 0 (
+        doc = "Whether the splats are relit by the scene's lights rather than showing their baked radiance."
+        interpolation = "constant"
+    )
+}

@@ -53,6 +53,9 @@ struct SplatInstance {
     const scene::GpuSplats* splats = nullptr;
     Mat4                    objectToWorld = Mat4::identity();
     SplatEdit               edit;
+    /// LrtSplatLightingAPI: relight these splats from the scene's lights
+    /// instead of showing the radiance they were baked with.
+    bool                    relight = false;
 };
 
 struct RenderSettings {

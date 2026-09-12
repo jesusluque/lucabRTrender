@@ -1490,6 +1490,14 @@ TEST_CASE("the codeless lrt schemas register, with their defaults", "[usd][schem
     const UsdPrimDefinition* edit = registry.FindAppliedAPIPrimDefinition(TfToken("LrtSplatEditAPI"));
     REQUIRE(edit != nullptr);
     CHECK(registry.FindAppliedAPIPrimDefinition(TfToken("LrtPointStyleAPI")) != nullptr);
+    const UsdPrimDefinition* lighting = registry.FindAppliedAPIPrimDefinition(TfToken("LrtSplatLightingAPI"));
+    REQUIRE(lighting != nullptr);
+    // Baked is the default: a capture shows the light it was captured under
+    // until something asks otherwise.
+    VtValue relight;
+    CHECK(lighting->GetAttributeFallbackValue(TfToken("primvars:lrt:splat:relight"), &relight));
+    CHECK(relight.IsHolding<bool>());
+    CHECK(!relight.UncheckedGet<bool>());
 
     UsdStageRefPtr stage = UsdStage::CreateInMemory();
     UsdPrim group = stage->DefinePrim(SdfPath("/Group"), TfToken("Xform"));
