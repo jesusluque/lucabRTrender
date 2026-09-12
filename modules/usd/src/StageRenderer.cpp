@@ -229,7 +229,7 @@ Result<StageImage> StageRenderer::render(const std::string& camera, double time,
     // An image, not a viewport: streamed assets are loaded before it is drawn.
     impl_->delegate->SetRenderSetting(TfToken("lrt:settleStreams"), VtValue(true));
     LRT_TRY(aim(camera, time, technique));
-    LRT_TRY(execute(width, height));
+    LRT_TRY(executeUntilGathered(width, height));
     return readImage(width, height);
 }
 
@@ -237,8 +237,22 @@ Result<StageImage> StageRenderer::render(const render::Camera& camera, double ti
                                          const std::string& technique) {
     impl_->delegate->SetRenderSetting(TfToken("lrt:settleStreams"), VtValue(true));
     LRT_TRY(aim(camera, time, width, height, technique));
-    LRT_TRY(execute(width, height));
+    LRT_TRY(executeUntilGathered(width, height));
     return readImage(width, height);
+}
+
+Result<void> StageRenderer::executeUntilGathered(uint32_t width, uint32_t height) {
+    // An image is drawn until the path traced frame holds what it was asked
+    // for: the pass reports itself unconverged until then, and a frame that is
+    // not path traced is whole at once. The cap is against a total no pass
+    // count could reach.
+    for (uint32_t pass = 0; pass < 65536; ++pass) {
+        LRT_TRY(execute(width, height));
+        if (pathConverged()) {
+            return ok();
+        }
+    }
+    return Error(ErrorCode::InternalError, "the path traced frame did not gather its total in 65536 passes");
 }
 
 Result<void> StageRenderer::draw(const std::string& camera, double time, uint32_t width, uint32_t height,

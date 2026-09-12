@@ -31,6 +31,8 @@ struct Lens {
     double windowTranslate[2] = {0.0, 0.0};   ///< in half-widths, both axes
     double windowScale[2] = {1.0, 1.0};
     double windowRoll = 0.0;                  ///< degrees, counter-clockwise
+
+    double exposure = 0.0;   ///< stops, as UsdGeomCamera authors it
 };
 
 struct Camera {
@@ -53,6 +55,7 @@ struct Projection {
     double farZ = 10000.0;
     bool   orthographic = false;
     Vec3   eyeWorld;
+    double exposure = 0.0;   ///< stops: the frame is scaled by 2^exposure
 };
 
 [[nodiscard]] Mat4 viewFromCamera(const Mat4& cameraToWorld);

@@ -38,6 +38,7 @@ Projection projectionFor(const Camera& camera, uint32_t width, uint32_t height) 
     out.farZ = camera.lens.farZ;
     out.orthographic = camera.lens.projection == Lens::Projection::Orthographic;
     out.eyeWorld = camera.cameraToWorld.translation();
+    out.exposure = camera.lens.exposure;
     return out;
 }
 

@@ -19,7 +19,10 @@ cmake --build build/macos-arm64-debug --target lrt_render_tests   # one test bin
   `tests/<area>/`.
   `lrt_storm_oracle_tests` compares Hydra outputs with Storm's; it needs
   `HDX_MSAA_SAMPLE_COUNT=1` in the environment, which ctest sets.
-- **Timings** come from the release preset's `lrt bench`.
+- **Timings** are medians of `lrt stage --frames` and `lrt view --frames`
+  (release preset), recorded in `docs/decisions.md` where there is something
+  to compare against. `lrt bench` times splat files only; a per-milestone
+  bench requirement was retired for that reason (see the M6 section).
 - **Checking a shader compiles** without a build:
   `~/tools/slang/bin/slangc shaders/lrt/<dir>/<file>.slang -I shaders -target metal -entry <entry> -stage compute -o /dev/null`.
   Shaders are copied to `build/<preset>/shaders` by the build and compiled at

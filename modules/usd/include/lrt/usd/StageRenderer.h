@@ -56,6 +56,7 @@ public:
 
     /// `camera` is a UsdGeomCamera prim path; empty takes the first camera.
     /// `technique` is the delegate's `lrt:technique` setting: "raster" or "rt".
+    /// A path traced image is drawn until it holds `setPathTotal` paths.
     [[nodiscard]] Result<StageImage> render(const std::string& camera, double time,
                                             uint32_t width, uint32_t height,
                                             const std::string& technique = "raster");
@@ -143,6 +144,7 @@ public:
     [[nodiscard]] double startTimeCode() const;
 
 private:
+    [[nodiscard]] Result<void> executeUntilGathered(uint32_t width, uint32_t height);
     StageRenderer();
     [[nodiscard]] Result<void> aim(const std::string& camera, double time, const std::string& technique);
     [[nodiscard]] Result<void> aim(const render::Camera& camera, double time, uint32_t width, uint32_t height,

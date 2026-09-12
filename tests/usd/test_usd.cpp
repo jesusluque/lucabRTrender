@@ -2026,6 +2026,16 @@ TEST_CASE("a path traced frame accumulates over passes and starts again when it 
     std::printf("  before the bounce count changed: %u, after: %u\n", beforeSetting, afterSetting);
     CHECK(beforeSetting == 16);
     CHECK(afterSetting == 4);
+
+    // An image, not a viewport: render() draws until the total is gathered.
+    (*renderer)->setPathBounces(1);
+    (*renderer)->setPathTotal(32);
+    auto image = (*renderer)->render("/Camera", 0.0, w, h, "rt");
+    if (!image) FAIL(image.error().toString());
+    std::printf("  render() with a total of 32 and 4 a pass left %u paths gathered\n",
+                (*renderer)->pathAccumulated());
+    CHECK((*renderer)->pathAccumulated() == 32);
+    CHECK((*renderer)->pathConverged());
 }
 
 // The denoiser from the engine: lrt:denoise runs OIDN over a path traced
@@ -2093,13 +2103,95 @@ TEST_CASE("lrt:denoise runs once a path traced frame is gathered, and not before
     auto changed = render::countDifferent(*gpu->library, plain, denoised, words);
     REQUIRE(changed);
     // Not yet gathered: the gate holds, and the two frames are the same frame.
-    const gpu::Buffer plainEarly = frame(false, 64);
-    const gpu::Buffer gated = frame(true, 64);
-    auto unchanged = render::countDifferent(*gpu->library, plainEarly, gated, words);
+    // render() draws until the total, so this half is one draw() -- four of
+    // sixty-four paths -- read back as the host maps the colour output.
+    const auto drawnOnce = [&](bool denoise) {
+        auto renderer = usd::StageRenderer::open(path);
+        if (!renderer) FAIL(renderer.error().toString());
+        (*renderer)->setPathSamples(4);
+        (*renderer)->setPathBounces(1);
+        (*renderer)->setPathTotal(64);
+        (*renderer)->setDenoise(denoise);
+        if (auto drawn = (*renderer)->draw("/Camera", 0.0, w, h, "rt"); !drawn) {
+            FAIL(drawn.error().toString());
+        }
+        CHECK((*renderer)->pathAccumulated() == 4);
+        CHECK_FALSE((*renderer)->pathConverged());
+        auto bytes = (*renderer)->mappedOutput("color");
+        if (!bytes) FAIL(bytes.error().toString());
+        gpu::BufferDesc desc;
+        desc.bytes = bytes->size();
+        desc.elementBytes = 4;
+        auto buffer = gpu::Buffer::create(*gpu->device, desc, bytes->data());
+        REQUIRE(buffer);
+        return std::pair<gpu::Buffer, uint32_t>(*buffer, static_cast<uint32_t>(bytes->size() / 4));
+    };
+    const auto [plainEarly, earlyWords] = drawnOnce(false);
+    const auto [gated, gatedWords] = drawnOnce(true);
+    REQUIRE(earlyWords == gatedWords);
+    auto unchanged = render::countDifferent(*gpu->library, plainEarly, gated, earlyWords);
     REQUIRE(unchanged);
     std::printf("  denoise at the total: %llu of %u words changed; before the total: %llu\n",
                 static_cast<unsigned long long>(*changed), words, static_cast<unsigned long long>(*unchanged));
     CHECK(*changed > 0);
     CHECK(*unchanged == 0);
+}
+
+// The camera's exposure: UsdGeomCamera's `exposure`, in stops, reaches the
+// engine through HdCamera and scales the composed frame by 2^stops -- exactly,
+// since a power of two is an exponent bump in float. So the frame with
+// exposure 1 authored must be the frame without it, doubled on the device.
+TEST_CASE("a camera's exposure scales the frame by a power of two, exactly", "[usd][gpu][mesh][camera]") {
+    LRT_REQUIRE_GPU(gpu);
+    if (!gpu->device->caps().rasterization) {
+        SKIP("no rasterisation on this device");
+    }
+    const auto stageWith = [&](const char* name, const char* exposureLine) {
+        const fs::path path = scratch(name);
+        std::ofstream out(path);
+        std::string stage = kSquareStage;
+        // kSquareStage authors /Camera; the exposure goes in beside its focal length.
+        const size_t at = stage.find("float focalLength");
+        REQUIRE(at != std::string::npos);
+        stage.insert(at, exposureLine);
+        out << stage;
+        return path;
+    };
+    const fs::path plainPath = stageWith("exposure_plain.usda", "");
+    const fs::path stopPath = stageWith("exposure_one_stop.usda", "float exposure = 1\n        ");
+    const uint32_t w = 96;
+    const uint32_t h = 72;
+    const auto frame = [&](const fs::path& path) {
+        auto renderer = usd::StageRenderer::open(path);
+        if (!renderer) FAIL(renderer.error().toString());
+        auto image = (*renderer)->render("/Camera", 0.0, w, h);
+        if (!image) FAIL(image.error().toString());
+        gpu::BufferDesc desc;
+        desc.bytes = image->rgba.size() * sizeof(float);
+        desc.elementBytes = 16;
+        auto buffer = gpu::Buffer::create(*gpu->device, desc, image->rgba.data());
+        REQUIRE(buffer);
+        return *buffer;
+    };
+    gpu::Buffer plain = frame(plainPath);
+    const gpu::Buffer stop = frame(stopPath);
+    // Double the plain frame on the device with the same kernel the engine
+    // uses, and the two must be the same words.
+    auto made = gpu::ComputeKernel::create(*gpu->library, "lrt/technique/exposure", "applyExposure");
+    if (!made) FAIL(made.error().toString());
+    {
+        gpu::CommandBatch batch(*gpu->device);
+        made->dispatch(batch, {w * h, 1, 1}, [&](rhi::ShaderCursor cursor) {
+            cursor["colour"].setBinding(plain.rhi());
+            cursor["params"]["scale"].setData(2.0F);
+            cursor["params"]["pixels"].setData(w * h);
+        });
+        REQUIRE(batch.submit(true));
+    }
+    auto differing = render::countDifferent(*gpu->library, plain, stop, w * h * 4);
+    REQUIRE(differing);
+    std::printf("  exposure 1 authored against the plain frame doubled: %llu of %u words differ\n",
+                static_cast<unsigned long long>(*differing), w * h * 4);
+    CHECK(*differing == 0);
 }
 

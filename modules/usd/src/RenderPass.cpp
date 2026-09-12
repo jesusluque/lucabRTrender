@@ -1,6 +1,8 @@
 // Copyright (c) 2026 lucabRTrender contributors.
 #include "RenderPass.h"
 
+#include <pxr/imaging/hd/camera.h>
+
 #include <algorithm>
 #include <array>
 
@@ -34,8 +36,13 @@ void HdLrtRenderPass::_Execute(HdRenderPassStateSharedPtr const& state, TfTokenV
         return;
     }
     const GfMatrix4d proj = state->GetProjectionMatrix();
-    const lrt::render::Projection projection =
+    lrt::render::Projection projection =
         lrt::usd::projectionFromHydra(state->GetWorldToViewMatrix(), proj, width, height);
+    // The camera's exposure, in stops, which the renderer applies over the
+    // frame it draws; the projection matrix alone does not carry it.
+    if (const HdCamera* camera = state->GetCamera(); camera != nullptr) {
+        projection.exposure = static_cast<double>(camera->GetExposure());
+    }
 
     lrt::render::RenderSettings settings;
     settings.width = width;

@@ -354,6 +354,10 @@ private:
     [[nodiscard]] Result<void> prepareMaterials(const std::vector<std::string>& aovPrimvars);
     std::optional<gpu::ComputeKernel>          nearest_;
     std::optional<gpu::ComputeKernel>          domeBackground_;
+    std::optional<gpu::ComputeKernel>          exposure_;   ///< made on first use
+    /// The camera's exposure over the composed frame, once, after everything.
+    [[nodiscard]] Result<void> applyExposure(double stops, uint32_t width, uint32_t height,
+                                             render::RenderTargets& targets);
     /// The frame's domes over what it drew nothing on, after everything else.
     [[nodiscard]] Result<void> paintDomes(const render::Projection& projection, uint32_t width, uint32_t height,
                                           render::RenderTargets& targets);

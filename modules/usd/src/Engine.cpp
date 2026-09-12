@@ -1128,7 +1128,27 @@ Result<void> Engine::render(const render::Projection& projection, const render::
         LRT_TRY(rasterizer_->render(projection, splats, settings, targets, points, nullptr, &splatLights));
     }
     LRT_TRY(paintDomes(projection, settings.width, settings.height, targets));
+    LRT_TRY(applyExposure(projection.exposure, settings.width, settings.height, targets));
     return ok();
+}
+
+Result<void> Engine::applyExposure(double stops, uint32_t width, uint32_t height, render::RenderTargets& targets) {
+    if (stops == 0.0 || !targets.colour.valid()) {
+        return ok();
+    }
+    if (!exposure_.has_value()) {
+        auto made = gpu::ComputeKernel::create(*library_, "lrt/technique/exposure", "applyExposure");
+        if (!made) return std::move(made).error();
+        exposure_.emplace(std::move(*made));
+    }
+    const uint32_t pixels = width * height;
+    gpu::CommandBatch batch(*device_);
+    exposure_->dispatch(batch, {pixels, 1, 1}, [&](rhi::ShaderCursor cursor) {
+        cursor["colour"].setBinding(targets.colour.rhi());
+        cursor["params"]["scale"].setData(static_cast<float>(std::exp2(stops)));
+        cursor["params"]["pixels"].setData(pixels);
+    });
+    return batch.submit(true);
 }
 
 Result<void> Engine::paintDomes(const render::Projection& projection, uint32_t width, uint32_t height,

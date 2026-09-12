@@ -1600,14 +1600,26 @@ the rest of M6 has to build:
 
 ### Not done
 
-- Nothing yet draws until convergence on its own. `StageRenderer::render`
-  executes the render pass once, so a converged image through it means calling
-  `draw` until `pathConverged`, which the tests do and the CLI does not. There
-  is no `HdRenderThread` here either: the pass still draws on the thread that
-  executes it.
+- There is no `HdRenderThread`: the pass draws on the thread that executes
+  it. `StageRenderer::render` does draw until the path traced frame holds its
+  total (checked: a total of 32 at 4 a pass leaves 32 gathered), so an image
+  from the CLI is a gathered one; a viewport is the host's to keep asking for.
 - Adaptive sampling.
-- Splats in rays, points as spheres, depth of field, lens distortion and
-  exposure.
+- Splats in rays and points as spheres.
+- Depth of field and lens distortion. Exposure is done: UsdGeomCamera's
+  `exposure` reaches the engine through `HdCamera` and scales the composed
+  frame by `2^stops` once, after the domes -- everything the camera sees, and
+  no AOV -- checked exact through Hydra (the frame with exposure 1 authored is
+  the plain frame doubled on the device, 0 of 27648 words apart). Depth of
+  field is not a parameter away: a ray through the aperture no longer passes
+  through the pixel's centre, so it cannot ride on the visibility buffer the
+  path tracer shades from, and needs the tracer to cast its own primary ray a
+  sample. That is its own piece.
+- The plan's per-milestone `lrt bench` condition is retired, in CLAUDE.md as
+  well: `lrt bench` times splat files and never rendered a stage, so the
+  condition had been unmet since meshes arrived. Medians of `lrt stage
+  --frames` and `lrt view --frames` are what is recorded, where there is
+  something to compare against.
 - **Real MIS**, for when the two strategies overlap: mesh lights. It needs a
   "does this direction reach light k, and with what radiance" beside
   `lightPdf`, which does not exist. Until then the disjointness above is the
