@@ -13,8 +13,10 @@ const char* kKernelPrelude = R"(
 import lrt.light.lights;
 
 struct LightingParams {
-    uint samples;
-    uint pad0; uint pad1; uint pad2;
+    uint  samples;
+    uint  chooseLights;
+    float power;          // the frame's total, which the cumulative shares are of
+    uint  pad0;
 };
 
 Texture2D<uint4>              visibility;   // (instance + 1, triangle); row 0 on top
@@ -129,6 +131,38 @@ void shadeMaterials(uint3 group: SV_GroupID, uint index: SV_GroupIndex) {
         // surface facing it shows 1. What meshes were lit by before there
         // were lights.
         radiance += kPi * stackEval(stack, toEye, toEye);
+    } else if (lighting.chooseLights != 0) {
+        // One light a sample, in proportion to its power: the cost of a pixel
+        // stops growing with the number of lights, and the density it was
+        // chosen with is divided back out.
+        const uint samples = max(lighting.samples, 1u);
+        float3 sum = float3(0.0);
+        for (uint i = 0; i < samples; ++i) {
+            const float2 u = sampleAt(tid, 0, i);
+            const float pick = sampleAt(tid, 1, i).x;
+            const LightChoice choice = chooseLight(lights, lightCount, lighting.power, pick);
+            if (!choice.valid) {
+                continue;
+            }
+            const LightRecord light = lights[choice.index];
+            if (!lightLinked(light.lightCategory, s.instance.categoriesLo, s.instance.categoriesHi)) {
+                continue;
+            }
+            const LightSample ls = sampleLight(light, inputs.positionWorld, inputs.normalWorld, u);
+            if (!ls.valid) {
+                continue;
+            }
+            const float3 f = stackEval(stack, toEye, ls.wi);
+            if (!any(f > float3(0.0))) {
+                continue;
+            }
+            if ((light.flags & kLightShadow) != 0 &&
+                occluded(inputs.positionWorld, inputs.normalWorld, ls.wi, ls.distance, light.shadowCategory)) {
+                continue;
+            }
+            sum += f * ls.radiance / (ls.pdf * choice.probability);
+        }
+        radiance += sum / float(samples);
     } else {
         const uint samples = max(lighting.samples, 1u);
         for (uint k = 0; k < lightCount; ++k) {
@@ -225,6 +259,8 @@ Result<void> MaterialShading::shade(gpu::CommandBatch& batch, const VisibilityTa
         if (frame.lights != nullptr) {
             frame.lights->bind(cursor);
             cursor["lighting"]["samples"].setData(frame.samples);
+            cursor["lighting"]["chooseLights"].setData(uint32_t{frame.chooseLights ? 1u : 0u});
+            cursor["lighting"]["power"].setData(frame.lights != nullptr ? frame.lights->power() : 0.0F);
         }
         if (frame.shadows != nullptr) {
             cursor["shadowScene"].setBinding(frame.shadows);

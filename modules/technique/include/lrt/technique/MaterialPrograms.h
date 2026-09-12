@@ -82,6 +82,11 @@ struct MaterialFrame {
     /// Samples per light. One is the interactive choice; a test that wants
     /// an area light's irradiance without noise asks for more.
     uint32_t                      samples = 1;
+    /// One light per sample, chosen by power, instead of every light at every
+    /// pixel. Exact either way; what changes is where the cost goes -- with
+    /// the loop it grows with the number of lights, with the choice it does
+    /// not, at the price of noise a frame has to average away.
+    bool                          chooseLights = false;
 
     [[nodiscard]] bool valid() const noexcept {
         return programs != nullptr && scene != nullptr && records != nullptr && records->valid() && blob != nullptr &&

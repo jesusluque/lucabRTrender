@@ -53,6 +53,8 @@ public:
 
     /// Samples per light per pixel ("lrt:lightSamples"), at least one.
     [[nodiscard]] uint32_t GetLightSamples() const;
+    /// Whether to choose one light a sample ("lrt:chooseLights").
+    [[nodiscard]] bool GetChooseLights() const;
     /// `lrt:visibility`: "automatic" (default), "raster", "rays" or "bvh".
     [[nodiscard]] lrt::usd::MeshVisibility GetMeshVisibility() const;
 

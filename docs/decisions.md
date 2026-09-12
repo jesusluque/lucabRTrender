@@ -1261,9 +1261,25 @@ enough that what is left is the light and not the noise.
 
 ### Not done, not verified
 
-- **Many lights cost what they say.** There is no light BVH and no light
-  sampling: four lights at one sample each are about 17 ms over a 10.6 ms
-  frame, and every light is visited at every pixel.
+- **A light can be chosen instead of visited.** Shading either loops over
+  every light at every pixel -- exact, and the default, because at one sample
+  it is the quieter of the two -- or draws one light a sample in proportion to
+  its power (`lrt:chooseLights`, `lrt view --choose-lights`), dividing the
+  density of that choice back out. The choice is what stops a pixel's cost
+  growing with the number of lights; what it costs is noise a frame has to
+  average away. There is still no light BVH, which is what the choice would
+  need to stay cheap at thousands of lights.
+  - **Checked by three sphere lights in the same place**, of intensity 1, 2
+    and 3: one light of six times the power, analytically, with a
+    distribution over them that is not uniform -- which a single light can
+    never exercise. Both ways, 0 of 8281 pixels beyond 3%, worst 0.21% for
+    the loop and 0.26% for the choice.
+  - **Measured** on Kitchen_set with four lights, 1600x900, draw medians: the
+    loop takes 28.49, 79.61 and 282.21 ms at 1, 4 and 16 samples per light;
+    the choice takes 11.87, 12.18 and 13.22 ms, over a 10.61 ms frame with no
+    lights at all. Flat, because the cost of a sample is small beside the
+    frame it sits in -- which is also why the loop is affordable at one
+    sample and the default.
 - **No MIS.** Lights are sampled, the material is not sampled back at them.
   That is the path tracer's, M6.
 - **The two dome densities are not combined.** A dome is sampled either by

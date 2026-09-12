@@ -105,6 +105,10 @@ public:
     /// an area light's noise would be read as error.
     void setLightSamples(uint32_t samples);
 
+    /// One light per sample, chosen by power, rather than every light at every
+    /// pixel.
+    void setChooseLights(bool choose);
+
     /// The Hydra outputs renders produce, colour and depth always among them
     /// ("primId", "instanceId", "elementId", "Neye", "normal", "primvars:st"...).
     void requestOutputs(const std::vector<std::string>& aovs);

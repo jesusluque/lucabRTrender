@@ -180,6 +180,9 @@ public:
     /// Samples per light per pixel. One is what an interactive frame takes;
     /// a render that wants an area light without noise asks for more.
     void setLightSamples(uint32_t samples);
+    /// One light per sample, chosen by power, instead of every light at every
+    /// pixel: exact either way, and which is cheaper is a measurement.
+    void setChooseLights(bool choose);
     void setInstancer(const pxr::SdfPath& id, const pxr::SdfPath& parent, InstancerArrays arrays);
     void removeInstancer(const pxr::SdfPath& id);
     void remove(const pxr::SdfPath& id);
@@ -252,6 +255,7 @@ private:
     std::map<pxr::SdfPath, light::Light>      lights_;
     std::optional<light::LightTable>          lightTable_;
     std::atomic<uint32_t>                     lightSamples_{1};
+    std::atomic<bool>                         chooseLights_{false};
     /// A bit per category name, as they are first seen: a prim's mask and a
     /// light's link have to agree on the numbering, and this is the only
     /// place that sees both. Past 64 names a category cannot be represented

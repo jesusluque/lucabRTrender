@@ -266,6 +266,7 @@ Result<ViewStats> runViewer(const ViewOptions& options) {
     request();
     LRT_TRY(stage.setMeshVisibility(kVisibility[static_cast<size_t>(visibility)].value));
     stage.setLightSamples(options.lightSamples);
+    stage.setChooseLights(options.chooseLights);
 
     const auto displaySettings = [&] {
         technique::DisplaySettings settings;

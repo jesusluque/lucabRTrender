@@ -81,7 +81,9 @@ struct LightRecord {
     uint32_t sampler = 0;
     uint32_t lightCategory = 0xFFFFFFFFU;    ///< the bit a prim needs for this light to light it
     uint32_t shadowCategory = 0xFFFFFFFFU;   ///< and for it to cast this light's shadow
-    uint32_t pad0 = 0;
+    /// Its share of the frame's power, accumulated: what a sample searches to
+    /// choose one light instead of visiting them all.
+    float    cumulative = 0.0F;
     float    rows[12] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0};   ///< light to world, rows of a 3x4
 };
 
@@ -104,6 +106,8 @@ public:
     [[nodiscard]] bool     anyShadow() const noexcept { return shadows_; }
     /// Whether any of them is a dome, which a frame paints where it drew nothing.
     [[nodiscard]] bool     anyDome() const noexcept { return domes_; }
+    /// The frame's total power, which the cumulative weights are shares of.
+    [[nodiscard]] float    power() const noexcept { return power_; }
     [[nodiscard]] const gpu::Buffer& records() const noexcept { return records_; }
 
     /// `lights` and `lightCount`, by name.
@@ -119,6 +123,7 @@ private:
     uint32_t     capacity_ = 0;
     bool         shadows_ = false;
     bool         domes_ = false;
+    float        power_ = 0.0F;
 };
 
 }   // namespace lrt::light

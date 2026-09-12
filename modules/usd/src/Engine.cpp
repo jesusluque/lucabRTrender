@@ -171,6 +171,8 @@ uint64_t Engine::categoryMask(const std::vector<pxr::TfToken>& names) {
 
 void Engine::setLightSamples(uint32_t samples) { lightSamples_.store(std::max(samples, 1u)); }
 
+void Engine::setChooseLights(bool choose) { chooseLights_.store(choose); }
+
 void Engine::removeLight(const pxr::SdfPath& id) {
     const std::lock_guard<std::mutex> held(guard_);
     lights_.erase(id);
@@ -857,6 +859,7 @@ Result<void> Engine::render(const render::Projection& projection, const render::
         frame.textures = textures_.get();
         frame.lights = &*lightTable_;
         frame.samples = lightSamples_.load();
+        frame.chooseLights = chooseLights_.load();
         const technique::MaterialFrame* cutouts = materialCutouts_ ? &frame : nullptr;
             gpu::CommandBatch batch(*device_);
         switch (visibility) {

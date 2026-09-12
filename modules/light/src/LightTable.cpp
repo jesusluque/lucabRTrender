@@ -54,6 +54,29 @@ LightRecord LightTable::recordOf(const Light& light) {
     return record;
 }
 
+/// What a light is worth to a frame: its emission times what it emits over.
+/// A rough estimate is all a choice needs -- it only has to be positive and
+/// roughly proportional, since the density it implies is divided back out.
+static float powerOf(const Light& light) {
+    const float luminance = 0.2126F * light.colour[0] + 0.7152F * light.colour[1] + 0.0722F * light.colour[2];
+    float power = std::max(luminance, 0.0F) * std::max(light.intensity, 0.0F) * std::exp2(light.exposure);
+    switch (light.kind) {
+        case LightKind::Sphere:
+            power *= light.normalize ? 1.0F : 4.0F * 3.14159265358979F * light.radius * light.radius;
+            break;
+        case LightKind::Disk:
+            power *= light.normalize ? 1.0F : 3.14159265358979F * light.radius * light.radius;
+            break;
+        case LightKind::Rect:
+            power *= light.normalize ? 1.0F : light.width * light.height;
+            break;
+        case LightKind::Distant:
+        case LightKind::Dome:
+            break;   // over the whole sky either way
+    }
+    return std::max(power, 1.0e-6F);
+}
+
 Result<void> LightTable::set(std::span<const Light> lights) {
     std::vector<LightRecord> records;
     records.reserve(lights.size() + 1);
@@ -66,6 +89,12 @@ Result<void> LightTable::set(std::span<const Light> lights) {
     }
     if (records.empty()) {
         records.emplace_back();   // a buffer to bind, which nothing reads
+    }
+    // Cumulative shares of the frame's power, for choosing one light.
+    power_ = 0.0F;
+    for (size_t k = 0; k < lights.size(); ++k) {
+        power_ += powerOf(lights[k]);
+        records[k].cumulative = power_;
     }
     count_ = static_cast<uint32_t>(lights.size());
     if (records.size() > capacity_ || !records_.valid()) {

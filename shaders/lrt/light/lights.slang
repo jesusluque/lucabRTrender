@@ -37,7 +37,7 @@ public struct LightRecord {
     public uint   sampler;
     public uint   lightCategory;    // the bit a prim needs for this light to light it
     public uint   shadowCategory;   // and for it to cast this light's shadow
-    public uint   pad0;
+    public float  cumulative;       // its share of the frame's power, accumulated
     public float4 row0;          // light to world, rows of a 3x4
     public float4 row1;
     public float4 row2;
@@ -51,6 +51,41 @@ public bool lightLinked(uint category, uint categoriesLo, uint categoriesHi) {
         return true;
     }
     return category < 32 ? (categoriesLo & (1u << category)) != 0 : (categoriesHi & (1u << (category - 32))) != 0;
+}
+
+/// One light out of many, in proportion to its power: a binary search over
+/// the accumulated shares, so a pixel's cost stops growing with the number of
+/// lights. The density it was chosen with comes back, to be divided out.
+public struct LightChoice {
+    public uint  index;
+    public float probability;
+    public bool  valid;
+};
+
+public LightChoice chooseLight(StructuredBuffer<LightRecord> lights, uint count, float power, float u) {
+    LightChoice choice;
+    choice.index = 0;
+    choice.probability = 0.0;
+    choice.valid = false;
+    if (count == 0 || !(power > 0.0)) {
+        return choice;
+    }
+    const float target = clamp(u, 0.0, 0.999999) * power;
+    uint lo = 0;
+    uint hi = count - 1;
+    while (lo < hi) {
+        const uint mid = (lo + hi) / 2;
+        if (lights[mid].cumulative <= target) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    const float before = lo == 0 ? 0.0 : lights[lo - 1].cumulative;
+    choice.index = lo;
+    choice.probability = max(lights[lo].cumulative - before, 1.0e-9) / power;
+    choice.valid = true;
+    return choice;
 }
 
 public struct LightSample {

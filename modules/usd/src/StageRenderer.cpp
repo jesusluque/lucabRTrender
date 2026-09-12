@@ -135,6 +135,10 @@ void StageRenderer::setLightSamples(uint32_t samples) {
                                       VtValue(static_cast<int>(std::max(samples, 1u))));
 }
 
+void StageRenderer::setChooseLights(bool choose) {
+    impl_->delegate->SetRenderSetting(TfToken("lrt:chooseLights"), VtValue(choose));
+}
+
 double StageRenderer::timeCodesPerSecond() const {
     return impl_->stage->GetTimeCodesPerSecond();
 }

@@ -161,6 +161,9 @@ TEST_CASE("a Lambert plane under a sphere, a disk and a rectangle is lit as the 
             frame.textures = &**textures;
             frame.lights = &*table;
             frame.samples = 4096;
+            // Both ways through the same closed form: with one light the
+            // choice is certain, so choosing must change nothing at all.
+            frame.chooseLights = std::getenv("LRT_CHOOSE_LIGHTS") != nullptr;
             REQUIRE(shading->shade(batch, visibility, projection, frame, out));
             REQUIRE(batch.submit(true));
         }
@@ -638,6 +641,7 @@ TEST_CASE("a light reaches the categories it is linked to, and no others", "[tec
             frame.textures = &**textures;
             frame.lights = &*table;
             frame.samples = 16;
+            frame.chooseLights = std::getenv("LRT_CHOOSE_LIGHTS") != nullptr;
             REQUIRE(shading->shade(batch, visibility, projection, frame, out));
             REQUIRE(batch.submit(true));
         }
@@ -810,5 +814,141 @@ TEST_CASE("an occluder outside a light's shadow link casts nothing", "[technique
                     double(probe[0]));
         CHECK(c2[0] > 5000);
         CHECK(c2[1] == 0);
+    }
+}
+
+TEST_CASE("many lights are lit as one light of their total power", "[technique][lights][many]") {
+    LRT_REQUIRE_GPU(gpu);
+    if (!gpu->device->caps().rasterization) {
+        SKIP("no rasterisation on this device");
+    }
+    std::vector<std::filesystem::path> shaderPaths;
+    for (const std::string& path : gpu->device->shaderSearchPaths()) {
+        shaderPaths.emplace_back(path);
+    }
+    auto compiler = material::MaterialCompiler::create({LRT_MATERIALX_ROOT}, shaderPaths);
+    auto textures = material::TextureStore::create(*gpu->library);
+    auto builder = geom::MeshBuilder::create(*gpu->library);
+    auto scene = world::GpuScene::create(*gpu->library);
+    auto raster = technique::VisibilityRaster::create(*gpu->library);
+    auto programs = technique::MaterialPrograms::create(*gpu->library);
+    auto shading = technique::MaterialShading::create(*gpu->library);
+    auto table = light::LightTable::create(*gpu->device);
+    if (!compiler) FAIL(compiler.error().toString());
+    if (!textures) FAIL(textures.error().toString());
+    if (!builder) FAIL(builder.error().toString());
+    if (!scene) FAIL(scene.error().toString());
+    if (!raster) FAIL(raster.error().toString());
+    if (!programs) FAIL(programs.error().toString());
+    if (!shading) FAIL(shading.error().toString());
+    if (!table) FAIL(table.error().toString());
+    auto lambert = (*compiler)->compileXml(
+        "<?xml version=\"1.0\"?>\n<materialx version=\"1.39\">\n"
+        "  <oren_nayar_diffuse_bsdf name=\"d\" type=\"BSDF\">\n"
+        "    <input name=\"color\" type=\"color3\" value=\"0.8, 0.8, 0.8\" />\n"
+        "    <input name=\"roughness\" type=\"float\" value=\"0\" />\n"
+        "  </oren_nayar_diffuse_bsdf>\n"
+        "  <surface name=\"shader\" type=\"surfaceshader\"><input name=\"bsdf\" type=\"BSDF\" nodename=\"d\" /></surface>\n"
+        "  <surfacematerial name=\"material\" type=\"material\">\n"
+        "    <input name=\"surfaceshader\" type=\"surfaceshader\" nodename=\"shader\" />\n"
+        "  </surfacematerial>\n</materialx>\n");
+    if (!lambert) FAIL(lambert.error().toString());
+    REQUIRE(programs->setModules(std::span<const material::CompiledMaterial>(&*lambert, 1)));
+    REQUIRE(shading->setPrograms(*programs));
+    const std::vector<float> blob = material::MaterialCompiler::parameters(
+        *lambert, **textures, [](const std::string&) { return 0xFFFFFFFFu; });
+    REQUIRE((*textures)->commit());
+    const std::vector<technique::MaterialRecord> rows{{0, 0, 0, 0}, {1, 0, 0, 0}};
+    auto records = gpu::Buffer::fromSpan<technique::MaterialRecord>(*gpu->device, rows, "materials.records");
+    auto blobBuffer = gpu::Buffer::fromSpan<float>(*gpu->device, blob, "materials.blob");
+    REQUIRE(records);
+    REQUIRE(blobBuffer);
+
+    const uint32_t w = 161;
+    const uint32_t h = 121;
+    render::Camera camera = render::Camera::lookingAt({0.0, 0.0, 0.0}, {0.0, 0.0, -1.0});
+    camera.lens.focal = 35.0;
+    const render::Projection projection = render::projectionFor(camera, w, h);
+    world::MeshInstance instance;
+    instance.mesh = lambertSquare(*builder, 1.0F);
+    instance.objectToWorld = aofx::xform::translation({0.0, 0.0, -5.0});
+    instance.material = 1;
+    REQUIRE(scene->update(std::span<const world::MeshInstance>(&instance, 1), projection));
+    auto check = gpu::ComputeKernel::create(*gpu->library, "lrt/test/lambert_irradiance", "lambertIrradiance");
+    if (!check) FAIL(check.error().toString());
+
+    // Three sphere lights in the same place, of intensity 1, 2 and 3: one
+    // light of six times the power, analytically, and a distribution over
+    // them that is not uniform -- which is what a choice by power has to get
+    // right and a single light can never show.
+    std::array<light::Light, 3> lamps;
+    for (size_t k = 0; k < lamps.size(); ++k) {
+        lamps[k].kind = light::LightKind::Sphere;
+        lamps[k].lightToWorld = aofx::xform::translation({0.0, 0.0, -3.0});
+        lamps[k].radius = 0.4F;
+        lamps[k].intensity = static_cast<float>(k + 1);
+        lamps[k].shadow = false;
+    }
+    REQUIRE(table->set(std::span<const light::Light>(lamps.data(), lamps.size())));
+
+    for (const bool choose : {false, true}) {
+        technique::VisibilityTargets visibility;
+        render::RenderTargets out;
+        {
+            gpu::CommandBatch batch(*gpu->device);
+            REQUIRE(raster->render(batch, *scene, projection, w, h, visibility));
+            technique::MaterialFrame frame;
+            frame.programs = &*programs;
+            frame.scene = &*scene;
+            frame.records = &*records;
+            frame.blob = &*blobBuffer;
+            frame.textures = &**textures;
+            frame.lights = &*table;
+            frame.samples = 4096;
+            frame.chooseLights = choose;
+            REQUIRE(shading->shade(batch, visibility, projection, frame, out));
+            REQUIRE(batch.submit(true));
+        }
+        gpu::Buffer counts = test::uintBuffer(*gpu->device, 2, "counts");
+        gpu::Buffer worst = test::uintBuffer(*gpu->device, 5, "worst");
+        const std::array<float, 12> toWorld = aofx::xform::inverseAffine(projection.worldToView).rows3x4();
+        {
+            gpu::CommandBatch batch(*gpu->device);
+            check->dispatch(batch, {1, 1, 1}, [&](rhi::ShaderCursor cursor) {
+                cursor["colour"].setBinding(out.colour.rhi());
+                cursor["depth"].setBinding(out.depth.rhi());
+                cursor["counts"].setBinding(counts.rhi());
+                cursor["worst"].setBinding(worst.rhi());
+                technique::setCamera(cursor["camera"], projection, w, h);
+                rhi::ShaderCursor p = cursor["plane"];
+                p["kind"].setData(uint32_t{0});   // a sphere
+                p["vertices"].setData(uint32_t{512});
+                p["row0"].setData(toWorld.data(), sizeof(float) * 4);
+                p["row1"].setData(toWorld.data() + 4, sizeof(float) * 4);
+                p["row2"].setData(toWorld.data() + 8, sizeof(float) * 4);
+                const float centre[4] = {0.0F, 0.0F, -3.0F, 0.0F};
+                const float axisX[4] = {1.0F, 0.0F, 0.0F, 0.4F};
+                const float axisY[4] = {0.0F, 1.0F, 0.0F, 0.0F};
+                const float normal[4] = {0.0F, 0.0F, 1.0F, 0.8F};
+                const float radiance[4] = {6.0F, 6.0F, 6.0F, 0.03F};   // 1 + 2 + 3
+                const float none[4] = {0.0F, 0.0F, 0.0F, 0.0F};
+                p["centre"].setData(centre, sizeof(centre));
+                p["axisX"].setData(axisX, sizeof(axisX));
+                p["axisY"].setData(axisY, sizeof(axisY));
+                p["normal"].setData(normal, sizeof(normal));
+                p["radiance"].setData(radiance, sizeof(radiance));
+                p["occluder"].setData(none, sizeof(none));
+                p["occluderAxes"].setData(none, sizeof(none));
+            });
+            REQUIRE(batch.submit(true));
+        }
+        uint32_t c[2] = {0, 0};
+        float probe[5] = {};
+        REQUIRE(counts.read(*gpu->device, 0, sizeof(c), c));
+        REQUIRE(worst.read(*gpu->device, 0, sizeof(probe), probe));
+        std::printf("  three lights, %s: %u pixels, %u beyond 3%%, worst %.4f\n",
+                    choose ? "one chosen a sample" : "every light a sample", c[0], c[1], double(probe[0]));
+        CHECK(c[0] > 8000);
+        CHECK(c[1] == 0);
     }
 }

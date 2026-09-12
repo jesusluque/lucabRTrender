@@ -112,7 +112,7 @@ HdRenderPassSharedPtr HdLrtRenderDelegate::CreateRenderPass(HdRenderIndex* index
 }
 
 TF_DEFINE_PRIVATE_TOKENS(_lrtSettings, ((technique, "lrt:technique"))((settleStreams, "lrt:settleStreams"))
-                                           ((visibility, "lrt:visibility"))((lightSamples, "lrt:lightSamples"))
+                                           ((visibility, "lrt:visibility"))((lightSamples, "lrt:lightSamples"))((chooseLights, "lrt:chooseLights"))
                                            (raster)(rt)(automatic)(rays)(bvh));
 
 HdRenderSettingDescriptorList HdLrtRenderDelegate::GetRenderSettingDescriptors() const {
@@ -132,7 +132,11 @@ HdRenderSettingDescriptorList HdLrtRenderDelegate::GetRenderSettingDescriptors()
     samples.name = "Samples per light";
     samples.key = _lrtSettings->lightSamples;
     samples.defaultValue = VtValue(1);
-    return {technique, settle, visibility, samples};
+    HdRenderSettingDescriptor choose;
+    choose.name = "One light per sample, chosen by power";
+    choose.key = _lrtSettings->chooseLights;
+    choose.defaultValue = VtValue(false);
+    return {technique, settle, visibility, samples, choose};
 }
 
 lrt::usd::MeshVisibility HdLrtRenderDelegate::GetMeshVisibility() const {
@@ -147,6 +151,11 @@ lrt::usd::MeshVisibility HdLrtRenderDelegate::GetMeshVisibility() const {
     if (name == _lrtSettings->rays.GetString()) return lrt::usd::MeshVisibility::Rays;
     if (name == _lrtSettings->bvh.GetString()) return lrt::usd::MeshVisibility::Bvh;
     return lrt::usd::MeshVisibility::Automatic;
+}
+
+bool HdLrtRenderDelegate::GetChooseLights() const {
+    const VtValue value = GetRenderSetting(_lrtSettings->chooseLights);
+    return value.IsHolding<bool>() && value.UncheckedGet<bool>();
 }
 
 uint32_t HdLrtRenderDelegate::GetLightSamples() const {

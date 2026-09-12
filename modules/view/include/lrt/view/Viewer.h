@@ -23,6 +23,7 @@ struct ViewOptions {
     uint32_t              height = 900;
     uint32_t              frames = 0;               ///< stop after this many; 0, when the window closes
     uint32_t              lightSamples = 1;         ///< samples per light per pixel
+    bool                  chooseLights = false;     ///< one light a sample, by power
     bool                  visible = true;
     /// Where the last frame goes as it was shown, panels included: an EXR of
     /// display-encoded values. Empty, nowhere.
