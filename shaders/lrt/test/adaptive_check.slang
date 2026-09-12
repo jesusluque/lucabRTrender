@@ -17,8 +17,7 @@ struct AdaptiveParams {
 StructuredBuffer<float4>   colour;       // the adaptive mean
 StructuredBuffer<float4>   reference;
 StructuredBuffer<float4>   sum;          // colour * opacity summed; w = opacity summed = N when opaque
-StructuredBuffer<float>    sumSquares;   // luminance^2 summed
-StructuredBuffer<uint>     done;
+StructuredBuffer<uint>     moments;      // luminance^2 summed, as float bits, a pixel; then the done flags
 StructuredBuffer<float4>   referenceSum;      // the reference's own moments, for the true spread
 StructuredBuffer<float>    referenceSquares;
 // [converged, beyond 3 own sigma, negative variance, min N, beyond and below, beyond 3 TRUE sigma, own sigma optimistic by 3x]
@@ -44,14 +43,14 @@ void adaptiveCheck(uint3 tid: SV_DispatchThreadID) {
     float largest = 0.0;
     float largestTrue = 0.0;
     for (uint i = 0; i < adaptive.pixels; ++i) {
-        if (colour[i].w <= 0.0 || done[i] == 0) {
+        if (colour[i].w <= 0.0 || moments[adaptive.pixels + i] == 0) {
             continue;
         }
         ++converged;
         const float n = max(sum[i].w, 1.0);
         minN = min(minN, uint(n + 0.5));
         const float mean = dot(sum[i].rgb, kLum) / n;
-        const float second = sumSquares[i] / n;
+        const float second = asfloat(moments[i]) / n;
         const float spread = second - mean * mean;
         negative += spread < -1.0e-6 * max(second, 1.0e-12) ? 1u : 0u;
         const float variance = max(spread, 0.0) / n;

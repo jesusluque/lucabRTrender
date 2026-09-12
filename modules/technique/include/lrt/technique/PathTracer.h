@@ -57,12 +57,17 @@ struct PathProgress {
 /// What the denoiser wants beside the colour: the first hit's albedo and its
 /// shading normal, in world space, as the material saw them. Written once a
 /// frame, since they do not depend on the sample.
+/// One buffer of two planes -- a Metal kernel binds at most 31 buffers and
+/// the traced kernel stands at the limit -- the albedo's first, the
+/// normal's after it.
 struct PathAux {
-    gpu::Buffer albedo;   ///< float4 a pixel: the lobes' directional albedo at the view direction
-    gpu::Buffer normal;   ///< float4 a pixel: the shading normal, unit, facing the eye
+    gpu::Buffer planes;   ///< float4 a pixel, twice: the lobes' directional albedo at the view direction, then the shading normal, unit, facing the eye
     uint32_t    width = 0;
     uint32_t    height = 0;
-    [[nodiscard]] bool valid() const noexcept { return albedo.valid() && normal.valid(); }
+    [[nodiscard]] bool valid() const noexcept { return planes.valid(); }
+    /// Where the normal's plane starts, in float4 entries (and in bytes).
+    [[nodiscard]] uint64_t normalOffset() const noexcept { return uint64_t{width} * height; }
+    [[nodiscard]] uint64_t normalOffsetBytes() const noexcept { return normalOffset() * 16; }
 };
 
 class PathTracer {
@@ -96,8 +101,11 @@ public:
 
     /// The accumulation as it stands, for a check that reads the moments: the
     /// sum of colour times opacity (float4 a pixel, its w the paths' opacity
-    /// summed), the luminance's second moment, and the adaptive stop flags.
+    /// summed), and `moments`: the luminance's second moment as float bits, a
+    /// pixel, then the adaptive stop flags, a pixel, in one buffer of words.
     [[nodiscard]] const gpu::Buffer& sum() const noexcept { return sum_; }
+    [[nodiscard]] const gpu::Buffer& moments() const noexcept { return moments_; }
+    [[nodiscard]] uint64_t doneOffset() const noexcept { return uint64_t{width_} * height_; }
     /// With light groups: where group `g`'s mean plane starts in `sum`, in
     /// float4 entries (its sum plane is at 1 + g planes; the means follow
     /// the sums).
@@ -106,8 +114,6 @@ public:
         return (uint64_t{1} + groups + g) * width_ * height_;
     }
     [[nodiscard]] uint32_t lightGroups() const noexcept { return (sumPlanes_ - 1) / 2; }
-    [[nodiscard]] const gpu::Buffer& sumSquares() const noexcept { return sumSquares_; }
-    [[nodiscard]] const gpu::Buffer& done() const noexcept { return done_; }
 
 private:
     gpu::ShaderLibrary*               library_ = nullptr;
@@ -117,8 +123,7 @@ private:
     bool                              groups_ = false;
     uint32_t                          sumPlanes_ = 1;   ///< 1 + 2 * light groups
     gpu::Buffer                       sum_;           ///< float4 a pixel: the paths added so far
-    gpu::Buffer                       sumSquares_;    ///< float a pixel: the luminance's second moment
-    gpu::Buffer                       done_;          ///< uint a pixel: 1 once adaptive sampling stopped it
+    gpu::Buffer                       moments_;       ///< words: the second moment's float bits a pixel, then the done flags a pixel
     gpu::Buffer                       progress_;      ///< [covered, converged]
     std::optional<gpu::ComputeKernel> progressKernel_;   ///< pathDecide: the stop rule and the counters
     float                             lastErrorTarget_ = 0.02F;

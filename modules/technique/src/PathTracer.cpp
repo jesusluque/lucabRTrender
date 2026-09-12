@@ -42,10 +42,8 @@ Texture2D<uint4>               visibility;   // (instance + 1, triangle); row 0 
 RWStructuredBuffer<float4>     sum;          // paths added so far, a pixel
 RWStructuredBuffer<float4>     colour;       // their mean
 RWStructuredBuffer<float>      depth;
-RWStructuredBuffer<float4>     auxAlbedo;    // written when path.writeAux
-RWStructuredBuffer<float4>     auxNormal;
-RWStructuredBuffer<float>      sumSquares;   // the luminance's second moment, a pixel
-RWStructuredBuffer<uint>       done;         // 1 once adaptive sampling stopped the pixel
+RWStructuredBuffer<float4>     aux;          // written when path.writeAux: the albedo's plane, then the normal's
+RWStructuredBuffer<uint>       moments;      // the luminance's second moment as float bits, a pixel; then 1 once adaptive sampling stopped the pixel, a pixel
 
 static const float3 kPathLuminance = float3(0.2126, 0.7152, 0.0722);
 ConstantBuffer<CameraParams>   camera;
@@ -436,9 +434,10 @@ void tracePaths(uint3 group: SV_GroupID, uint index: SV_GroupIndex) {
     }
     const uint at = tid.y * camera.width + tid.x;
     const uint4 seen = visibility.Load(int3(int(tid.x), int(camera.height - 1 - tid.y), 0));
+    const uint pixels = camera.width * camera.height;
     if (path.accumulated == 0) {
-        done[at] = 0;   // a frame of its own: no flag from the last one
-    } else if (path.adaptive != 0 && done[at] != 0) {
+        moments[pixels + at] = 0;   // a frame of its own: no flag from the last one
+    } else if (path.adaptive != 0 && moments[pixels + at] != 0) {
         return;   // converged: its mean stands
     }
     const uint samples = max(path.samples, 1u);
@@ -450,14 +449,13 @@ void tracePaths(uint3 group: SV_GroupID, uint index: SV_GroupIndex) {
     const bool ownRays = kTraces && path.ownRays != 0;
     const Shaded first = ownRays ? shadeLensSample(tid, 0u, sampleMask(tid, 0u)) : shadeAt(tid, seen);
     if (path.writeAux != 0) {
-        auxAlbedo[at] = first.valid ? float4(stackAlbedo(first.stack, first.toEye), 1.0) : float4(0.0);
-        auxNormal[at] = first.valid ? float4(first.inputs.normalWorld, 1.0) : float4(0.0);
+        aux[at] = first.valid ? float4(stackAlbedo(first.stack, first.toEye), 1.0) : float4(0.0);
+        aux[pixels + at] = first.valid ? float4(first.inputs.normalWorld, 1.0) : float4(0.0);
     }
     float3 total = float3(0.0);
     float  alpha = 0.0;
     float  hitDepth = 0.0;
     float  squares = 0.0;   // sum of each sample's luminance squared
-    const uint pixels = camera.width * camera.height;
     uint group = 0;
     Groups groups = groupsZero();
     for (uint sample = 0; sample < samples && (first.valid || ownRays); ++sample) {
@@ -537,8 +535,8 @@ void tracePaths(uint3 group: SV_GroupID, uint index: SV_GroupIndex) {
     // The luminance's second moment. Whether the pixel stops is decided by
     // pathDecide, after the pass, where its neighbours' spread can be read
     // without a race.
-    const float keptSquares = path.accumulated != 0 ? sumSquares[at] : 0.0;
-    sumSquares[at] = keptSquares + squares;
+    const float keptSquares = path.accumulated != 0 ? asfloat(moments[at]) : 0.0;
+    moments[at] = asuint(keptSquares + squares);
 }
 
 // The adaptive stop rule, one thread a pixel, after a pass. A pixel stops when
@@ -556,7 +554,7 @@ RWStructuredBuffer<uint> progress;   // [covered, converged], by atomics; cleare
 float pixelVariance(uint at, out float mean, out float n) {
     n = max(sum[at].w, 1.0);
     mean = dot(sum[at].rgb, kPathLuminance) / n;
-    const float second = sumSquares[at] / n;
+    const float second = asfloat(moments[at]) / n;
     return max(second - mean * mean, 0.0) / n;
 }
 
@@ -570,12 +568,13 @@ void pathDecide(uint3 tid: SV_DispatchThreadID) {
     const uint x = at % camera.width;
     const uint y = at / camera.width;
     const uint4 seen = visibility.Load(int3(int(x), int(camera.height - 1 - y), 0));
+    const uint pixels = camera.width * camera.height;
     if (seen.x == 0) {
-        done[at] = 1;   // nothing drawn converges at once, and is not counted
+        moments[pixels + at] = 1;   // nothing drawn converges at once, and is not counted
         return;
     }
     InterlockedAdd(progress[0], 1u);
-    if (done[at] != 0) {
+    if (moments[pixels + at] != 0) {
         InterlockedAdd(progress[1], 1u);
         return;
     }
@@ -608,7 +607,7 @@ void pathDecide(uint3 tid: SV_DispatchThreadID) {
     const float variance = max(own, count > 0 ? around / float(count) : 0.0);
     const float relative = sqrt(variance) / max(mean, 1.0e-3);
     if (relative < path.errorTarget) {
-        done[at] = 1;
+        moments[pixels + at] = 1;
         InterlockedAdd(progress[1], 1u);
     }
 }
@@ -694,20 +693,13 @@ Result<void> PathTracer::trace(gpu::CommandBatch& batch, const VisibilityTargets
         if (!made) return std::move(made).error();
         sum_ = std::move(*made);
         sumPlanes_ = planes;
-        gpu::BufferDesc squares;
-        squares.bytes = pixels * 4;
-        squares.elementBytes = 4;
-        squares.label = "path.squares";
-        auto madeSquares = gpu::Buffer::create(*device_, squares);
-        if (!madeSquares) return std::move(madeSquares).error();
-        sumSquares_ = std::move(*madeSquares);
-        gpu::BufferDesc done;
-        done.bytes = pixels * 4;
-        done.elementBytes = 4;
-        done.label = "path.done";
-        auto madeDone = gpu::Buffer::create(*device_, done);
-        if (!madeDone) return std::move(madeDone).error();
-        done_ = std::move(*madeDone);
+        gpu::BufferDesc moments;
+        moments.bytes = pixels * 4 * 2;
+        moments.elementBytes = 4;
+        moments.label = "path.moments";
+        auto madeMoments = gpu::Buffer::create(*device_, moments);
+        if (!madeMoments) return std::move(madeMoments).error();
+        moments_ = std::move(*madeMoments);
         if (!progress_.valid()) {
             gpu::BufferDesc progress;
             progress.bytes = 2 * 4;
@@ -726,16 +718,12 @@ Result<void> PathTracer::trace(gpu::CommandBatch& batch, const VisibilityTargets
     }
     if (aux != nullptr && (aux->width != targets.width || aux->height != targets.height || !aux->valid())) {
         gpu::BufferDesc desc;
-        desc.bytes = pixels * 16;
+        desc.bytes = pixels * 16 * 2;
         desc.elementBytes = 16;
-        desc.label = "path.albedo";
-        auto albedo = gpu::Buffer::create(*device_, desc);
-        if (!albedo) return std::move(albedo).error();
-        desc.label = "path.normal";
-        auto normal = gpu::Buffer::create(*device_, desc);
-        if (!normal) return std::move(normal).error();
-        aux->albedo = std::move(*albedo);
-        aux->normal = std::move(*normal);
+        desc.label = "path.aux";
+        auto planes = gpu::Buffer::create(*device_, desc);
+        if (!planes) return std::move(planes).error();
+        aux->planes = std::move(*planes);
         aux->width = targets.width;
         aux->height = targets.height;
     }
@@ -757,11 +745,9 @@ Result<void> PathTracer::trace(gpu::CommandBatch& batch, const VisibilityTargets
         cursor["depth"].setBinding(out.depth.rhi());
         // A buffer has to be bound either way; without aux the colour stands in
         // and the kernel never writes it.
-        cursor["auxAlbedo"].setBinding(aux != nullptr ? aux->albedo.rhi() : out.colour.rhi());
-        cursor["auxNormal"].setBinding(aux != nullptr ? aux->normal.rhi() : out.colour.rhi());
+        cursor["aux"].setBinding(aux != nullptr ? aux->planes.rhi() : out.colour.rhi());
         cursor["path"]["writeAux"].setData(uint32_t{aux != nullptr ? 1u : 0u});
-        cursor["sumSquares"].setBinding(sumSquares_.rhi());
-        cursor["done"].setBinding(done_.rhi());
+        cursor["moments"].setBinding(moments_.rhi());
         if (groups) {
             cursor["groupCount"].setData(groupCount);
         }
@@ -794,7 +780,7 @@ Result<void> PathTracer::trace(gpu::CommandBatch& batch, const VisibilityTargets
 }
 
 Result<PathProgress> PathTracer::progress(const VisibilityTargets& targets) {
-    if (!progressKernel_.has_value() || !done_.valid()) {
+    if (!progressKernel_.has_value() || !moments_.valid()) {
         return Error(ErrorCode::InvalidArgument, "path tracer: nothing traced yet");
     }
     auto ids = targets.ids.view(0);
@@ -805,8 +791,7 @@ Result<PathProgress> PathTracer::progress(const VisibilityTargets& targets) {
     progressKernel_->dispatch(batch, {targets.width * targets.height, 1, 1}, [&](rhi::ShaderCursor cursor) {
         cursor["visibility"].setBinding((*ids).get());
         cursor["sum"].setBinding(sum_.rhi());
-        cursor["sumSquares"].setBinding(sumSquares_.rhi());
-        cursor["done"].setBinding(done_.rhi());
+        cursor["moments"].setBinding(moments_.rhi());
         cursor["progress"].setBinding(progress_.rhi());
         setCamera(cursor["camera"], render::Projection{}, targets.width, targets.height);
         cursor["path"]["errorTarget"].setData(lastErrorTarget_);

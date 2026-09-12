@@ -848,12 +848,13 @@ AovView Engine::aovView(const render::RenderTargets& targets, AovSource aov) con
     // was not path traced.
     case AovKind::Albedo:
         if (pathAuxValid_ && pathAux_.width == targets.width && pathAux_.height == targets.height) {
-            view.buffer = &pathAux_.albedo;
+            view.buffer = &pathAux_.planes;
         }
         return view;
     case AovKind::ShadingNormal:
         if (pathAuxValid_ && pathAux_.width == targets.width && pathAux_.height == targets.height) {
-            view.buffer = &pathAux_.normal;
+            view.buffer = &pathAux_.planes;
+            view.offset = static_cast<uint32_t>(pathAux_.normalOffset());
         }
         return view;
     // A light group's plane, one of the frame's in one buffer: the offset
@@ -1510,7 +1511,7 @@ Result<void> Engine::render(const render::Projection& projection, const render::
                 }
             }
             if (denoiser_.has_value()) {
-                if (auto ran = denoiser_->denoise(meshLayer_.colour, &pathAux_.albedo, &pathAux_.normal,
+                if (auto ran = denoiser_->denoise(meshLayer_.colour, &pathAux_.planes, 0, pathAux_.normalOffsetBytes(),
                                                  meshLayer_.colour, settings.width, settings.height);
                     !ran) {
                     denoiserFailed_ = true;

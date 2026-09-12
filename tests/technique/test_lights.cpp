@@ -2258,8 +2258,7 @@ TEST_CASE("the path tracer's first hit reports its albedo and shading normal", "
     {
         gpu::CommandBatch batch(*gpu->device);
         check.dispatch(batch, {1, 1, 1}, [&](rhi::ShaderCursor cursor) {
-            cursor["albedo"].setBinding(aux.albedo.rhi());
-            cursor["normal"].setBinding(aux.normal.rhi());
+            cursor["planes"].setBinding(aux.planes.rhi());
             cursor["counts"].setBinding(counts.rhi());
             cursor["worst"].setBinding(worst.rhi());
             cursor["aux"]["albedoR"].setData(0.8F);
@@ -2413,10 +2412,10 @@ TEST_CASE("the denoiser lowers a path traced frame's error against a deep refere
     auto unguided = gpu::Buffer::create(*gpu->device, desc);
     REQUIRE(guided);
     REQUIRE(unguided);
-    if (auto r = denoiser->denoise(noisy.colour, &aux.albedo, &aux.normal, *guided, w, h); !r) {
+    if (auto r = denoiser->denoise(noisy.colour, &aux.planes, 0, aux.normalOffsetBytes(), *guided, w, h); !r) {
         FAIL(r.error().toString());
     }
-    if (auto r = denoiser->denoise(noisy.colour, nullptr, nullptr, *unguided, w, h); !r) {
+    if (auto r = denoiser->denoise(noisy.colour, nullptr, 0, 0, *unguided, w, h); !r) {
         FAIL(r.error().toString());
     }
 
@@ -2560,7 +2559,7 @@ TEST_CASE("adaptive sampling stops a pixel where its error estimate says, and th
             cursor["copy"]["words"].setData(w * h * 4);
         });
         copier->dispatch(batch, {w * h, 1, 1}, [&](rhi::ShaderCursor cursor) {
-            cursor["src"].setBinding(tracer->sumSquares().rhi());
+            cursor["src"].setBinding(tracer->moments().rhi());   // the squares are its first plane
             cursor["dst"].setBinding(referenceSquares.rhi());
             cursor["copy"]["words"].setData(w * h);
         });
@@ -2604,8 +2603,7 @@ TEST_CASE("adaptive sampling stops a pixel where its error estimate says, and th
                 cursor["colour"].setBinding(adaptiveOut.colour.rhi());
                 cursor["reference"].setBinding(reference.colour.rhi());
                 cursor["sum"].setBinding(tracer->sum().rhi());
-                cursor["sumSquares"].setBinding(tracer->sumSquares().rhi());
-                cursor["done"].setBinding(tracer->done().rhi());
+                cursor["moments"].setBinding(tracer->moments().rhi());
                 cursor["referenceSum"].setBinding(referenceSum.rhi());
                 cursor["referenceSquares"].setBinding(referenceSquares.rhi());
                 cursor["counts"].setBinding(counts.rhi());

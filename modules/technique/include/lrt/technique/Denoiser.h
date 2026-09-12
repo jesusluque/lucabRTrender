@@ -36,9 +36,11 @@ public:
     /// the path tracer's PathAux). The images are the engine's own buffers,
     /// shared with OIDN rather than copied; nothing touches the host. Waits
     /// for the filter, so the caller's earlier work must be submitted.
-    [[nodiscard]] Result<void> denoise(const gpu::Buffer& colour, const gpu::Buffer* albedo,
-                                       const gpu::Buffer* normal, gpu::Buffer& out, uint32_t width,
-                                       uint32_t height);
+    /// `aux`, when given, holds the albedo's plane at `albedoOffsetBytes` and
+    /// the normal's at `normalOffsetBytes` (PathAux's one buffer).
+    [[nodiscard]] Result<void> denoise(const gpu::Buffer& colour, const gpu::Buffer* aux,
+                                       uint64_t albedoOffsetBytes, uint64_t normalOffsetBytes, gpu::Buffer& out,
+                                       uint32_t width, uint32_t height);
 
 private:
     struct Impl;

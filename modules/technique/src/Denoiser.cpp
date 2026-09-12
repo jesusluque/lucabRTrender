@@ -168,8 +168,8 @@ Result<Denoiser> Denoiser::create(gpu::Device& device) {
 #endif
 }
 
-Result<void> Denoiser::denoise(const gpu::Buffer& colour, const gpu::Buffer* albedo, const gpu::Buffer* normal,
-                               gpu::Buffer& out, uint32_t width, uint32_t height) {
+Result<void> Denoiser::denoise(const gpu::Buffer& colour, const gpu::Buffer* aux, uint64_t albedoOffsetBytes,
+                               uint64_t normalOffsetBytes, gpu::Buffer& out, uint32_t width, uint32_t height) {
 #if LRT_HAVE_OIDN
     Impl& impl = *impl_;
     const size_t pixelStride = 16;   // float4 a pixel; OIDN reads the first three
@@ -185,8 +185,9 @@ Result<void> Denoiser::denoise(const gpu::Buffer& colour, const gpu::Buffer* alb
             return Error(ErrorCode::InvalidArgument,
                          "denoiser made without a shader library: on Metal the staging copies are a kernel");
         }
-        const auto copyWords = [&](gpu::CommandBatch& batch, const gpu::Buffer& from, const gpu::Buffer& to) {
-            const uint32_t words = static_cast<uint32_t>(bytes / 4);
+        const auto copyWords = [&](gpu::CommandBatch& batch, const gpu::Buffer& from, const gpu::Buffer& to,
+                                   uint64_t count = 0) {
+            const uint32_t words = static_cast<uint32_t>((count != 0 ? count : bytes) / 4);
             impl.copy->dispatch(batch, {words, 1, 1}, [&](rhi::ShaderCursor cursor) {
                 cursor["src"].setBinding(from.rhi());
                 cursor["dst"].setBinding(to.rhi());
@@ -195,8 +196,9 @@ Result<void> Denoiser::denoise(const gpu::Buffer& colour, const gpu::Buffer* alb
         };
         LRT_TRY(impl.stage(impl.colour, bytes, "denoise.colour"));
         LRT_TRY(impl.stage(impl.output, bytes, "denoise.output"));
-        if (albedo != nullptr) LRT_TRY(impl.stage(impl.albedo, bytes, "denoise.albedo"));
-        if (normal != nullptr) LRT_TRY(impl.stage(impl.normal, bytes, "denoise.normal"));
+        // The aux planes travel as the one buffer they are; the images
+        // name their planes by offset.
+        if (aux != nullptr) LRT_TRY(impl.stage(impl.albedo, aux->bytes(), "denoise.aux"));
         // In: the engine's buffers into the tracked ones, on the device.
         gpu::CommandBatch batch(*impl.gpu);
         copyWords(batch, colour, impl.colour.wrapped);
@@ -205,20 +207,18 @@ Result<void> Denoiser::denoise(const gpu::Buffer& colour, const gpu::Buffer* alb
         // a fresh private buffer holds anything there. Seeded from the input,
         // the alpha that comes back is the input's.
         copyWords(batch, colour, impl.output.wrapped);
-        if (albedo != nullptr) copyWords(batch, *albedo, impl.albedo.wrapped);
-        if (normal != nullptr) copyWords(batch, *normal, impl.normal.wrapped);
+        if (aux != nullptr) copyWords(batch, *aux, impl.albedo.wrapped, aux->bytes());
         LRT_TRY(batch.submit(true));
         colourShared = impl.colour.shared;
         outShared = impl.output.shared;
-        albedoShared = albedo != nullptr ? impl.albedo.shared : nullptr;
-        normalShared = normal != nullptr ? impl.normal.shared : nullptr;
+        albedoShared = aux != nullptr ? impl.albedo.shared : nullptr;
+        normalShared = albedoShared;
     } else {
         colourShared = impl.shareDirect(colour);
         outShared = impl.shareDirect(out);
-        albedoShared = albedo != nullptr ? impl.shareDirect(*albedo) : nullptr;
-        normalShared = normal != nullptr ? impl.shareDirect(*normal) : nullptr;
-        if (colourShared == nullptr || outShared == nullptr || (albedo != nullptr && albedoShared == nullptr) ||
-            (normal != nullptr && normalShared == nullptr)) {
+        albedoShared = aux != nullptr ? impl.shareDirect(*aux) : nullptr;
+        normalShared = albedoShared;
+        if (colourShared == nullptr || outShared == nullptr || (aux != nullptr && albedoShared == nullptr)) {
             const char* message = nullptr;
             oidnGetDeviceError(impl.device, &message);
             return Error(ErrorCode::DeviceFailure,
@@ -230,14 +230,14 @@ Result<void> Denoiser::denoise(const gpu::Buffer& colour, const gpu::Buffer* alb
     oidnSetFilterImage(impl.filter, "output", outShared, OIDN_FORMAT_FLOAT3, width, height, 0, pixelStride,
                        rowStride);
     if (albedoShared != nullptr) {
-        oidnSetFilterImage(impl.filter, "albedo", albedoShared, OIDN_FORMAT_FLOAT3, width, height, 0, pixelStride,
-                           rowStride);
+        oidnSetFilterImage(impl.filter, "albedo", albedoShared, OIDN_FORMAT_FLOAT3, width, height,
+                           albedoOffsetBytes, pixelStride, rowStride);
     } else {
         oidnUnsetFilterImage(impl.filter, "albedo");
     }
     if (normalShared != nullptr) {
-        oidnSetFilterImage(impl.filter, "normal", normalShared, OIDN_FORMAT_FLOAT3, width, height, 0, pixelStride,
-                           rowStride);
+        oidnSetFilterImage(impl.filter, "normal", normalShared, OIDN_FORMAT_FLOAT3, width, height,
+                           normalOffsetBytes, pixelStride, rowStride);
     } else {
         oidnUnsetFilterImage(impl.filter, "normal");
     }
@@ -249,8 +249,7 @@ Result<void> Denoiser::denoise(const gpu::Buffer& colour, const gpu::Buffer* alb
     if (!impl.metal) {
         oidnReleaseBuffer(colourShared);
         oidnReleaseBuffer(outShared);
-        if (albedoShared != nullptr) oidnReleaseBuffer(albedoShared);
-        if (normalShared != nullptr) oidnReleaseBuffer(normalShared);
+        if (albedoShared != nullptr) oidnReleaseBuffer(albedoShared);   // the normal shares it
     }
     if (error != OIDN_ERROR_NONE) {
         return Error(ErrorCode::DeviceFailure, std::string("OIDN: ") + (message != nullptr ? message : "unknown"));
@@ -268,7 +267,7 @@ Result<void> Denoiser::denoise(const gpu::Buffer& colour, const gpu::Buffer* alb
     }
     return ok();
 #else
-    (void)colour; (void)albedo; (void)normal; (void)out; (void)width; (void)height;
+    (void)colour; (void)aux; (void)albedoOffsetBytes; (void)normalOffsetBytes; (void)out; (void)width; (void)height;
     return Error(ErrorCode::Unsupported, "built without OIDN");
 #endif
 }

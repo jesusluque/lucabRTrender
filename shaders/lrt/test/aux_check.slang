@@ -14,8 +14,7 @@ struct AuxParams {
     uint   pad0; uint pad1; uint pad2;
 };
 
-StructuredBuffer<float4>   albedo;
-StructuredBuffer<float4>   normal;
+StructuredBuffer<float4>   planes;   // the albedo's plane, then the normal's
 RWStructuredBuffer<uint>   counts;   // [covered, albedo off, not unit, not facing]
 RWStructuredBuffer<float>  worst;    // [albedo error, length error]
 ConstantBuffer<AuxParams>  aux;
@@ -34,8 +33,8 @@ void auxCheck(uint3 tid: SV_DispatchThreadID) {
     float worstLength = 0.0;
     const float3 expected = float3(aux.albedoR, aux.albedoG, aux.albedoB);
     for (uint i = 0; i < aux.pixels; ++i) {
-        const float4 a = albedo[i];
-        const float4 n = normal[i];
+        const float4 a = planes[i];
+        const float4 n = planes[aux.pixels + i];
         if (a.w <= 0.0) {
             continue;
         }

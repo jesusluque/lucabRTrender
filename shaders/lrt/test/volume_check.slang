@@ -13,8 +13,7 @@ struct CheckParams {
     uint pad0;
 };
 
-StructuredBuffer<uint>     words;
-StructuredBuffer<float>    leafMax;
+StructuredBuffer<uint>     words;   // the leaf maxima are in it too, at leafBase
 RWStructuredBuffer<uint>   counts;   // [active voxels, leaf maxima off, leaves checked]
 ConstantBuffer<CheckParams> check;
 
@@ -51,7 +50,7 @@ void volumeLeafMaxCheck(uint3 tid: SV_DispatchThreadID) {
         }
     }
     InterlockedAdd(counts[2], 1u);
-    if (largest != leafMax[check.leafBase + i]) {
+    if (largest != asfloat(words[check.leafBase + i])) {
         InterlockedAdd(counts[1], 1u);
     }
 }
