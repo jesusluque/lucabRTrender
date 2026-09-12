@@ -10,7 +10,7 @@ namespace lrt::technique {
 namespace {
 
 const char* kKernelPrelude = R"(
-import lrt.light.lights;
+import lrt.light.lights_image;
 
 struct LightingParams {
     uint  samples;
@@ -148,7 +148,7 @@ void shadeMaterials(uint3 group: SV_GroupID, uint index: SV_GroupIndex) {
             if (!lightLinked(light.lightCategory, s.instance.categoriesLo, s.instance.categoriesHi)) {
                 continue;
             }
-            const LightSample ls = sampleLight(light, inputs.positionWorld, inputs.normalWorld, u);
+            const LightSample ls = sampleLightImaged(light, inputs.positionWorld, inputs.normalWorld, u);
             if (!ls.valid) {
                 continue;
             }
@@ -176,7 +176,7 @@ void shadeMaterials(uint3 group: SV_GroupID, uint index: SV_GroupIndex) {
             float3 sum = float3(0.0);
             for (uint i = 0; i < samples; ++i) {
                 const LightSample ls =
-                    sampleLight(light, inputs.positionWorld, inputs.normalWorld, sampleAt(tid, k, i));
+                    sampleLightImaged(light, inputs.positionWorld, inputs.normalWorld, sampleAt(tid, k, i));
                 if (!ls.valid) {
                     continue;
                 }

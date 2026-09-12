@@ -6,7 +6,7 @@
 // the frame left empty, opaque because nothing lies behind a dome.
 module dome_background;
 import camera;
-import lrt.light.lights;
+import lrt.light.lights_image;
 
 struct BackgroundParams {
     // view to world, rows of a 3x4
@@ -45,7 +45,7 @@ void domeBackground(uint3 tid: SV_DispatchThreadID) {
         if (lights[k].kind != kLightDome) {
             continue;
         }
-        sky += lightEmission(lights[k]) * domeImage(lights[k], world);
+        sky += domeBackground(lights[k], world);
         any = true;
     }
     if (any) {

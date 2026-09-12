@@ -5,7 +5,7 @@
 // over each bin. A light whose samples do not follow the density it reports
 // would light a path tracer wrongly however right its radiance looked.
 module light_check;
-import lrt.light.lights;
+import lrt.light.lights_image;
 
 struct LightCheckParams {
     uint   thetaBins;
@@ -162,7 +162,7 @@ void lightDraw(uint3 tid: SV_DispatchThreadID) {
     if (i >= params.samples) {
         return;
     }
-    const LightSample s = sampleLight(lights[0], params.point.xyz, params.normal.xyz, sampleAt(i));
+    const LightSample s = sampleLightImaged(lights[0], params.point.xyz, params.normal.xyz, sampleAt(i));
     float3 axis;
     float cosMax;
     float2 half;
@@ -268,11 +268,11 @@ void lightConsistent(uint3 tid: SV_DispatchThreadID) {
     uint differ = 0;
     float worstRelative = 0.0;
     for (uint i = 0; i < params.samples; ++i) {
-        const LightSample s = sampleLight(lights[0], params.point.xyz, params.normal.xyz, sampleAt(i));
+        const LightSample s = sampleLightImaged(lights[0], params.point.xyz, params.normal.xyz, sampleAt(i));
         if (!s.valid || s.delta) {
             continue;
         }
-        const float density = lightPdf(lights[0], params.point.xyz, params.normal.xyz, s.wi);
+        const float density = lightPdfImaged(lights[0], params.point.xyz, params.normal.xyz, s.wi);
         const float relative = abs(density - s.pdf) / max(s.pdf, 1.0e-9);
         worstRelative = max(worstRelative, relative);
         differ += relative > 1.0e-3 ? 1u : 0u;
@@ -326,7 +326,7 @@ void lightExpect(uint3 tid: SV_DispatchThreadID) {
                     for (uint k = 0; k < sub; ++k) {
                         const float u = (float(p * sub + k) + 0.5) * du;
                         const float3 w = domeDirection(light, float2(u, v));
-                        sum += lightPdf(light, params.point.xyz, params.normal.xyz, w) * kPiCheck * 2.0 * kPiCheck *
+                        sum += lightPdfImaged(light, params.point.xyz, params.normal.xyz, w) * kPiCheck * 2.0 * kPiCheck *
                                sinTheta * du * dv;
                     }
                 }
@@ -363,10 +363,10 @@ void lightExpect(uint3 tid: SV_DispatchThreadID) {
                     if (cone) {
                         const float3 w = normalize(axis * cosTheta + coneX * (coneSin * cos(phi)) +
                                                    coneY * (coneSin * sin(phi)));
-                        sum += lightPdf(light, params.point.xyz, params.normal.xyz, w) * dCos * dPhi;
+                        sum += lightPdfImaged(light, params.point.xyz, params.normal.xyz, w) * dCos * dPhi;
                     } else {
                         const float3 w = float3(sinTheta * cos(phi), sinTheta * sin(phi), cos(theta));
-                        sum += lightPdf(light, params.point.xyz, params.normal.xyz, w) * sinTheta * dTheta * dPhi;
+                        sum += lightPdfImaged(light, params.point.xyz, params.normal.xyz, w) * sinTheta * dTheta * dPhi;
                     }
                 }
             }
