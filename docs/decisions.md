@@ -1269,8 +1269,18 @@ enough that what is left is the light and not the noise.
 - **The two dome densities are not combined.** A dome is sampled either by
   its image or around the surface, whichever its variation calls for, and
   never both with MIS weighing between them: that is the path tracer's, M6.
-- **No light or shadow linking**, no light instancing, no IES profiles and no
-  cylinder lights.
+- **No light or shadow linking** yet, though the ground is surveyed: USD
+  resolves the collections for us if the delegate registers
+  `HdsiLightLinkingSceneIndex` (`RegisterSceneIndexForRenderer` with our
+  display name, from `RendererPlugin.cpp`), after which an rprim's categories
+  arrive through `HdSceneDelegate::GetCategories` and a light carries
+  `lightLink` and `shadowLink` as light parameters. What it needs here is a
+  field of its own on both sides -- `InstanceRecord.flags` is spent, bit 0 on
+  double sidedness and bits 8 and up on the material row -- holding an index
+  into a table of deduplicated 64-bit category masks, which shading then
+  tests before it samples a light and before it traces its shadow. The plan's
+  check is counters with the link on and off.
+- **No light instancing, no IES profiles and no cylinder lights.**
 - **Splats are not relit.** `LrtSplatLightingAPI` is not implemented; splats
   carry the radiance they were baked with.
 - **Contact shadows** closer than the ray's offset are missed, and a cutout
