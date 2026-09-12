@@ -79,6 +79,17 @@ void HdLrtLight::Sync(HdSceneDelegate* sceneDelegate, HdRenderParam* renderParam
     lamp.shadow = boolOf(sceneDelegate, id, HdLightTokens->shadowEnable, true);
     lamp.coneAngle = floatOf(sceneDelegate, id, HdLightTokens->shapingConeAngle, 0.0F) * degrees;
     lamp.coneSoftness = floatOf(sceneDelegate, id, HdLightTokens->shapingConeSoftness, 0.0F);
+    // UsdLux's IES shaping: the file, resolved as the dome's image is; the
+    // engine reads it once per path.
+    {
+        const VtValue ies = sceneDelegate->GetLightParamValue(id, HdLightTokens->shapingIesFile);
+        if (ies.IsHolding<SdfAssetPath>()) {
+            const SdfAssetPath& asset = ies.UncheckedGet<SdfAssetPath>();
+            lamp.iesFile = !asset.GetResolvedPath().empty() ? asset.GetResolvedPath() : asset.GetAssetPath();
+        }
+        lamp.iesAngleScale = floatOf(sceneDelegate, id, HdLightTokens->shapingIesAngleScale, 0.0F);
+        lamp.iesNormalize = boolOf(sceneDelegate, id, HdLightTokens->shapingIesNormalize, false);
+    }
     const auto tokenOf = [&](const TfToken& name) -> std::string {
         const VtValue value = sceneDelegate->GetLightParamValue(id, name);
         if (value.IsHolding<TfToken>()) return value.UncheckedGet<TfToken>().GetString();

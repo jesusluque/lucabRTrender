@@ -1237,10 +1237,54 @@ the shader library to make it. Checked by a kernel that writes the power a
 second time from the record alone: five lights of mixed kinds, exposures and
 `normalize`, 0 shares missing their power.
 
+### IES profiles, added with M6
+
+UsdLux's `ShapingAPI` IES: `shaping:ies:file`, `angleScale`, `normalize`.
+`io::readIes` reads an LM-63 file as authored -- the vertical and horizontal
+angle lists and the candela table, the multiplier, the photometric type --
+and nothing is normalised, resampled or mirrored on the host: each of those
+is arithmetic on the data. The frame's profiles are concatenated into one
+values buffer with a record each (`IesRecord`), and the shader samples the
+table where it samples the light: the emission direction in the light's own
+axes, straight down its -Z at theta 0 as UsdLux orients a profile, bilinear
+between the authored nodes, with the horizontal range folded by the symmetry
+its last angle declares (one angle: rotational; 90: quadrant; 180: bilateral).
+It modulates radiance only, never the density, so every pdf and every
+chi-square stands as it was.
+
+- **`angleScale`** as UsdLux defines it: positive divides theta, negative
+  scales from 180 degrees, zero is none.
+- **`normalize`** divides by the profile's power. UsdLux says the intensity is
+  "scaled by the overall power of the IES profile ... integrating the
+  luminous intensity over all solid angle patches", which leaves the constant
+  open; here the power is that integral over 4 pi, so a normalised profile
+  has mean intensity one over the sphere and a uniform profile is unchanged.
+  The integral is a statistic, so `ies_prepare` computes it on the device at
+  commit, over the patches the angle lists define, folded by the symmetry.
+
+Checked three ways:
+
+- **Every node returns its own candela**: 0 of 37 off, worst 2.2e-5 relative.
+- **Between nodes, the closed form**: a profile of 1000 cos^4(theta) authored
+  at five-degree nodes, sampled at 4096 directions against the formula. The
+  error of piecewise-linear interpolation is bounded by h^2/8 max|f''| --
+  0.0873^2 / 8 * 4000 = 3.8 -- and the worst read 3.77.
+- **Through Hydra**, a cutoff profile (one to 20 degrees, zero from 25) on a
+  small sphere light over the plane: inside the cone the frame is the frame
+  without the profile, word for word (0 of 2785 pixels differ), and outside
+  it is black (0 of 1488 lit). The band between is the profile's own ramp,
+  20 to 25, spread by the sphere's angular radius of 1.43 degrees: a first
+  check that skipped three degrees about the cutoff read 1626 lit pixels,
+  all within 26.3 degrees and all the ramp's, and was wrong, not the light.
+
+Not done: photometric types B and A are read but sampled as C; `TILT=<file>`
+is treated as none; the splat relighting samples a light's centre without
+its profile.
+
 ### In Hydra
 
 The delegate takes sphere, disk, rect, distant, dome and cylinder lights as
-sprims. A
+sprims, and reads a light's IES profile where `ShapingAPI` authors one. A
 light's samples per pixel are a render setting, `lrt:lightSamples`, reachable
 from `StageRenderer` and from `lrt view --light-samples`: one is what an
 interactive frame takes, and a comparison against a closed form asks for
@@ -1359,7 +1403,7 @@ enough that what is left is the light and not the noise.
   where it projects, and with it naming another the plane is lit as if
   nothing were there -- 0 pixels of 7440 away from the closed form either
   way. What arrives from USD is the same half that light linking is missing.
-- **No light instancing and no IES profiles.** (The cylinder arrived with M6.)
+- **No light instancing.** (The cylinder and IES profiles arrived with M6.)
 - **Splats are relit where their prim asks**, and baked everywhere else.
   `LrtSplatLightingAPI` (`primvars:lrt:splat:relight`, a constant primvar, so
   it is inherited) turns a cloud over to the scene's lights: the albedo is the

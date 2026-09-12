@@ -17,6 +17,7 @@
 #pragma once
 
 #include <map>
+#include <set>
 #include <memory>
 #include <mutex>
 #include <atomic>
@@ -39,6 +40,7 @@
 #include "lrt/lod/Lrtc.h"
 #include "lrt/material/MaterialCompiler.h"
 #include "lrt/material/TextureStore.h"
+#include "lrt/io/Ies.h"
 #include "lrt/light/LightTable.h"
 #include "lrt/technique/MaterialShading.h"
 #include "lrt/technique/Denoiser.h"
@@ -294,6 +296,10 @@ private:
     bool                                      denoiserFailed_ = false;   ///< said once
     std::map<pxr::SdfPath, MaterialEntry>     materials_;
     std::map<pxr::SdfPath, light::Light>      lights_;
+    /// IES profiles by path, read once; a file that cannot be read is said
+    /// once and the light goes unshaped.
+    std::map<std::string, std::shared_ptr<const io::IesProfile>> iesProfiles_;
+    std::set<std::string>                     iesFailed_;
     std::optional<light::LightTable>          lightTable_;
     std::atomic<uint32_t>                     lightSamples_{1};
     std::atomic<bool>                         chooseLights_{false};

@@ -25,6 +25,7 @@ public static const uint kLightUnlinked = 0xFFFFFFFF;
 public static const uint kLightShadow      = 1;   // casts one
 public static const uint kLightNormalize   = 2;   // intensity is power, not radiance: divide by area
 public static const uint kLightTemperature = 4;   // tint by the blackbody of `temperature`
+public static const uint kLightIesNormalize = 8;   // divide the IES intensity by the profile's power
 
 public struct LightRecord {
     public uint   kind;
@@ -41,10 +42,101 @@ public struct LightRecord {
     public uint   lightCategory;    // the bit a prim needs for this light to light it
     public uint   shadowCategory;   // and for it to cast this light's shadow
     public float  cumulative;       // its share of the frame's power, accumulated
+    public uint   ies;              // its IES profile's row; 0xFFFFFFFF: none
+    public float  iesAngleScale;    // UsdLux: > 0 divides theta, < 0 scales from 180, 0 none
+    public uint   pad0;
+    public uint   pad1;
     public float4 row0;          // light to world, rows of a 3x4
     public float4 row1;
     public float4 row2;
 };
+
+/// One IES profile: where its angle lists and candela table sit in
+/// `iesValues`, and its power, for normalize.
+public struct IesRecord {
+    public uint  verticalOffset;
+    public uint  verticalCount;
+    public uint  horizontalOffset;
+    public uint  horizontalCount;
+    public uint  candelaOffset;
+    public uint  photometricType;
+    public float multiplier;
+    public float power;   // mean intensity over the sphere
+};
+
+public RWStructuredBuffer<IesRecord> iesRecords;
+public StructuredBuffer<float>     iesValues;
+
+/// The profile's intensity at a vertical angle and a horizontal one, in
+/// degrees, bilinear between the nodes it authored; the horizontal range is
+/// folded by the symmetry its last angle declares, as LM-63 has it.
+public float iesLookup(IesRecord r, float thetaDeg, float phiDeg) {
+    const uint nv = r.verticalCount;
+    const uint nh = r.horizontalCount;
+    float phi = phiDeg;
+    if (nh > 1) {
+        const float last = iesValues[r.horizontalOffset + nh - 1];
+        phi = phi - 360.0 * floor(phi / 360.0);
+        if (last <= 90.0 + 1.0e-3) {
+            phi = phi - 180.0 * floor(phi / 180.0);
+            if (phi > 90.0) phi = 180.0 - phi;
+        } else if (last <= 180.0 + 1.0e-3) {
+            if (phi > 180.0) phi = 360.0 - phi;
+        }
+    }
+    uint i = 0;
+    while (i + 1 < nv && iesValues[r.verticalOffset + i + 1] < thetaDeg) {
+        ++i;
+    }
+    const float t0 = iesValues[r.verticalOffset + i];
+    const float t1 = i + 1 < nv ? iesValues[r.verticalOffset + i + 1] : t0;
+    const float ft = t1 > t0 ? clamp((thetaDeg - t0) / (t1 - t0), 0.0, 1.0) : 0.0;
+    uint j = 0;
+    float fp = 0.0;
+    if (nh > 1) {
+        while (j + 1 < nh && iesValues[r.horizontalOffset + j + 1] < phi) {
+            ++j;
+        }
+        const float p0 = iesValues[r.horizontalOffset + j];
+        const float p1 = j + 1 < nh ? iesValues[r.horizontalOffset + j + 1] : p0;
+        fp = p1 > p0 ? clamp((phi - p0) / (p1 - p0), 0.0, 1.0) : 0.0;
+    }
+    const uint i1 = min(i + 1, nv - 1);
+    const uint j1 = min(j + 1, nh - 1);
+    const float c00 = iesValues[r.candelaOffset + j * nv + i];
+    const float c01 = iesValues[r.candelaOffset + j * nv + i1];
+    const float c10 = iesValues[r.candelaOffset + j1 * nv + i];
+    const float c11 = iesValues[r.candelaOffset + j1 * nv + i1];
+    const float value = lerp(lerp(c00, c01, ft), lerp(c10, c11, ft), fp);
+    return value * r.multiplier;
+}
+
+/// The IES factor on what `l` emits towards a point that sees it along
+/// `wi`: the emission direction in the light's own axes, straight down its
+/// -Z at theta 0, as UsdLux orients a profile. One where there is no
+/// profile. Radiance only -- never the density, so every pdf stands.
+public float iesIntensity(LightRecord l, float3 wi) {
+    if (l.ies == 0xFFFFFFFF) {
+        return 1.0;
+    }
+    const float3 e = -wi;
+    const float ex = dot(e, lightAxisX(l));
+    const float ey = dot(e, lightAxisY(l));
+    const float ez = dot(e, lightAxisZ(l));
+    float theta = acos(clamp(-ez, -1.0, 1.0));
+    const float s = l.iesAngleScale;
+    if (s > 0.0) {
+        theta = theta / s;
+    } else if (s < 0.0) {
+        theta = 3.14159265358979 - (3.14159265358979 - theta) / (-s);
+    }
+    theta = clamp(theta, 0.0, 3.14159265358979);
+    float phi = degrees(atan2(ey, ex));
+    if (phi < 0.0) phi += 360.0;
+    const IesRecord r = iesRecords[l.ies];
+    const float value = iesLookup(r, degrees(theta), phi);
+    return (l.flags & kLightIesNormalize) != 0 ? value / max(r.power, 1.0e-9) : value;
+}
 
 /// Whether `l` reaches a surface in `categories`: USD resolves a light's
 /// collection into a category the geometry it lights carries, so the test is
@@ -508,7 +600,7 @@ public LightSample sampleLight(LightRecord l, float3 p, float3 n, float2 u) {
     default:
         return s;
     }
-    s.radiance *= lightCone(l, s.wi);
+    s.radiance *= lightCone(l, s.wi) * iesIntensity(l, s.wi);
     s.valid = s.pdf > 0.0 && any(s.radiance > float3(0.0));
     return s;
 }

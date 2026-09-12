@@ -17,7 +17,9 @@
 #include "lrt/gpu/Buffer.h"
 #include "lrt/gpu/ComputeKernel.h"
 
+#include <memory>
 #include <optional>
+#include "lrt/io/Ies.h"
 #include "lrt/render/Camera.h"
 
 namespace lrt::gpu {
@@ -49,6 +51,14 @@ struct Light {
     float        height = 1.0F;        ///< rect
     float        angle = 0.0F;         ///< distant: the sun's angular diameter
     float        length = 1.0F;        ///< cylinder, along its x axis
+    /// UsdLux shaping: an IES profile, read by io::readIes; angleScale as
+    /// UsdLux defines it (positive divides theta, negative scales from
+    /// 180, zero none); normalize divides by the profile's power so its mean
+    /// intensity over the sphere is one.
+    std::shared_ptr<const io::IesProfile> ies;
+    std::string  iesFile;              ///< where the profile comes from (Hydra); the engine reads it into `ies`
+    float        iesAngleScale = 0.0F;
+    bool         iesNormalize = false;
     float        temperature = 6500.0F;
     bool         enableTemperature = false;
     bool         normalize = false;
@@ -90,13 +100,31 @@ struct LightRecord {
     /// Its share of the frame's power, accumulated: what a sample searches to
     /// choose one light instead of visiting them all.
     float    cumulative = 0.0F;
+    uint32_t ies = 0xFFFFFFFFU;       ///< its IES profile's row; none: no profile
+    float    iesAngleScale = 0.0F;
+    uint32_t pad0 = 0;
+    uint32_t pad1 = 0;
     float    rows[12] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0};   ///< light to world, rows of a 3x4
+};
+
+/// One IES profile on the device: where its angle lists and candela table
+/// sit in the values buffer, and its power, which ies_prepare computes.
+struct IesRecord {
+    uint32_t verticalOffset = 0;
+    uint32_t verticalCount = 0;
+    uint32_t horizontalOffset = 0;
+    uint32_t horizontalCount = 0;
+    uint32_t candelaOffset = 0;
+    uint32_t photometricType = 1;
+    float    multiplier = 1.0F;
+    float    power = 1.0F;   ///< mean intensity over the sphere, for normalize
 };
 
 /// LightRecord::flags
 inline constexpr uint32_t kLightShadow = 1;
 inline constexpr uint32_t kLightNormalize = 2;
 inline constexpr uint32_t kLightTemperature = 4;
+constexpr uint32_t kLightIesNormalize = 8;   ///< divide the IES intensity by the profile's power
 
 /// A light with no collection: it reaches every prim.
 inline constexpr uint32_t kLightUnlinked = 0xFFFFFFFFU;
@@ -126,6 +154,10 @@ private:
     gpu::Device* device_ = nullptr;
     gpu::Buffer  records_;
     std::optional<gpu::ComputeKernel> prefix_;   ///< light_prefix: each light's cumulative share, on the device
+    std::optional<gpu::ComputeKernel> iesPrepare_;   ///< ies_prepare: each profile's power
+    gpu::Buffer  iesRecords_;
+    gpu::Buffer  iesValues_;
+    uint32_t     iesCount_ = 0;
     uint32_t     count_ = 0;
     uint32_t     capacity_ = 0;
     bool         shadows_ = false;

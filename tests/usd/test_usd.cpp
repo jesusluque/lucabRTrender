@@ -2308,3 +2308,113 @@ TEST_CASE("a UsdLux cylinder light through Hydra lights a Lambert plane as the c
     CHECK(c[1] == 0);
 }
 
+// A UsdLux IES profile through Hydra: a cutoff at 20 degrees, one inside and
+// zero outside, on a small sphere light over the plane. Inside the cone the
+// frame must be the frame without the profile, word for word; outside it
+// must be black. A band about the cutoff is the interpolation's and skipped.
+TEST_CASE("a UsdLux IES profile shapes a light through Hydra: lit inside its cone as without, black outside",
+          "[usd][gpu][mesh][lights][ies]") {
+    LRT_REQUIRE_GPU(gpu);
+    if (!gpu->device->caps().rasterization) {
+        SKIP("no rasterisation on this device");
+    }
+    const fs::path ies = scratch("cutoff20.ies");
+    {
+        std::ofstream out(ies);
+        out << "IESNA:LM-63-2002\n[TEST] cutoff 20\nTILT=NONE\n1 1000 1 37 1 1 2 0 0 0\n1 1 0\n";
+        for (int k = 0; k < 37; ++k) out << (k * 5) << (k == 36 ? "\n" : " ");
+        out << "0\n";
+        for (int k = 0; k < 37; ++k) out << (k * 5 <= 20 ? "1" : "0") << (k == 36 ? "\n" : " ");
+    }
+    const auto stageWith = [&](const char* name, bool shaped) {
+        const fs::path path = scratch(name);
+        std::ofstream out(path);
+        out << kSquareStage << "def SphereLight \"Key\"";
+        if (shaped) out << " (\n    prepend apiSchemas = [\"ShapingAPI\"]\n)";
+        out << "\n{\n"
+               "    bool inputs:shadow:enable = 0\n"
+               "    float inputs:radius = 0.05\n"
+               "    float inputs:intensity = 400\n"
+               "    bool inputs:normalize = 0\n"
+               "    color3f inputs:color = (1, 1, 1)\n";
+        if (shaped) out << "    asset inputs:shaping:ies:file = @" << ies.string() << "@\n";
+        out << "    double3 xformOp:translate = (0, 0, -3)\n"
+               "    uniform token[] xformOpOrder = [\"xformOp:translate\"]\n}\n"
+               "def Scope \"Materials\"\n{\n"
+               "    def Material \"Mat\"\n    {\n"
+               "        token outputs:mtlx:surface.connect = </Materials/Mat/Surface.outputs:out>\n"
+               "        def Shader \"Surface\"\n        {\n"
+               "            uniform token info:id = \"ND_surface\"\n"
+               "            token inputs:bsdf.connect = </Materials/Mat/Diffuse.outputs:out>\n"
+               "            token outputs:out\n        }\n"
+               "        def Shader \"Diffuse\"\n        {\n"
+               "            uniform token info:id = \"ND_oren_nayar_diffuse_bsdf\"\n"
+               "            color3f inputs:color = (0.8, 0.8, 0.8)\n"
+               "            float inputs:roughness = 0\n"
+               "            token outputs:out\n        }\n    }\n}\n";
+        return path;
+    };
+    const uint32_t w = 161;
+    const uint32_t h = 121;
+    const auto frame = [&](const fs::path& path) {
+        auto renderer = usd::StageRenderer::open(path);
+        if (!renderer) FAIL(renderer.error().toString());
+        (*renderer)->setLightSamples(64);
+        auto image = (*renderer)->render("/Camera", 0.0, w, h);
+        if (!image) FAIL(image.error().toString());
+        return *image;
+    };
+    const usd::StageImage plain = frame(stageWith("ies_plain.usda", false));
+    const usd::StageImage shaped = frame(stageWith("ies_cutoff.usda", true));
+    test::dumpPpm("ies_cutoff_hydra", shaped.rgba.data(), w, h);
+    gpu::BufferDesc desc;
+    desc.bytes = plain.rgba.size() * sizeof(float);
+    desc.elementBytes = 16;
+    auto with = gpu::Buffer::create(*gpu->device, desc, shaped.rgba.data());
+    auto without = gpu::Buffer::create(*gpu->device, desc, plain.rgba.data());
+    auto depth = gpu::Buffer::fromSpan<float>(*gpu->device, shaped.depth, "depth");
+    REQUIRE(with);
+    REQUIRE(without);
+    REQUIRE(depth);
+    render::Camera camera;
+    camera.lens.focal = 35.0;
+    camera.lens.haperture = 24.576;
+    camera.lens.nearZ = 0.1;
+    camera.lens.farZ = 1000.0;
+    const render::Projection projection = render::projectionFor(camera, w, h);
+    const std::array<float, 12> toWorld = aofx::xform::inverseAffine(projection.worldToView).rows3x4();
+    auto made = gpu::ComputeKernel::create(*gpu->library, "lrt/test/ies_check", "iesCutoff");
+    if (!made) FAIL(made.error().toString());
+    gpu::Buffer counts = test::uintBuffer(*gpu->device, 6, "ies.counts");
+    gpu::Buffer worst = test::uintBuffer(*gpu->device, 2, "ies.worst");
+    {
+        gpu::CommandBatch batch(*gpu->device);
+        made->dispatch(batch, {1, 1, 1}, [&](rhi::ShaderCursor cursor) {
+            cursor["with"].setBinding(with->rhi());
+            cursor["without"].setBinding(without->rhi());
+            cursor["depth"].setBinding(depth->rhi());
+            cursor["counts"].setBinding(counts.rhi());
+            cursor["worst"].setBinding(worst.rhi());
+            technique::setCamera(cursor["camera"], projection, w, h);
+            rhi::ShaderCursor c = cursor["check"];
+            const float centre[4] = {0.0F, 0.0F, -3.0F, 20.0F};
+            c["lightCentre"].setData(centre, sizeof(centre));
+            c["row0"].setData(toWorld.data(), sizeof(float) * 4);
+            c["row1"].setData(toWorld.data() + 4, sizeof(float) * 4);
+            c["row2"].setData(toWorld.data() + 8, sizeof(float) * 4);
+        });
+        REQUIRE(batch.submit(true));
+    }
+    uint32_t c[6] = {};
+    float e[2] = {};
+    REQUIRE(counts.read(*gpu->device, 0, sizeof(c), c));
+    REQUIRE(worst.read(*gpu->device, 0, sizeof(e), e));
+    std::printf("  IES cutoff through Hydra: inside the cone %u of %u pixels differ from the unshaped frame; outside "
+                "it %u of %u are lit (largest %.3e, farthest at %.1f degrees)\n",
+                c[2], c[4], c[3], c[5], double(e[0]), double(e[1]));
+    CHECK(c[4] > 100);
+    CHECK(c[5] > 100);
+    CHECK(c[2] == 0);
+    CHECK(c[3] == 0);
+}
+

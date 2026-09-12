@@ -5,4 +5,5 @@ lrt_add_module(light
     PUBLIC_LIBS
         lrt::core
         lrt::gpu
-        lrt::render)
+        lrt::render
+        lrt::io)

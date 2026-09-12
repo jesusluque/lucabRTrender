@@ -909,6 +909,22 @@ Result<void> Engine::render(const render::Projection& projection, const render::
         }
         bool domeTextures = false;
         for (light::Light& lamp : lamps) {
+            // An IES profile, read the first time its path is seen.
+            if (!lamp.iesFile.empty() && !lamp.ies) {
+                auto known = iesProfiles_.find(lamp.iesFile);
+                if (known != iesProfiles_.end()) {
+                    lamp.ies = known->second;
+                } else if (!iesFailed_.contains(lamp.iesFile)) {
+                    auto read = io::readIes(lamp.iesFile);
+                    if (read) {
+                        lamp.ies = std::make_shared<const io::IesProfile>(std::move(*read));
+                        iesProfiles_[lamp.iesFile] = lamp.ies;
+                    } else {
+                        iesFailed_.insert(lamp.iesFile);
+                        log::warn("hdLrt: light without its IES profile: {}", read.error().toString());
+                    }
+                }
+            }
             if (lamp.texture.empty()) {
                 continue;
             }

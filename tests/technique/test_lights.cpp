@@ -19,6 +19,7 @@
 
 #include "lrt/geom/Mesh.h"
 #include "lrt/material/TextureStore.h"
+#include "lrt/io/Ies.h"
 #include "lrt/light/LightTable.h"
 #include "lrt/material/MaterialCompiler.h"
 #include "lrt/render/ReferenceRenderer.h"
@@ -2855,5 +2856,74 @@ TEST_CASE("a light table's cumulative shares are each light's power, accumulated
     REQUIRE(misses.read(*gpu->device, 0, sizeof(n), &n));
     std::printf("  five lights: %u cumulative shares miss their power\n", n);
     CHECK(n == 0);
+}
+
+// IES profiles: a synthetic LM-63 file of 1000 cos^4(theta) at five-degree
+// nodes, read as authored, put on a sphere light, and sampled by the shader.
+// Every node must come back as its own candela; between nodes the shader
+// follows the closed form to what piecewise-linear interpolation allows.
+TEST_CASE("an IES profile is read as authored and sampled at its nodes exactly", "[technique][lights][ies]") {
+    LRT_REQUIRE_GPU(gpu);
+    // The file, as a luminaire manufacturer would write it: keyword lines,
+    // TILT=NONE, the ten and three numbers, angles, then candelas.
+    std::string text = "IESNA:LM-63-2002\n[TEST] cos^4\n[MANUFAC] lucabRTrender tests\nTILT=NONE\n1 1000 1 37 1 1 2 0 0 0\n1 1 0\n";
+    for (int k = 0; k < 37; ++k) {
+        text += std::to_string(k * 5) + (k == 36 ? "\n" : " ");
+    }
+    text += "0\n";
+    for (int k = 0; k < 37; ++k) {
+        const double theta = k * 5.0 * 3.14159265358979 / 180.0;
+        const double c = std::max(std::cos(theta), 0.0);
+        text += std::to_string(1000.0 * c * c * c * c) + (k == 36 ? "\n" : " ");
+    }
+    auto profile = io::parseIes(text);
+    if (!profile) FAIL(profile.error().toString());
+    CHECK(profile->vertical.size() == 37);
+    CHECK(profile->horizontal.size() == 1);
+    CHECK(profile->candela.size() == 37);
+    CHECK(profile->photometricType == 1);
+    std::printf("  parsed: %zu vertical, %zu horizontal, %zu candelas, multiplier %.1f\n", profile->vertical.size(),
+                profile->horizontal.size(), profile->candela.size(), double(profile->multiplier));
+
+    auto table = light::LightTable::create(*gpu->library);
+    if (!table) FAIL(table.error().toString());
+    light::Light lamp;
+    lamp.kind = light::LightKind::Sphere;
+    lamp.lightToWorld = aofx::xform::translation({0.0, 0.0, -3.0});
+    lamp.radius = 0.05F;
+    lamp.ies = std::make_shared<const io::IesProfile>(std::move(*profile));
+    REQUIRE(table->set(std::span<const light::Light>(&lamp, 1)));
+    auto nodes = gpu::ComputeKernel::create(*gpu->library, "lrt/test/ies_check", "iesNodes");
+    auto cosine = gpu::ComputeKernel::create(*gpu->library, "lrt/test/ies_check", "iesCos");
+    if (!nodes) FAIL(nodes.error().toString());
+    if (!cosine) FAIL(cosine.error().toString());
+    gpu::Buffer counts = test::uintBuffer(*gpu->device, 6, "ies.counts");
+    gpu::Buffer worst = test::uintBuffer(*gpu->device, 2, "ies.worst");
+    const auto bind = [&](rhi::ShaderCursor cursor) {
+        table->bind(cursor);
+        cursor["counts"].setBinding(counts.rhi());
+        cursor["worst"].setBinding(worst.rhi());
+        cursor["check"]["nodes"].setData(uint32_t{37});
+        cursor["check"]["samples"].setData(uint32_t{4096});
+        cursor["check"]["exponent"].setData(4.0F);
+        // Piecewise-linear over 5 degrees: error <= h^2/8 max|f''|, and for
+        // 1000 cos^4 the second derivative is at most 4000 -- 0.0873^2 / 8 *
+        // 4000 = 3.8 -- plus the float of the angle lists.
+        cursor["check"]["bound"].setData(4.0F);
+    };
+    {
+        gpu::CommandBatch batch(*gpu->device);
+        nodes->dispatch(batch, {1, 1, 1}, bind);
+        cosine->dispatch(batch, {1, 1, 1}, bind);
+        REQUIRE(batch.submit(true));
+    }
+    uint32_t c[6] = {};
+    float e[2] = {};
+    REQUIRE(counts.read(*gpu->device, 0, sizeof(c), c));
+    REQUIRE(worst.read(*gpu->device, 0, sizeof(e), e));
+    std::printf("  nodes: %u of 37 off (worst %.2e relative); against 1000 cos^4: %u of 4096 beyond 4 (worst %.3f)\n",
+                c[0], double(e[0]), c[1], double(e[1]));
+    CHECK(c[0] == 0);
+    CHECK(c[1] == 0);
 }
 

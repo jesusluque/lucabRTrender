@@ -6,6 +6,7 @@ lrt_add_module(io
         src/PointReaders.cpp
         src/Exr.cpp
         src/Sog.cpp
+        src/Ies.cpp
     PUBLIC_LIBS
         lrt::core
     PRIVATE_LIBS
