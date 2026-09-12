@@ -77,6 +77,14 @@ void HdLrtLight::Sync(HdSceneDelegate* sceneDelegate, HdRenderParam* renderParam
     lamp.shadow = boolOf(sceneDelegate, id, HdLightTokens->shadowEnable, true);
     lamp.coneAngle = floatOf(sceneDelegate, id, HdLightTokens->shapingConeAngle, 0.0F) * degrees;
     lamp.coneSoftness = floatOf(sceneDelegate, id, HdLightTokens->shapingConeSoftness, 0.0F);
+    const auto tokenOf = [&](const TfToken& name) -> std::string {
+        const VtValue value = sceneDelegate->GetLightParamValue(id, name);
+        if (value.IsHolding<TfToken>()) return value.UncheckedGet<TfToken>().GetString();
+        if (value.IsHolding<std::string>()) return value.UncheckedGet<std::string>();
+        return {};
+    };
+    lamp.lightLink = tokenOf(HdTokens->lightLink);
+    lamp.shadowLink = tokenOf(HdTokens->shadowLink);
     if (lamp.kind == lrt::light::LightKind::Dome) {
         const VtValue file = sceneDelegate->GetLightParamValue(id, HdLightTokens->textureFile);
         if (file.IsHolding<SdfAssetPath>()) {

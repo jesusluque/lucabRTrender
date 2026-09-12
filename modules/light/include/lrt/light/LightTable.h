@@ -56,6 +56,11 @@ struct Light {
     uint32_t     shadowCategory = 0xFFFFFFFFU;
     /// A dome's lat-long image, resolved. Empty: the light is its colour.
     std::string  texture;
+    /// The collections USD resolved into category names. Empty: unlinked,
+    /// which reaches every prim. Whoever owns both lights and prims turns
+    /// these into the bits below.
+    std::string  lightLink;
+    std::string  shadowLink;
     /// Filled in by whoever owns the texture store, before the table is set.
     uint32_t     textureId = 0xFFFFFFFFU;
     uint32_t     sampler = 0;

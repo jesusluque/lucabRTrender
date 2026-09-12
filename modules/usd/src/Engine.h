@@ -252,6 +252,13 @@ private:
     std::map<pxr::SdfPath, light::Light>      lights_;
     std::optional<light::LightTable>          lightTable_;
     std::atomic<uint32_t>                     lightSamples_{1};
+    /// A bit per category name, as they are first seen: a prim's mask and a
+    /// light's link have to agree on the numbering, and this is the only
+    /// place that sees both. Past 64 names a category cannot be represented
+    /// and its link reaches nothing, which is said once.
+    std::map<std::string, uint32_t>           categoryBits_;
+    [[nodiscard]] uint32_t categoryBit(const std::string& name);
+    [[nodiscard]] uint64_t categoryMask(const std::vector<pxr::TfToken>& names);
     bool                                      materialsChanged_ = true;
     bool                                      materialCutouts_ = false;   ///< a material in the frame cuts samples away
     std::unique_ptr<material::MaterialCompiler> compiler_;

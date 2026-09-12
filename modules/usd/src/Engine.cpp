@@ -141,6 +141,34 @@ void Engine::setLight(const pxr::SdfPath& id, const light::Light& lamp) {
     lights_[id] = lamp;
 }
 
+uint32_t Engine::categoryBit(const std::string& name) {
+    if (name.empty()) {
+        return light::kLightUnlinked;
+    }
+    const auto found = categoryBits_.find(name);
+    if (found != categoryBits_.end()) {
+        return found->second;
+    }
+    if (categoryBits_.size() >= 64) {
+        lrt::log::warn("hdLrt: more than 64 light linking categories; '{}' links to nothing", name);
+        return light::kLightUnlinked;
+    }
+    const uint32_t bit = static_cast<uint32_t>(categoryBits_.size());
+    categoryBits_.emplace(name, bit);
+    return bit;
+}
+
+uint64_t Engine::categoryMask(const std::vector<pxr::TfToken>& names) {
+    uint64_t mask = 0;
+    for (const pxr::TfToken& name : names) {
+        const uint32_t bit = categoryBit(name.GetString());
+        if (bit != light::kLightUnlinked) {
+            mask |= uint64_t{1} << bit;
+        }
+    }
+    return mask;
+}
+
 void Engine::setLightSamples(uint32_t samples) { lightSamples_.store(std::max(samples, 1u)); }
 
 void Engine::removeLight(const pxr::SdfPath& id) {
@@ -594,6 +622,8 @@ Result<void> Engine::render(const render::Projection& projection, const render::
         lamps.reserve(lights_.size());
         for (const auto& [id, lamp] : lights_) {
             lamps.push_back(lamp);
+            lamps.back().lightCategory = categoryBit(lamp.lightLink);
+            lamps.back().shadowCategory = categoryBit(lamp.shadowLink);
         }
         for (const auto& [id, entry] : splats_) {
             if (!entry.visible) {
@@ -676,6 +706,7 @@ Result<void> Engine::render(const render::Projection& projection, const render::
                 set.doubleSided = entry.look.doubleSided;
                 set.material = rowOf(entry.look.material);
                 set.subsetMaterials = subsetRowsOf(entry);
+                set.categories = categoryMask(entry.look.categories);
                 meshSets.push_back(std::move(set));
                 continue;
             }
@@ -688,6 +719,7 @@ Result<void> Engine::render(const render::Projection& projection, const render::
             instance.doubleSided = entry.look.doubleSided;
             instance.material = rowOf(entry.look.material);
             instance.subsetMaterials = subsetRowsOf(entry);
+            instance.categories = categoryMask(entry.look.categories);
             meshInstances.push_back(std::move(instance));
         }
         for (const auto& [id, entry] : points_) {

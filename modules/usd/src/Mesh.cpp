@@ -144,6 +144,10 @@ void HdLrtMesh::Sync(HdSceneDelegate* delegate, HdRenderParam* renderParam, HdDi
             l.displayOpacity = opacity;
         }
         l.doubleSided = IsDoubleSided(delegate);
+        // What the light linking scene index resolved this prim's collections
+        // into. Empty unless something links to it.
+        const VtArray<TfToken> categories = delegate->GetCategories(id);
+        l.categories.assign(categories.begin(), categories.end());
         look = l;
     }
     lrt::render::Mat4 transform;

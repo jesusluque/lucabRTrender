@@ -87,6 +87,10 @@ struct MeshLook {
     float                displayOpacity = 1.0F;
     bool                 doubleSided = false;
     pxr::SdfPath         material;   ///< the bound material; empty: displayColor
+    /// What the light linking scene index resolved this prim's collections
+    /// into: the categories a light's link is tested against. Empty: only an
+    /// unlinked light reaches it.
+    std::vector<pxr::TfToken> categories;
 };
 
 /// The bytes of a float array a VtValue holds (float or half, any tuple
