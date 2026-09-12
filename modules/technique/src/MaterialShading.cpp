@@ -30,11 +30,22 @@ ConstantBuffer<LightingParams> lighting;
 /// Two numbers for the i-th sample of light k at a pixel. Stratification and
 /// a frame's worth of decorrelation are the path tracer's (M6); here the
 /// samples only have to be spread.
+uint pcgHashShade(uint input) {
+    const uint state = input * 747796405u + 2891336453u;
+    const uint word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+    return (word >> 22u) ^ word;
+}
+
+/// Pixel, light, sample and dimension folded through the hash in turn -- the
+/// path tracer's construction. The second number used to be one LCG step of
+/// the first, which ties the pair to a lattice.
 float2 sampleAt(uint2 pixel, uint light, uint index) {
-    uint h = pixel.x * 73856093u ^ pixel.y * 19349663u ^ light * 83492791u ^ index * 2654435761u;
-    h ^= h >> 15; h *= 2246822519u; h ^= h >> 13; h *= 3266489917u; h ^= h >> 16;
-    const uint g = h * 1664525u + 1013904223u;
-    return float2(float(h >> 8) * (1.0 / 16777216.0), float(g >> 8) * (1.0 / 16777216.0));
+    uint key = pcgHashShade(pixel.y * 65536u + pixel.x);
+    key = pcgHashShade(key + light);
+    key = pcgHashShade(key + index);
+    const uint a = pcgHashShade(key + 0u);
+    const uint b = pcgHashShade(key + 1u);
+    return float2(float(a >> 8) * (1.0 / 16777216.0), float(b >> 8) * (1.0 / 16777216.0));
 }
 )";
 

@@ -35,6 +35,7 @@ bool kindOf(const TfToken& type, lrt::light::LightKind& kind) {
     else if (type == HdPrimTypeTokens->rectLight) kind = lrt::light::LightKind::Rect;
     else if (type == HdPrimTypeTokens->distantLight) kind = lrt::light::LightKind::Distant;
     else if (type == HdPrimTypeTokens->domeLight) kind = lrt::light::LightKind::Dome;
+    else if (type == HdPrimTypeTokens->cylinderLight) kind = lrt::light::LightKind::Cylinder;
     else return false;
     return true;
 }
@@ -68,6 +69,7 @@ void HdLrtLight::Sync(HdSceneDelegate* sceneDelegate, HdRenderParam* renderParam
     lamp.radius = floatOf(sceneDelegate, id, HdLightTokens->radius, 0.5F);
     lamp.width = floatOf(sceneDelegate, id, HdLightTokens->width, 1.0F);
     lamp.height = floatOf(sceneDelegate, id, HdLightTokens->height, 1.0F);
+    lamp.length = floatOf(sceneDelegate, id, HdLightTokens->length, 1.0F);
     // USD authors angles in degrees.
     const float degrees = 3.14159265358979F / 180.0F;
     lamp.angle = floatOf(sceneDelegate, id, HdLightTokens->angle, 0.53F) * degrees;

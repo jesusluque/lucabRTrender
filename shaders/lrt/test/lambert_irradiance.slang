@@ -15,6 +15,8 @@ static const uint kRect    = 2;
 static const uint kDistant = 3;
 static const uint kPoint   = 4;
 static const uint kDome    = 5;
+static const uint kCylinder = 6;   // axisX: its axis, w the radius; axisY.w the length
+static const uint kCylinderIntegral = 7;   // the same, by dense quadrature of the form-factor integral
 
 struct IrradianceParams {
     uint   kind;
@@ -57,6 +59,80 @@ float3 vertexAt(uint k, uint count) {
     }
     const float angle = 2.0 * 3.14159265358979 * float(k) / float(count);
     return plane.centre.xyz + (x * cos(angle) + y * sin(angle)) * plane.axisX.w;
+}
+
+/// Lambert's formula over the four edges of one planar strip of a cylinder:
+/// the k-th of `count` about its axis, between the two ends. A strip whose
+/// outward normal looks away from `p` is not seen at all (the cylinder is
+/// convex), and the winding is taken by its magnitude.
+float stripFactor(float3 p, float3 n, uint k, uint count) {
+    const float3 axis = normalize(plane.axisX.xyz);
+    const float3 ay = normalize(plane.axisY.xyz);
+    const float3 az = cross(axis, ay);
+    const float r = plane.axisX.w;
+    const float halfLength = 0.5 * plane.axisY.w;
+    const float phi = 2.0 * 3.14159265358979 * (float(k) + 0.5) / float(count);
+    const float delta = 3.14159265358979 / float(count);
+    const float3 normal = ay * cos(phi) + az * sin(phi);
+    const float3 centre = plane.centre.xyz + normal * r;
+    if (dot(normal, p - centre) <= 0.0) {
+        return 0.0;
+    }
+    const float3 r0 = ay * cos(phi - delta) + az * sin(phi - delta);
+    const float3 r1 = ay * cos(phi + delta) + az * sin(phi + delta);
+    float3 v[4];
+    v[0] = plane.centre.xyz - axis * halfLength + r0 * r;
+    v[1] = plane.centre.xyz + axis * halfLength + r0 * r;
+    v[2] = plane.centre.xyz + axis * halfLength + r1 * r;
+    v[3] = plane.centre.xyz - axis * halfLength + r1 * r;
+    float sum = 0.0;
+    float3 previous = normalize(v[0] - p);
+    for (uint e = 1; e <= 4; ++e) {
+        const float3 current = normalize(v[e % 4] - p);
+        const float3 edgeAxis = cross(previous, current);
+        const float length2 = dot(edgeAxis, edgeAxis);
+        if (length2 > 1.0e-20) {
+            const float theta = acos(clamp(dot(previous, current), -1.0, 1.0));
+            sum += theta * dot(n, edgeAxis / sqrt(length2));
+        }
+        previous = current;
+    }
+    return abs(sum) * 0.5;
+}
+
+/// The defining integral, done numerically: over the lateral surface, the
+/// receiver's cosine times the emitter's cosine over the distance squared,
+/// where the emitter faces the point. Shares nothing with Lambert's edge
+/// formula, so the two are each other's check. `vertices` cells about the
+/// axis, and as many along it.
+float cylinderIntegral(float3 p, float3 n, uint cells) {
+    const float3 axis = normalize(plane.axisX.xyz);
+    const float3 ay = normalize(plane.axisY.xyz);
+    const float3 az = cross(axis, ay);
+    const float r = plane.axisX.w;
+    const float length = plane.axisY.w;
+    const float dPhi = 2.0 * 3.14159265358979 / float(cells);
+    const float dX = length / float(cells);
+    const float dA = r * dPhi * dX;
+    float sum = 0.0;
+    for (uint i = 0; i < cells; ++i) {
+        const float phi = (float(i) + 0.5) * dPhi;
+        const float3 normal = ay * cos(phi) + az * sin(phi);
+        for (uint j = 0; j < cells; ++j) {
+            const float x = -0.5 * length + (float(j) + 0.5) * dX;
+            const float3 q = plane.centre.xyz + axis * x + normal * r;
+            const float3 d = q - p;
+            const float d2 = dot(d, d);
+            const float3 w = d / sqrt(d2);
+            const float cosP = dot(n, w);
+            const float cosQ = dot(normal, -w);
+            if (cosP <= 0.0 || cosQ <= 0.0) {
+                continue;
+            }
+            sum += cosP * cosQ / d2 * dA;
+        }
+    }
+    return sum;
 }
 
 /// Lambert's formula: the irradiance a polygon of unit radiance puts on a
@@ -137,6 +213,18 @@ void lambertIrradiance(uint3 tid: SV_DispatchThreadID) {
                 const float sin2 = min(plane.axisX.w * plane.axisX.w / distance2, 1.0);
                 const float cosine = max(dot(n, offset / sqrt(distance2)), 0.0);
                 factor = 3.14159265358979 * sin2 * cosine;
+            } else if (plane.kind == kCylinderIntegral) {
+                // 128 cells a side agrees with the 512-strip edge formula to
+                // 0.2%; 512 took 18 s a frame for nothing.
+                factor = cylinderIntegral(p, n, clamp(plane.vertices, 8u, 128u));
+            } else if (plane.kind == kCylinder) {
+                // The lateral surface as strips, each a rectangle seen from
+                // its outside only; enough of them and the polygon is the
+                // cylinder to far below the tolerance.
+                const uint strips = max(plane.vertices, 8u);
+                for (uint k = 0; k < strips; ++k) {
+                    factor += stripFactor(p, n, k, strips);
+                }
             } else {
                 factor = polygonFactor(p, n, plane.kind == kRect ? 4u : max(plane.vertices, 3u));
             }
@@ -149,7 +237,7 @@ void lambertIrradiance(uint3 tid: SV_DispatchThreadID) {
             worstRelative = max(worstRelative, relative);
             beyond += relative > plane.radiance.w ? 1u : 0u;
             // One pixel reported in full, to see what a difference is made of.
-            if (x == camera.width / 2 + 40 && y == camera.height / 2) {
+            if (x == camera.width / 2 + 20 && y == camera.height / 2) {
                 worst[1] = expected.r;
                 worst[2] = p.x;
                 worst[3] = p.y;

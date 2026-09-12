@@ -1195,9 +1195,43 @@ its image, a cone in its own solid angle and an area light on its own
 surface; a round trip checks the mapping without statistics; and a pyramid
 check measures whether the chain telescopes at all.
 
+### The cylinder, added with M6
+
+UsdLux's `CylinderLight`: the lateral surface of a cylinder along the prim's
+x, of `radius` and `length`, emitting outward, one-sided. Sampled uniformly
+on that surface (an angle about the axis, a height along it), with the pdf
+of any area light, `d^2 / (cos * area)`; `lightPdf` finds where a direction
+meets it by the ray's closest approach to the axis rather than the quadratic's
+`b^2 - 4ac`, which cancels catastrophically beside a tangent ray -- measured:
+7826 of a million samples disagreeing with their own pdf beyond 1e-3 with the
+quadratic, 2378 with the closest-approach form, and what remained was the
+conditioning of `1/cos` itself, derived in the check and guarded below a
+cosine of 0.017, where the light arriving is of order 0.02% of the whole.
+Checked four ways:
+
+- **Chi-square in its own support** (angle by height on the surface, cells
+  facing away expecting nothing): z 1.30, the pdf integrating to 0.4512
+  against 0.4524 drawn, 0 samples disagreeing with `lightPdf`.
+- **The sampler alone**, at three points, against dense quadrature of the
+  form-factor integral: 0.04% to 0.15% apart.
+- **A Lambert plane under it**, against two closed forms that share nothing
+  -- 512 one-sided strips under Lambert's edge formula, and the quadrature --
+  which agree with each other to 0.2%: 0 of 2209 pixels beyond 3% at 65536
+  light samples. Not 4096 like the flat lights: a one-sided curved emitter
+  rejects half its samples and varies over the rest, and the first run read
+  3103 of 8281 pixels beyond 2% -- which was noise (sigma ~2% at 4096, 0.9%
+  at 32768, 0.4% at 131072), not the bias it looked like, and the sampler
+  alone is what said so.
+- **Through Hydra**, the same.
+
+Found on the way and fixed: shading's second random number was one LCG step
+of the first, tying every sample pair to a lattice. It did not bias the
+lights that were checked, but it is the path tracer's PCG chain now.
+
 ### In Hydra
 
-The delegate takes sphere, disk, rect, distant and dome lights as sprims. A
+The delegate takes sphere, disk, rect, distant, dome and cylinder lights as
+sprims. A
 light's samples per pixel are a render setting, `lrt:lightSamples`, reachable
 from `StageRenderer` and from `lrt view --light-samples`: one is what an
 interactive frame takes, and a comparison against a closed form asks for
@@ -1316,7 +1350,7 @@ enough that what is left is the light and not the noise.
   where it projects, and with it naming another the plane is lit as if
   nothing were there -- 0 pixels of 7440 away from the closed form either
   way. What arrives from USD is the same half that light linking is missing.
-- **No light instancing, no IES profiles and no cylinder lights.**
+- **No light instancing and no IES profiles.** (The cylinder arrived with M6.)
 - **Splats are relit where their prim asks**, and baked everywhere else.
   `LrtSplatLightingAPI` (`primvars:lrt:splat:relight`, a constant primvar, so
   it is inherited) turns a cloud over to the scene's lights: the albedo is the

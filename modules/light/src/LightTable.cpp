@@ -31,6 +31,10 @@ LightRecord LightTable::recordOf(const Light& light) {
             record.sizeX = light.width;
             record.sizeY = light.height;
             break;
+        case LightKind::Cylinder:
+            record.sizeX = light.radius;
+            record.sizeY = light.length;
+            break;
         case LightKind::Dome:
             break;
     }
@@ -69,6 +73,9 @@ static float powerOf(const Light& light) {
             break;
         case LightKind::Rect:
             power *= light.normalize ? 1.0F : light.width * light.height;
+            break;
+        case LightKind::Cylinder:
+            power *= light.normalize ? 1.0F : 2.0F * 3.14159265358979F * light.radius * light.length;
             break;
         case LightKind::Distant:
         case LightKind::Dome:

@@ -16,6 +16,7 @@ public static const uint kLightDistant = 0;
 public static const uint kLightSphere  = 1;
 public static const uint kLightDisk    = 2;
 public static const uint kLightRect    = 3;
+public static const uint kLightCylinder = 5;   // along its x axis; the lateral surface, emitting outward
 public static const uint kLightDome    = 4;
 
 /// A light with no collection reaches every prim.
@@ -97,6 +98,11 @@ public struct LightSample {
     public float  pdf;        // per solid angle; 0 for a delta light
     public bool   delta;
     public bool   valid;
+    /// The emitter's cosine at the sampled point, for an area light; 1 where
+    /// there is none. A pdf divides by it, so near an area light's silhouette
+    /// the pdf is 1/cos of whatever error the point carries -- and the sample
+    /// contributes cos of nothing.
+    public float  emitterCosine = 1.0;
 };
 
 static const float kLightInfinity = 1.0e30;
@@ -153,8 +159,56 @@ float lightArea(LightRecord l) {
     case kLightSphere: return 4.0 * 3.14159265358979 * l.sizeX * l.sizeX;
     case kLightDisk:   return 3.14159265358979 * l.sizeX * l.sizeX;
     case kLightRect:   return l.sizeX * l.sizeY;
+    case kLightCylinder: return 2.0 * 3.14159265358979 * l.sizeX * l.sizeY;   // the lateral surface
     default:           return 0.0;
     }
+}
+
+/// Where a ray from `p` along `w` meets a cylinder light's lateral surface
+/// from outside: the nearer root of the infinite cylinder about its x axis,
+/// within its length, with its outward normal facing the ray. False for a
+/// miss, a hit past the ends, or the far wall seen from inside -- a cylinder
+/// emits outward and has no inside to light from.
+public bool cylinderHit(LightRecord l, float3 p, float3 w, out float t, out float3 normal, out float along) {
+    t = 0.0;
+    normal = float3(0.0);
+    along = 0.0;
+    const float3 axis = lightAxisX(l);
+    const float3 ay = lightAxisY(l);
+    const float3 az = lightAxisZ(l);
+    const float3 o = p - lightOrigin(l);
+    const float oy = dot(o, ay);
+    const float oz = dot(o, az);
+    const float dy = dot(w, ay);
+    const float dz = dot(w, az);
+    const float r = max(l.sizeX, 0.0);
+    const float a = dy * dy + dz * dz;
+    if (a <= 1.0e-12 || r <= 0.0) {
+        return false;
+    }
+    // By the ray's closest approach to the axis rather than the quadratic's
+    // b^2 - 4ac, which cancels catastrophically near a tangent ray -- where a
+    // pdf that divides by the cosine is most sensitive to it. Measured with
+    // the quadratic: 7826 of a million samples disagreed with their own pdf
+    // beyond 1e-3, worst 29x, all beside the silhouette.
+    const float tClosest = -(oy * dy + oz * dz) / a;
+    const float cy = oy + dy * tClosest;
+    const float cz = oz + dz * tClosest;
+    const float h2 = r * r - (cy * cy + cz * cz);
+    if (h2 < 0.0) {
+        return false;
+    }
+    t = tClosest - sqrt(h2 / a);
+    if (!(t > 0.0)) {
+        return false;   // inside, or the light is behind
+    }
+    const float3 hit = o + w * t;
+    along = dot(hit, axis);
+    if (abs(along) > 0.5 * l.sizeY) {
+        return false;
+    }
+    normal = normalize(ay * dot(hit, ay) + az * dot(hit, az));
+    return dot(normal, -w) > 0.0;
 }
 
 /// What the light emits, before any shaping: colour, intensity, exposure,
@@ -289,6 +343,17 @@ public float lightPdf(LightRecord l, float3 p, float3 n, float3 wi) {
         }
         return area > 0.0 ? (t * t) / (facing * area) : 0.0;
     }
+    case kLightCylinder: {
+        float t;
+        float3 normal;
+        float along;
+        if (!cylinderHit(l, p, wi, t, normal, along)) {
+            return 0.0;
+        }
+        const float area = lightArea(l);
+        const float facing = dot(normal, -wi);
+        return area > 0.0 && facing > 0.0 ? (t * t) / (facing * area) : 0.0;
+    }
     default:
         return 0.0;
     }
@@ -406,6 +471,32 @@ public LightSample sampleLight(LightRecord l, float3 p, float3 n, float2 u) {
         s.distance = distance;
         s.radiance = emission;
         s.pdf = distance2 / (cosine * area);
+        s.emitterCosine = cosine;
+        break;
+    }
+    case kLightCylinder: {
+        // Uniform on the lateral surface: an angle about the axis, a height
+        // along it. Outward normal, one-sided.
+        const float phi = 2.0 * 3.14159265358979 * u.x;
+        const float along = (u.y - 0.5) * l.sizeY;
+        const float3 radial = lightAxisY(l) * cos(phi) + lightAxisZ(l) * sin(phi);
+        const float3 at = lightOrigin(l) + lightAxisX(l) * along + radial * max(l.sizeX, 0.0);
+        const float area = lightArea(l);
+        const float3 offset = at - p;
+        const float distance2 = dot(offset, offset);
+        if (distance2 <= 0.0 || area <= 0.0) {
+            return s;
+        }
+        const float distance = sqrt(distance2);
+        s.wi = offset / distance;
+        const float cosine = dot(radial, -s.wi);
+        if (cosine <= 0.0) {
+            return s;   // the far side of the surface
+        }
+        s.distance = distance;
+        s.radiance = emission;
+        s.pdf = distance2 / (cosine * area);
+        s.emitterCosine = cosine;
         break;
     }
     default:

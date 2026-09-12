@@ -29,6 +29,7 @@ enum class LightKind : uint32_t {
     Disk = 2,
     Rect = 3,
     Dome = 4,
+    Cylinder = 5,   ///< along its own x axis, as UsdLux has it; emits outward
 };
 
 /// A light as USD authored it. Angles are radians; `lightToWorld` puts the
@@ -43,6 +44,7 @@ struct Light {
     float        width = 1.0F;         ///< rect
     float        height = 1.0F;        ///< rect
     float        angle = 0.0F;         ///< distant: the sun's angular diameter
+    float        length = 1.0F;        ///< cylinder, along its x axis
     float        temperature = 6500.0F;
     bool         enableTemperature = false;
     bool         normalize = false;

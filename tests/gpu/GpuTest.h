@@ -13,6 +13,10 @@
 #include <array>
 #include <cctype>
 #include <cstdint>
+#include <vector>
+#include <cstdlib>
+#include <cstdio>
+#include <cmath>
 #include <memory>
 #include <string>
 
@@ -100,6 +104,50 @@ inline std::array<uint32_t, 8> reduceStats(Gpu& gpu, const gpu::Buffer& stats, u
     std::array<uint32_t, 8> row{};
     REQUIRE(result.read(*gpu.device, 0, sizeof(row), row.data()));
     return row;
+}
+
+/// A frame written for a human to look at, when LRT_TEST_DUMP names a
+/// directory: linear RGBA floats to an 8-bit PPM, clamped and gamma 2.2. A
+/// debug dump, not an oracle -- nothing here is asserted on, and it is the one
+/// place a test turns floats into bytes on the host.
+inline void dumpPpm(const std::string& name, const float* rgba, uint32_t width, uint32_t height) {
+    const char* dir = std::getenv("LRT_TEST_DUMP");
+    if (dir == nullptr || *dir == '\0') {
+        return;
+    }
+    const std::string path = std::string(dir) + "/" + name + ".ppm";
+    FILE* out = std::fopen(path.c_str(), "wb");
+    if (out == nullptr) {
+        return;
+    }
+    std::fprintf(out, "P6\n%u %u\n255\n", width, height);
+    std::vector<unsigned char> row(size_t{width} * 3);
+    for (uint32_t y = 0; y < height; ++y) {
+        for (uint32_t x = 0; x < width; ++x) {
+            const float* px = rgba + (size_t{y} * width + x) * 4;
+            for (int c = 0; c < 3; ++c) {
+                const float v = std::min(std::max(px[c], 0.0F), 1.0F);
+                row[size_t{x} * 3 + static_cast<size_t>(c)] =
+                    static_cast<unsigned char>(std::lround(std::pow(v, 1.0F / 2.2F) * 255.0F));
+            }
+        }
+        std::fwrite(row.data(), 1, row.size(), out);
+    }
+    std::fclose(out);
+    std::printf("  [dump] %s\n", path.c_str());
+}
+
+/// The same from a device buffer of float4 pixels.
+inline void dumpPpm(Gpu& gpu, const std::string& name, const gpu::Buffer& colour, uint32_t width, uint32_t height) {
+    const char* dir = std::getenv("LRT_TEST_DUMP");
+    if (dir == nullptr || *dir == '\0') {
+        return;
+    }
+    std::vector<float> rgba(size_t{width} * height * 4);
+    if (!colour.read(*gpu.device, 0, rgba.size() * sizeof(float), rgba.data())) {
+        return;
+    }
+    dumpPpm(name, rgba.data(), width, height);
 }
 
 }   // namespace lrt::test

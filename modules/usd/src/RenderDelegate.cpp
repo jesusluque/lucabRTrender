@@ -92,7 +92,7 @@ TfTokenVector const& HdLrtRenderDelegate::GetSupportedSprimTypes() const {
     static const TfTokenVector types{HdPrimTypeTokens->camera,      HdPrimTypeTokens->material,
                                      HdPrimTypeTokens->sphereLight, HdPrimTypeTokens->diskLight,
                                      HdPrimTypeTokens->rectLight,   HdPrimTypeTokens->distantLight,
-                                     HdPrimTypeTokens->domeLight};
+                                     HdPrimTypeTokens->domeLight,   HdPrimTypeTokens->cylinderLight};
     return types;
 }
 

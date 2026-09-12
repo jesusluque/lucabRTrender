@@ -85,6 +85,25 @@ uint coneBinOf(float3 axis, float cosMax, float3 w) {
     return t * params.phiBins + p;
 }
 
+/// Bins over a cylinder's lateral surface: the angle about its axis, then
+/// the height along it, at the point where the direction meets it. A cell
+/// on the far side never receives a sample; its expectation says so.
+uint cylinderBinOf(LightRecord l, float3 w) {
+    float t;
+    float3 normal;
+    float along;
+    if (!cylinderHit(l, params.point.xyz, w, t, normal, along)) {
+        return params.thetaBins * params.phiBins;
+    }
+    float phi = atan2(dot(normal, lightAxisZ(l)), dot(normal, lightAxisY(l)));
+    if (phi < 0.0) {
+        phi += 2.0 * kPiCheck;
+    }
+    const uint u = min(uint(phi / (2.0 * kPiCheck) * float(params.thetaBins)), params.thetaBins - 1);
+    const uint v = min(uint((along / l.sizeY + 0.5) * float(params.phiBins)), params.phiBins - 1);
+    return u * params.phiBins + v;
+}
+
 /// Whether the light is an area one, and its half extents in its own axes.
 bool areaOf(LightRecord l, out float2 half) {
     half = float2(0.0, 0.0);
@@ -169,12 +188,14 @@ void lightDraw(uint3 tid: SV_DispatchThreadID) {
     const bool cone = coneOf(lights[0], axis, cosMax);
     const bool area = areaOf(lights[0], half);
     const bool warped = lights[0].kind == kLightDome && domeHasImage(lights[0]);
+    const bool cylinder = lights[0].kind == kLightCylinder;
     uint bin = params.thetaBins * params.phiBins;
     if (s.valid && !s.delta) {
-        bin = warped  ? domeBinOf(lights[0], s.wi)
-              : cone  ? coneBinOf(axis, cosMax, s.wi)
-              : area  ? areaBinOf(lights[0], half, s.wi)
-                      : binOf(s.wi);
+        bin = warped   ? domeBinOf(lights[0], s.wi)
+              : cone   ? coneBinOf(axis, cosMax, s.wi)
+              : area   ? areaBinOf(lights[0], half, s.wi)
+              : cylinder ? cylinderBinOf(lights[0], s.wi)
+                       : binOf(s.wi);
     }
     bins[i] = bin;
 }
@@ -272,6 +293,19 @@ void lightConsistent(uint3 tid: SV_DispatchThreadID) {
         if (!s.valid || s.delta) {
             continue;
         }
+        // An area light's pdf divides by the emitter's cosine, so beside its
+        // silhouette the comparison measures conditioning, not agreement.
+        // For a curved emitter the hit is found through sqrt(h^2 / a) with
+        // h^2 = r^2 - |c|^2 vanishing at a tangent ray: h^2 carries an
+        // absolute error of about 1e-8, the root turns that into 5e-6 in t,
+        // the normal into 1.7e-5, and the pdf into 1.7e-5 / cos -- past 1e-3
+        // until cos reaches 0.017. The light arriving from that band is of
+        // order cos^2 / 2 of the whole, 0.02%. Measured on a cylinder before
+        // the guard: 7826 of a million samples with the b^2 - 4ac form, 2378
+        // with the closest-approach one, 2026 above a guard of 1e-3.
+        if (s.emitterCosine < 2.0e-2) {
+            continue;
+        }
         const float density = lightPdfImaged(lights[0], params.point.xyz, params.normal.xyz, s.wi);
         const float relative = abs(density - s.pdf) / max(s.pdf, 1.0e-9);
         worstRelative = max(worstRelative, relative);
@@ -304,6 +338,7 @@ void lightExpect(uint3 tid: SV_DispatchThreadID) {
     float2 half;
     const bool area = areaOf(light, half);
     const bool warped = light.kind == kLightDome && domeHasImage(light);
+    const bool cylinder = light.kind == kLightCylinder;
     float3 coneX, coneY;
     lightFrame(axis, coneX, coneY);
     // Over the same parametrisation the samples were binned in, so the
@@ -328,6 +363,30 @@ void lightExpect(uint3 tid: SV_DispatchThreadID) {
                         const float3 w = domeDirection(light, float2(u, v));
                         sum += lightPdfImaged(light, params.point.xyz, params.normal.xyz, w) * kPiCheck * 2.0 * kPiCheck *
                                sinTheta * du * dv;
+                    }
+                }
+                expected[t * params.phiBins + p] = sum * float(params.samples);
+                integral += sum;
+                continue;
+            }
+            if (cylinder) {
+                // Uniform on the lateral surface, but only where it faces
+                // the point: a cell whose outward normal looks away is never
+                // drawn, and expects nothing.
+                const float3 axisX = lightAxisX(light);
+                const float3 ay = lightAxisY(light);
+                const float3 az = lightAxisZ(light);
+                const float cellPhi = 2.0 * kPiCheck / float(params.thetaBins * sub);
+                const float cellX = light.sizeY / float(params.phiBins * sub);
+                const float total = float(params.thetaBins * params.phiBins * sub * sub);
+                for (uint j = 0; j < sub; ++j) {
+                    const float phi = (float(t * sub + j) + 0.5) * cellPhi;
+                    const float3 normal = ay * cos(phi) + az * sin(phi);
+                    for (uint k = 0; k < sub; ++k) {
+                        const float along = -0.5 * light.sizeY + (float(p * sub + k) + 0.5) * cellX;
+                        const float3 at = lightOrigin(light) + axisX * along + normal * light.sizeX;
+                        const bool facing = dot(normal, params.point.xyz - at) > 0.0;
+                        sum += facing ? 1.0 / total : 0.0;
                     }
                 }
                 expected[t * params.phiBins + p] = sum * float(params.samples);
@@ -403,3 +462,59 @@ void lightStatistic(uint3 tid: SV_DispatchThreadID) {
     }
     result[1] = float4(statistic, max(dof - 1.0, 1.0), drawn / float(params.samples), 0.0);
 }
+
+/// The irradiance factor at params.point from the sampler alone: the mean
+/// over params.samples of max(n . wi, 0) / pdf (unit radiance), invalid
+/// samples counting as zero -- exactly the estimator shading uses, with
+/// nothing of shading around it. Beside it, the same integral by quadrature
+/// over a cylinder's lateral surface, so a sampler can be told from a shader.
+RWStructuredBuffer<float> irradiance;   // [by the sampler, by quadrature]
+
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void lightIrradianceAt(uint3 tid: SV_DispatchThreadID) {
+    if (tid.x != 0) {
+        return;
+    }
+    const LightRecord l = lights[0];
+    const float3 p = params.point.xyz;
+    const float3 n = params.normal.xyz;
+    float sum = 0.0;
+    for (uint i = 0; i < params.samples; ++i) {
+        const LightSample s = sampleLight(l, p, n, sampleAt(i));
+        if (!s.valid || s.pdf <= 0.0) {
+            continue;
+        }
+        sum += max(dot(n, s.wi), 0.0) / s.pdf;
+    }
+    irradiance[0] = sum / float(params.samples);
+    // Quadrature, cylinder only.
+    float quad = 0.0;
+    if (l.kind == kLightCylinder) {
+        const float3 axis = lightAxisX(l);
+        const float3 ay = lightAxisY(l);
+        const float3 az = lightAxisZ(l);
+        const uint cells = 512;
+        const float dPhi = 2.0 * kPiCheck / float(cells);
+        const float dX = l.sizeY / float(cells);
+        const float dA = l.sizeX * dPhi * dX;
+        for (uint i = 0; i < cells; ++i) {
+            const float phi = (float(i) + 0.5) * dPhi;
+            const float3 normal = ay * cos(phi) + az * sin(phi);
+            for (uint j = 0; j < cells; ++j) {
+                const float x = -0.5 * l.sizeY + (float(j) + 0.5) * dX;
+                const float3 q = lightOrigin(l) + axis * x + normal * l.sizeX;
+                const float3 d = q - p;
+                const float d2 = dot(d, d);
+                const float3 w = d / sqrt(d2);
+                const float cosP = dot(n, w);
+                const float cosQ = dot(normal, -w);
+                if (cosP > 0.0 && cosQ > 0.0) {
+                    quad += cosP * cosQ / d2 * dA;
+                }
+            }
+        }
+    }
+    irradiance[1] = quad;
+}
+

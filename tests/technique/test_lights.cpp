@@ -191,6 +191,7 @@ TEST_CASE("a Lambert plane under a sphere, a disk and a rectangle is lit as the 
         lamp.radius = c.sizeX;
         lamp.width = c.sizeX;
         lamp.height = c.sizeY;
+        lamp.length = c.sizeY;
         lamp.angle = c.kind == light::LightKind::Distant ? c.sizeX : 0.0F;
         lamp.normalize = false;
         lamp.shadow = false;   // nothing to shadow against, and no structure bound
@@ -391,11 +392,14 @@ TEST_CASE("each light's samples follow the density it reports", "[technique][lig
         float            sizeX;
         float            sizeY;
     };
-    const std::array<Case, 5> cases{Case{"sphere", light::LightKind::Sphere, 0.4F, 0.0F},
+    // The cylinder's length is not twice its radius, so a wrong axis could
+    // not pass as the right one.
+    const std::array<Case, 6> cases{Case{"sphere", light::LightKind::Sphere, 0.4F, 0.0F},
                                     Case{"disk", light::LightKind::Disk, 0.6F, 0.0F},
                                     Case{"rect", light::LightKind::Rect, 1.2F, 0.8F},
                                     Case{"sun (0.2 rad)", light::LightKind::Distant, 0.2F, 0.0F},
-                                    Case{"dome", light::LightKind::Dome, 0.0F, 0.0F}};
+                                    Case{"dome", light::LightKind::Dome, 0.0F, 0.0F},
+                                    Case{"cylinder", light::LightKind::Cylinder, 0.3F, 1.4F}};
     for (const Case& c : cases) {
         light::Light lamp;
         lamp.kind = c.kind;
@@ -403,6 +407,7 @@ TEST_CASE("each light's samples follow the density it reports", "[technique][lig
         lamp.radius = c.sizeX;
         lamp.width = c.sizeX;
         lamp.height = c.sizeY;
+        lamp.length = c.sizeY;
         lamp.angle = c.kind == light::LightKind::Distant ? c.sizeX : 0.0F;
         lamp.shadow = false;
         REQUIRE(table->set(std::span<const light::Light>(&lamp, 1)));
@@ -2625,6 +2630,197 @@ TEST_CASE("adaptive sampling stops a pixel where its error estimate says, and th
         CHECK(c[1] * 20 <= c[0]);
         CHECK(c[2] == 0);
         CHECK(c[3] >= minSamples);
+    }
+}
+
+// A Lambert plane under a cylinder light, against the closed form: the
+// lateral surface as 512 one-sided strips, each a rectangle under Lambert's
+// edge formula. The cylinder lies along world x, off the plane's normal, with
+// a length that is not twice its radius -- so an axis swapped with y would
+// read as a different shape, not the same one.
+TEST_CASE("a Lambert plane under a cylinder light is lit as the closed form says",
+          "[technique][lights][cylinder]") {
+    LRT_REQUIRE_GPU(gpu);
+    if (!gpu->device->caps().rasterization) {
+        SKIP("no rasterisation on this device");
+    }
+    std::vector<std::filesystem::path> shaderPaths;
+    for (const std::string& path : gpu->device->shaderSearchPaths()) {
+        shaderPaths.emplace_back(path);
+    }
+    auto compiler = material::MaterialCompiler::create({LRT_MATERIALX_ROOT}, shaderPaths);
+    auto textures = material::TextureStore::create(*gpu->library);
+    auto builder = geom::MeshBuilder::create(*gpu->library);
+    auto scene = world::GpuScene::create(*gpu->library);
+    auto raster = technique::VisibilityRaster::create(*gpu->library);
+    auto programs = technique::MaterialPrograms::create(*gpu->library);
+    auto shading = technique::MaterialShading::create(*gpu->library);
+    auto table = light::LightTable::create(*gpu->device);
+    if (!compiler) FAIL(compiler.error().toString());
+    if (!textures) FAIL(textures.error().toString());
+    if (!builder) FAIL(builder.error().toString());
+    if (!scene) FAIL(scene.error().toString());
+    if (!raster) FAIL(raster.error().toString());
+    if (!programs) FAIL(programs.error().toString());
+    if (!shading) FAIL(shading.error().toString());
+    if (!table) FAIL(table.error().toString());
+    auto lambert = (*compiler)->compileXml(
+        "<?xml version=\"1.0\"?>\n<materialx version=\"1.39\">\n"
+        "  <oren_nayar_diffuse_bsdf name=\"d\" type=\"BSDF\">\n"
+        "    <input name=\"color\" type=\"color3\" value=\"0.8, 0.8, 0.8\" />\n"
+        "    <input name=\"roughness\" type=\"float\" value=\"0\" />\n"
+        "  </oren_nayar_diffuse_bsdf>\n"
+        "  <surface name=\"shader\" type=\"surfaceshader\"><input name=\"bsdf\" type=\"BSDF\" nodename=\"d\" /></surface>\n"
+        "  <surfacematerial name=\"material\" type=\"material\">\n"
+        "    <input name=\"surfaceshader\" type=\"surfaceshader\" nodename=\"shader\" />\n"
+        "  </surfacematerial>\n</materialx>\n");
+    if (!lambert) FAIL(lambert.error().toString());
+    REQUIRE(programs->setModules(std::span<const material::CompiledMaterial>(&*lambert, 1)));
+    REQUIRE(shading->setPrograms(*programs));
+    const std::vector<float> blob = material::MaterialCompiler::parameters(
+        *lambert, **textures, [](const std::string&) { return 0xFFFFFFFFu; });
+    REQUIRE((*textures)->commit());
+    const std::vector<technique::MaterialRecord> rows{{0, 0, 0, 0}, {1, 0, 0, 0}};
+    auto records = gpu::Buffer::fromSpan<technique::MaterialRecord>(*gpu->device, rows, "materials.records");
+    auto blobBuffer = gpu::Buffer::fromSpan<float>(*gpu->device, blob, "materials.blob");
+    REQUIRE(records);
+    REQUIRE(blobBuffer);
+
+    const uint32_t w = 81;
+    const uint32_t h = 61;
+    render::Camera camera = render::Camera::lookingAt({0.0, 0.0, 0.0}, {0.0, 0.0, -1.0});
+    camera.lens.focal = 35.0;
+    const render::Projection projection = render::projectionFor(camera, w, h);
+    world::MeshInstance instance;
+    instance.mesh = lambertSquare(*builder, 1.0F);
+    instance.objectToWorld = aofx::xform::translation({0.0, 0.0, -5.0});
+    instance.material = 1;
+    REQUIRE(scene->update(std::span<const world::MeshInstance>(&instance, 1), projection));
+    light::Light lamp;
+    lamp.kind = light::LightKind::Cylinder;
+    lamp.lightToWorld = aofx::xform::translation({0.0, 0.0, -3.0});
+    lamp.radius = 0.3F;
+    lamp.length = 1.4F;
+    lamp.shadow = false;
+    REQUIRE(table->set(std::span<const light::Light>(&lamp, 1)));
+
+    technique::VisibilityTargets visibility;
+    render::RenderTargets out;
+    technique::MaterialFrame frame;
+    frame.programs = &*programs;
+    frame.scene = &*scene;
+    frame.records = &*records;
+    frame.blob = &*blobBuffer;
+    frame.textures = &**textures;
+    frame.lights = &*table;
+    // A one-sided curved emitter rejects half its samples and varies over the
+    // rest, so it needs far more than the flat lights' 4096. Measured against
+    // the closed form at 161 x 121: 3103 of 8281 pixels beyond 2% at 4096
+    // (noise, sigma ~2%), 172 at 32768 (sigma ~0.9%), 0 at 131072 (sigma
+    // ~0.4%, worst 1.97%, 86 s). At 65536 the sigma is ~0.6%, so 3% is five
+    // of them, and a quarter of the pixels keeps the case to a few seconds.
+    frame.samples = 65536;
+    {
+        gpu::CommandBatch batch(*gpu->device);
+        REQUIRE(raster->render(batch, *scene, projection, w, h, visibility));
+        REQUIRE(shading->shade(batch, visibility, projection, frame, out));
+        REQUIRE(batch.submit(true));
+    }
+    test::dumpPpm(*gpu, "cylinder_light", out.colour, w, h);
+    auto check = gpu::ComputeKernel::create(*gpu->library, "lrt/test/lambert_irradiance", "lambertIrradiance");
+    if (!check) FAIL(check.error().toString());
+    gpu::Buffer counts = test::uintBuffer(*gpu->device, 2, "counts");
+    gpu::Buffer worst = test::uintBuffer(*gpu->device, 5, "worst");
+    const std::array<float, 12> toWorld = aofx::xform::inverseAffine(projection.worldToView).rows3x4();
+    // Two closed forms that share nothing: Lambert's edge formula over 512
+    // strips, and dense quadrature of the form-factor integral. Both are held
+    // against the render; the strips are the check, the integral the check
+    // on the check.
+    for (const uint32_t kind : {6u, 7u}) {
+        gpu::CommandBatch batch(*gpu->device);
+        check->dispatch(batch, {1, 1, 1}, [&](rhi::ShaderCursor cursor) {
+            cursor["colour"].setBinding(out.colour.rhi());
+            cursor["depth"].setBinding(out.depth.rhi());
+            cursor["counts"].setBinding(counts.rhi());
+            cursor["worst"].setBinding(worst.rhi());
+            technique::setCamera(cursor["camera"], projection, w, h);
+            rhi::ShaderCursor p = cursor["plane"];
+            p["kind"].setData(kind);
+            p["vertices"].setData(uint32_t{512});
+            p["row0"].setData(toWorld.data(), sizeof(float) * 4);
+            p["row1"].setData(toWorld.data() + 4, sizeof(float) * 4);
+            p["row2"].setData(toWorld.data() + 8, sizeof(float) * 4);
+            const float centre[4] = {0.0F, 0.0F, -3.0F, 0.0F};
+            const float axisX[4] = {1.0F, 0.0F, 0.0F, 0.3F};   // the axis, and the radius
+            const float axisY[4] = {0.0F, 1.0F, 0.0F, 1.4F};   // a radial axis, and the length
+            const float normal[4] = {0.0F, 0.0F, 1.0F, 0.8F};
+            const float radiance[4] = {1.0F, 1.0F, 1.0F, 0.03F};
+            const float none[4] = {0.0F, 0.0F, 0.0F, 0.0F};
+            p["centre"].setData(centre, sizeof(centre));
+            p["axisX"].setData(axisX, sizeof(axisX));
+            p["axisY"].setData(axisY, sizeof(axisY));
+            p["normal"].setData(normal, sizeof(normal));
+            p["radiance"].setData(radiance, sizeof(radiance));
+            p["occluder"].setData(none, sizeof(none));
+            p["occluderAxes"].setData(none, sizeof(none));
+        });
+        REQUIRE(batch.submit(true));
+        uint32_t c[2] = {0, 0};
+        float probe[5] = {0.0F, 0.0F, 0.0F, 0.0F, 0.0F};
+        REQUIRE(counts.read(*gpu->device, 0, sizeof(c), c));
+        REQUIRE(worst.read(*gpu->device, 0, sizeof(probe), probe));
+        float rendered[4] = {0.0F, 0.0F, 0.0F, 0.0F};
+        REQUIRE(out.colour.read(*gpu->device, (uint64_t{h / 2} * w + w / 2 + 20) * 16, sizeof(rendered), rendered));
+        std::printf("  cylinder light, %s: %u pixels, %u beyond 3%%, worst %.4f; probe pixel expects %.5f, rendered %.5f\n",
+                    kind == 6 ? "strips  " : "integral", c[0], c[1], double(probe[0]), double(probe[1]),
+                    double(rendered[0]));
+        CHECK(c[0] > 2000);
+        CHECK(c[1] == 0);
+    }
+}
+
+// The cylinder sampler on its own, at one point: the irradiance factor it
+// estimates against the same integral by quadrature. Nothing of shading in
+// between, so a sampler's bias can be told from a shader's.
+TEST_CASE("the cylinder sampler alone estimates the irradiance its integral gives",
+          "[technique][lights][cylinder]") {
+    LRT_REQUIRE_GPU(gpu);
+    auto table = light::LightTable::create(*gpu->device);
+    if (!table) FAIL(table.error().toString());
+    auto made = gpu::ComputeKernel::create(*gpu->library, "lrt/test/light_check", "lightIrradianceAt");
+    if (!made) FAIL(made.error().toString());
+    gpu::Buffer irradiance = test::uintBuffer(*gpu->device, 2, "irradiance");
+    light::Light lamp;
+    lamp.kind = light::LightKind::Cylinder;
+    lamp.lightToWorld = aofx::xform::translation({0.0, 0.0, -3.0});
+    lamp.radius = 0.3F;
+    lamp.length = 1.4F;
+    lamp.shadow = false;
+    REQUIRE(table->set(std::span<const light::Light>(&lamp, 1)));
+    // Three points on the plane below: under the centre, off to the side
+    // along the axis, and off to the side across it.
+    const float points[3][3] = {{0.0F, 0.0F, -5.0F}, {0.9F, 0.0F, -5.0F}, {0.0F, 0.9F, -5.0F}};
+    for (const auto& pt : points) {
+        gpu::CommandBatch batch(*gpu->device);
+        made->dispatch(batch, {1, 1, 1}, [&](rhi::ShaderCursor cursor) {
+            cursor["lights"].setBinding(table->records().rhi());
+            cursor["irradiance"].setBinding(irradiance.rhi());
+            rhi::ShaderCursor p = cursor["params"];
+            p["thetaBins"].setData(uint32_t{1});
+            p["phiBins"].setData(uint32_t{1});
+            p["samples"].setData(uint32_t{1u << 20});
+            const float point[4] = {pt[0], pt[1], pt[2], 0.0F};
+            const float normal[4] = {0.0F, 0.0F, 1.0F, 0.0F};
+            p["point"].setData(point, sizeof(point));
+            p["normal"].setData(normal, sizeof(normal));
+        });
+        REQUIRE(batch.submit(true));
+        float e[2] = {0.0F, 0.0F};
+        REQUIRE(irradiance.read(*gpu->device, 0, sizeof(e), e));
+        const double relative = std::abs(e[0] - e[1]) / std::max(static_cast<double>(e[1]), 1e-9);
+        std::printf("  at (%.1f, %.1f, %.1f): sampler %.6f, quadrature %.6f, %.3f%% apart\n", double(pt[0]),
+                    double(pt[1]), double(pt[2]), double(e[0]), double(e[1]), relative * 100.0);
+        CHECK(relative < 0.005);
     }
 }
 
