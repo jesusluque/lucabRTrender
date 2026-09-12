@@ -518,3 +518,36 @@ void lightIrradianceAt(uint3 tid: SV_DispatchThreadID) {
     irradiance[1] = quad;
 }
 
+/// The cumulative shares light_prefix wrote, against the power written a
+/// second time here from the record alone: monotone, each step the light's
+/// own power, the last the total. Counts the records that miss.
+RWStructuredBuffer<uint> prefixMisses;   // [not monotone or wrong step, over lightCount records]
+uniform uint             prefixCount;
+
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void lightPrefixCheck(uint3 tid: SV_DispatchThreadID) {
+    if (tid.x != 0) {
+        return;
+    }
+    uint misses = 0;
+    float running = 0.0;
+    for (uint k = 0; k < prefixCount; ++k) {
+        const LightRecord l = lights[k];
+        float power = max(0.2126 * l.colour.r + 0.7152 * l.colour.g + 0.0722 * l.colour.b, 0.0) * exp2(l.exposure);
+        if ((l.flags & kLightNormalize) == 0) {
+            if (l.kind == kLightSphere) power *= 4.0 * kPiCheck * l.sizeX * l.sizeX;
+            else if (l.kind == kLightDisk) power *= kPiCheck * l.sizeX * l.sizeX;
+            else if (l.kind == kLightRect) power *= l.sizeX * l.sizeY;
+            else if (l.kind == kLightCylinder) power *= 2.0 * kPiCheck * l.sizeX * l.sizeY;
+        }
+        power = max(power, 1.0e-6);
+        const float before = running;
+        running += power;
+        const bool monotone = l.cumulative > before;
+        const bool step = abs(l.cumulative - running) <= 1.0e-5 * max(running, 1.0e-6);
+        misses += (monotone && step) ? 0u : 1u;
+    }
+    prefixMisses[0] = misses;
+}
+

@@ -1228,6 +1228,15 @@ Found on the way and fixed: shading's second random number was one LCG step
 of the first, tying every sample pair to a lattice. It did not bias the
 lights that were checked, but it is the path tracer's PCG chain now.
 
+And one the closing plan found by reading: each light's cumulative share of
+the frame's power was accumulated in a host loop -- the one piece of CPU
+arithmetic on scene data left in the tree. It is a kernel now
+(`light_prefix.slang`), the total is the last record's share where
+`chooseLight` reads it, nothing comes back to the host, and the table takes
+the shader library to make it. Checked by a kernel that writes the power a
+second time from the record alone: five lights of mixed kinds, exposures and
+`normalize`, 0 shares missing their power.
+
 ### In Hydra
 
 The delegate takes sphere, disk, rect, distant, dome and cylinder lights as

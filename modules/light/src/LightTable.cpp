@@ -1,6 +1,9 @@
 // Copyright (c) 2026 lucabRTrender contributors.
 #include "lrt/light/LightTable.h"
 
+#include "lrt/gpu/CommandBatch.h"
+#include "lrt/gpu/ShaderLibrary.h"
+
 #include <cmath>
 #include <vector>
 
@@ -8,9 +11,13 @@
 
 namespace lrt::light {
 
-Result<LightTable> LightTable::create(gpu::Device& device) {
+Result<LightTable> LightTable::create(gpu::ShaderLibrary& library) {
+    gpu::Device& device = library.device();
     LightTable table;
     table.device_ = &device;
+    auto prefix = gpu::ComputeKernel::create(library, "lrt/light/light_prefix", "lightPrefix");
+    if (!prefix) return std::move(prefix).error();
+    table.prefix_.emplace(std::move(*prefix));
     return table;
 }
 
@@ -59,31 +66,6 @@ LightRecord LightTable::recordOf(const Light& light) {
 }
 
 /// What a light is worth to a frame: its emission times what it emits over.
-/// A rough estimate is all a choice needs -- it only has to be positive and
-/// roughly proportional, since the density it implies is divided back out.
-static float powerOf(const Light& light) {
-    const float luminance = 0.2126F * light.colour[0] + 0.7152F * light.colour[1] + 0.0722F * light.colour[2];
-    float power = std::max(luminance, 0.0F) * std::max(light.intensity, 0.0F) * std::exp2(light.exposure);
-    switch (light.kind) {
-        case LightKind::Sphere:
-            power *= light.normalize ? 1.0F : 4.0F * 3.14159265358979F * light.radius * light.radius;
-            break;
-        case LightKind::Disk:
-            power *= light.normalize ? 1.0F : 3.14159265358979F * light.radius * light.radius;
-            break;
-        case LightKind::Rect:
-            power *= light.normalize ? 1.0F : light.width * light.height;
-            break;
-        case LightKind::Cylinder:
-            power *= light.normalize ? 1.0F : 2.0F * 3.14159265358979F * light.radius * light.length;
-            break;
-        case LightKind::Distant:
-        case LightKind::Dome:
-            break;   // over the whole sky either way
-    }
-    return std::max(power, 1.0e-6F);
-}
-
 Result<void> LightTable::set(std::span<const Light> lights) {
     std::vector<LightRecord> records;
     records.reserve(lights.size() + 1);
@@ -97,22 +79,24 @@ Result<void> LightTable::set(std::span<const Light> lights) {
     if (records.empty()) {
         records.emplace_back();   // a buffer to bind, which nothing reads
     }
-    // Cumulative shares of the frame's power, for choosing one light.
-    power_ = 0.0F;
-    for (size_t k = 0; k < lights.size(); ++k) {
-        power_ += powerOf(lights[k]);
-        records[k].cumulative = power_;
-    }
     count_ = static_cast<uint32_t>(lights.size());
     if (records.size() > capacity_ || !records_.valid()) {
         auto made = gpu::Buffer::fromSpan<LightRecord>(*device_, records, "lights.records");
         if (!made) return std::move(made).error();
         records_ = std::move(*made);
         capacity_ = static_cast<uint32_t>(records.size());
-        return ok();
-    }
-    if (!records_.write(*device_, 0, records.size() * sizeof(LightRecord), records.data())) {
+    } else if (!records_.write(*device_, 0, records.size() * sizeof(LightRecord), records.data())) {
         return Error(ErrorCode::DeviceFailure, "lights: cannot upload the frame's records");
+    }
+    // Each light's share of the frame's power, accumulated on the device:
+    // the host uploads what was authored and computes nothing on it.
+    if (count_ > 0) {
+        gpu::CommandBatch batch(*device_);
+        prefix_->dispatch(batch, {1, 1, 1}, [&](rhi::ShaderCursor cursor) {
+            cursor["records"].setBinding(records_.rhi());
+            cursor["count"].setData(count_);
+        });
+        LRT_TRY(batch.submit(true));
     }
     return ok();
 }

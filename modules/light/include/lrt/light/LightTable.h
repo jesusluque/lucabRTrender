@@ -15,9 +15,13 @@
 
 #include "lrt/core/Result.h"
 #include "lrt/gpu/Buffer.h"
+#include "lrt/gpu/ComputeKernel.h"
+
+#include <optional>
 #include "lrt/render/Camera.h"
 
 namespace lrt::gpu {
+class ShaderLibrary;
 class Device;
 }
 
@@ -99,7 +103,9 @@ inline constexpr uint32_t kLightUnlinked = 0xFFFFFFFFU;
 
 class LightTable {
 public:
-    [[nodiscard]] static Result<LightTable> create(gpu::Device& device);
+    /// The table needs the library for the kernel that accumulates each
+    /// light's share of the frame's power on the device.
+    [[nodiscard]] static Result<LightTable> create(gpu::ShaderLibrary& library);
 
     /// The frame's lights, uploaded. The buffer is remade when it must grow.
     [[nodiscard]] Result<void> set(std::span<const Light> lights);
@@ -108,8 +114,6 @@ public:
     [[nodiscard]] bool     anyShadow() const noexcept { return shadows_; }
     /// Whether any of them is a dome, which a frame paints where it drew nothing.
     [[nodiscard]] bool     anyDome() const noexcept { return domes_; }
-    /// The frame's total power, which the cumulative weights are shares of.
-    [[nodiscard]] float    power() const noexcept { return power_; }
     [[nodiscard]] const gpu::Buffer& records() const noexcept { return records_; }
 
     /// `lights` and `lightCount`, by name.
@@ -121,11 +125,11 @@ public:
 private:
     gpu::Device* device_ = nullptr;
     gpu::Buffer  records_;
+    std::optional<gpu::ComputeKernel> prefix_;   ///< light_prefix: each light's cumulative share, on the device
     uint32_t     count_ = 0;
     uint32_t     capacity_ = 0;
     bool         shadows_ = false;
     bool         domes_ = false;
-    float        power_ = 0.0F;
 };
 
 }   // namespace lrt::light

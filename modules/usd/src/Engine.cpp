@@ -895,7 +895,7 @@ Result<void> Engine::render(const render::Projection& projection, const render::
         // before the frame's batch opens: a submit inside a batch that has
         // already recorded work releases what that work still refers to.
         if (!lightTable_.has_value()) {
-            auto made = light::LightTable::create(*device_);
+            auto made = light::LightTable::create(*library_);
             if (!made) return std::move(made).error();
             lightTable_.emplace(std::move(*made));
         }
@@ -1138,7 +1138,6 @@ Result<void> Engine::render(const render::Projection& projection, const render::
     if (lightTable_.has_value() && lightTable_->count() > 0) {
         splatLights.records = &lightTable_->records();
         splatLights.count = lightTable_->count();
-        splatLights.power = lightTable_->power();
     }
     if (under != nullptr) {
         LRT_TRY(rasterizer_->render(projection, splats, settings, targets, {}, under, &splatLights));

@@ -21,7 +21,7 @@ struct PathParams {
     uint seed;         // which samples these are
     uint accumulated;  // paths a pixel already in `sum`
     uint chooseLights;
-    float power;
+    uint pad0;
     uint writeAux;     // 1: write the first hit's albedo and normal
     uint adaptive;     // 1: a converged pixel takes no more paths
     float errorTarget; // relative standard error of the mean a pixel stops at
@@ -265,7 +265,7 @@ float3 gatherLight(Shaded sh, uint2 pixel, uint sample, uint bounce) {
         return float3(0.0);
     }
     const float pick = random(pixel, sample, bounce, 11u);
-    const LightChoice choice = chooseLight(lights, lightCount, path.power, pick);
+    const LightChoice choice = chooseLight(lights, lightCount, pick);
     if (!choice.valid) {
         return float3(0.0);
     }
@@ -613,7 +613,6 @@ Result<void> PathTracer::trace(gpu::CommandBatch& batch, const VisibilityTargets
         cursor["path"]["seed"].setData(settings.seed);
         cursor["path"]["accumulated"].setData(already);
         cursor["path"]["chooseLights"].setData(uint32_t{frame.chooseLights ? 1u : 0u});
-        cursor["path"]["power"].setData(frame.lights != nullptr ? frame.lights->power() : 0.0F);
     });
     accumulated_ = already + samples;
     lastErrorTarget_ = settings.errorTarget;

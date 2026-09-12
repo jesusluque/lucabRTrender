@@ -68,9 +68,8 @@ struct SplatInstance {
 struct SplatLights {
     const gpu::Buffer* records = nullptr;
     uint32_t           count = 0;
-    float              power = 0.0F;
 
-    [[nodiscard]] bool any() const noexcept { return records != nullptr && count > 0 && power > 0.0F; }
+    [[nodiscard]] bool any() const noexcept { return records != nullptr && count > 0; }
 };
 
 struct RenderSettings {

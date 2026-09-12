@@ -15,8 +15,8 @@ import lrt.light.lights_image;
 struct LightingParams {
     uint  samples;
     uint  chooseLights;
-    float power;          // the frame's total, which the cumulative shares are of
     uint  pad0;
+    uint  pad1;
 };
 
 Texture2D<uint4>              visibility;   // (instance + 1, triangle); row 0 on top
@@ -151,7 +151,7 @@ void shadeMaterials(uint3 group: SV_GroupID, uint index: SV_GroupIndex) {
         for (uint i = 0; i < samples; ++i) {
             const float2 u = sampleAt(tid, 0, i);
             const float pick = sampleAt(tid, 1, i).x;
-            const LightChoice choice = chooseLight(lights, lightCount, lighting.power, pick);
+            const LightChoice choice = chooseLight(lights, lightCount, pick);
             if (!choice.valid) {
                 continue;
             }
@@ -271,7 +271,6 @@ Result<void> MaterialShading::shade(gpu::CommandBatch& batch, const VisibilityTa
             frame.lights->bind(cursor);
             cursor["lighting"]["samples"].setData(frame.samples);
             cursor["lighting"]["chooseLights"].setData(uint32_t{frame.chooseLights ? 1u : 0u});
-            cursor["lighting"]["power"].setData(frame.lights != nullptr ? frame.lights->power() : 0.0F);
         }
         if (frame.shadows != nullptr) {
             cursor["shadowScene"].setBinding(frame.shadows);

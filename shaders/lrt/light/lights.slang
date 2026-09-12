@@ -65,12 +65,18 @@ public struct LightChoice {
     public bool  valid;
 };
 
-public LightChoice chooseLight(StructuredBuffer<LightRecord> lights, uint count, float power, float u) {
+public LightChoice chooseLight(StructuredBuffer<LightRecord> lights, uint count, float u) {
     LightChoice choice;
     choice.index = 0;
     choice.probability = 0.0;
     choice.valid = false;
-    if (count == 0 || !(power > 0.0)) {
+    if (count == 0) {
+        return choice;
+    }
+    // The frame's total is the last cumulative share, accumulated on the
+    // device by light_prefix.
+    const float power = lights[count - 1].cumulative;
+    if (!(power > 0.0)) {
         return choice;
     }
     const float target = clamp(u, 0.0, 0.999999) * power;

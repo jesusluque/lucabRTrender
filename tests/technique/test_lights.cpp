@@ -120,7 +120,7 @@ TEST_CASE("a Lambert plane under a sphere, a disk and a rectangle is lit as the 
     auto raster = technique::VisibilityRaster::create(*gpu->library);
     auto programs = technique::MaterialPrograms::create(*gpu->library);
     auto shading = technique::MaterialShading::create(*gpu->library);
-    auto table = light::LightTable::create(*gpu->device);
+    auto table = light::LightTable::create(*gpu->library);
     if (!compiler) FAIL(compiler.error().toString());
     if (!textures) FAIL(textures.error().toString());
     if (!builder) FAIL(builder.error().toString());
@@ -348,7 +348,7 @@ TEST_CASE("a Lambert plane under a sphere, a disk and a rectangle is lit as the 
 
 TEST_CASE("each light's samples follow the density it reports", "[technique][lights][chi2]") {
     LRT_REQUIRE_GPU(gpu);
-    auto table = light::LightTable::create(*gpu->device);
+    auto table = light::LightTable::create(*gpu->library);
     if (!table) FAIL(table.error().toString());
     const auto kernel = [&](const char* entry) {
         auto made = gpu::ComputeKernel::create(*gpu->library, "lrt/test/light_check", entry);
@@ -510,7 +510,7 @@ TEST_CASE("a dome with a sun in it samples what its density describes",
     lamp.sampler = (*textures)->sampler(material::Wrap::Repeat, material::Wrap::Clamp);
     lamp.shadow = false;
     REQUIRE((*textures)->commit());
-    auto table = light::LightTable::create(*gpu->device);
+    auto table = light::LightTable::create(*gpu->library);
     if (!table) FAIL(table.error().toString());
     REQUIRE(table->set(std::span<const light::Light>(&lamp, 1)));
 
@@ -616,7 +616,7 @@ TEST_CASE("a light reaches the categories it is linked to, and no others", "[tec
     auto raster = technique::VisibilityRaster::create(*gpu->library);
     auto programs = technique::MaterialPrograms::create(*gpu->library);
     auto shading = technique::MaterialShading::create(*gpu->library);
-    auto table = light::LightTable::create(*gpu->device);
+    auto table = light::LightTable::create(*gpu->library);
     if (!compiler) FAIL(compiler.error().toString());
     if (!textures) FAIL(textures.error().toString());
     if (!builder) FAIL(builder.error().toString());
@@ -738,7 +738,7 @@ TEST_CASE("an occluder outside a light's shadow link casts nothing", "[technique
     auto raster = technique::VisibilityRaster::create(*gpu->library);
     auto programs = technique::MaterialPrograms::create(*gpu->library);
     auto shading = technique::MaterialShading::create(*gpu->library);
-    auto table = light::LightTable::create(*gpu->device);
+    auto table = light::LightTable::create(*gpu->library);
     if (!compiler) FAIL(compiler.error().toString());
     if (!textures) FAIL(textures.error().toString());
     if (!builder) FAIL(builder.error().toString());
@@ -886,7 +886,7 @@ TEST_CASE("many lights are lit as one light of their total power", "[technique][
     auto raster = technique::VisibilityRaster::create(*gpu->library);
     auto programs = technique::MaterialPrograms::create(*gpu->library);
     auto shading = technique::MaterialShading::create(*gpu->library);
-    auto table = light::LightTable::create(*gpu->device);
+    auto table = light::LightTable::create(*gpu->library);
     if (!compiler) FAIL(compiler.error().toString());
     if (!textures) FAIL(textures.error().toString());
     if (!builder) FAIL(builder.error().toString());
@@ -1025,7 +1025,7 @@ TEST_CASE("a path traced frame of one bounce agrees with the raster's direct lig
     auto programs = technique::MaterialPrograms::create(*gpu->library);
     auto shading = technique::MaterialShading::create(*gpu->library);
     auto tracer = technique::PathTracer::create(*gpu->library);
-    auto table = light::LightTable::create(*gpu->device);
+    auto table = light::LightTable::create(*gpu->library);
     if (!compiler) FAIL(compiler.error().toString());
     if (!textures) FAIL(textures.error().toString());
     if (!builder) FAIL(builder.error().toString());
@@ -1148,7 +1148,7 @@ TEST_CASE("the bounce carries light from a second surface", "[technique][path]")
     auto raster = technique::VisibilityRaster::create(*gpu->library);
     auto programs = technique::MaterialPrograms::create(*gpu->library);
     auto tracer = technique::PathTracer::create(*gpu->library);
-    auto table = light::LightTable::create(*gpu->device);
+    auto table = light::LightTable::create(*gpu->library);
     if (!compiler) FAIL(compiler.error().toString());
     if (!textures) FAIL(textures.error().toString());
     if (!builder) FAIL(builder.error().toString());
@@ -1291,7 +1291,7 @@ TEST_CASE("the path traced error against a converged reference falls as one over
     auto raster = technique::VisibilityRaster::create(*gpu->library);
     auto programs = technique::MaterialPrograms::create(*gpu->library);
     auto tracer = technique::PathTracer::create(*gpu->library);
-    auto table = light::LightTable::create(*gpu->device);
+    auto table = light::LightTable::create(*gpu->library);
     if (!compiler) FAIL(compiler.error().toString());
     if (!textures) FAIL(textures.error().toString());
     if (!builder) FAIL(builder.error().toString());
@@ -1511,7 +1511,7 @@ TEST_CASE("a white furnace gathers the same light path traced as by next event e
     auto programs = technique::MaterialPrograms::create(*gpu->library);
     auto shading = technique::MaterialShading::create(*gpu->library);
     auto tracer = technique::PathTracer::create(*gpu->library);
-    auto table = light::LightTable::create(*gpu->device);
+    auto table = light::LightTable::create(*gpu->library);
     if (!compiler) FAIL(compiler.error().toString());
     if (!textures) FAIL(textures.error().toString());
     if (!builder) FAIL(builder.error().toString());
@@ -1637,7 +1637,7 @@ TEST_CASE("the same paths gathered in one pass and in many give the same frame",
     auto raster = technique::VisibilityRaster::create(*gpu->library);
     auto programs = technique::MaterialPrograms::create(*gpu->library);
     auto tracer = technique::PathTracer::create(*gpu->library);
-    auto table = light::LightTable::create(*gpu->device);
+    auto table = light::LightTable::create(*gpu->library);
     if (!compiler) FAIL(compiler.error().toString());
     if (!textures) FAIL(textures.error().toString());
     if (!builder) FAIL(builder.error().toString());
@@ -1882,7 +1882,7 @@ TEST_CASE("neighbouring pixels' path traced errors average away as independent e
     auto raster = technique::VisibilityRaster::create(*gpu->library);
     auto programs = technique::MaterialPrograms::create(*gpu->library);
     auto tracer = technique::PathTracer::create(*gpu->library);
-    auto table = light::LightTable::create(*gpu->device);
+    auto table = light::LightTable::create(*gpu->library);
     if (!compiler) FAIL(compiler.error().toString());
     if (!textures) FAIL(textures.error().toString());
     if (!builder) FAIL(builder.error().toString());
@@ -2036,7 +2036,7 @@ TEST_CASE("a closed emissive shell reads the geometric series of its bounces",
     auto raster = technique::VisibilityRaster::create(*gpu->library);
     auto programs = technique::MaterialPrograms::create(*gpu->library);
     auto tracer = technique::PathTracer::create(*gpu->library);
-    auto table = light::LightTable::create(*gpu->device);
+    auto table = light::LightTable::create(*gpu->library);
     if (!compiler) FAIL(compiler.error().toString());
     if (!textures) FAIL(textures.error().toString());
     if (!builder) FAIL(builder.error().toString());
@@ -2177,7 +2177,7 @@ TEST_CASE("the path tracer's first hit reports its albedo and shading normal", "
     auto raster = technique::VisibilityRaster::create(*gpu->library);
     auto programs = technique::MaterialPrograms::create(*gpu->library);
     auto tracer = technique::PathTracer::create(*gpu->library);
-    auto table = light::LightTable::create(*gpu->device);
+    auto table = light::LightTable::create(*gpu->library);
     if (!compiler) FAIL(compiler.error().toString());
     if (!textures) FAIL(textures.error().toString());
     if (!builder) FAIL(builder.error().toString());
@@ -2311,7 +2311,7 @@ TEST_CASE("the denoiser lowers a path traced frame's error against a deep refere
     auto raster = technique::VisibilityRaster::create(*gpu->library);
     auto programs = technique::MaterialPrograms::create(*gpu->library);
     auto tracer = technique::PathTracer::create(*gpu->library);
-    auto table = light::LightTable::create(*gpu->device);
+    auto table = light::LightTable::create(*gpu->library);
     if (!compiler) FAIL(compiler.error().toString());
     if (!textures) FAIL(textures.error().toString());
     if (!builder) FAIL(builder.error().toString());
@@ -2456,7 +2456,7 @@ TEST_CASE("adaptive sampling stops a pixel where its error estimate says, and th
     auto raster = technique::VisibilityRaster::create(*gpu->library);
     auto programs = technique::MaterialPrograms::create(*gpu->library);
     auto tracer = technique::PathTracer::create(*gpu->library);
-    auto table = light::LightTable::create(*gpu->device);
+    auto table = light::LightTable::create(*gpu->library);
     if (!compiler) FAIL(compiler.error().toString());
     if (!textures) FAIL(textures.error().toString());
     if (!builder) FAIL(builder.error().toString());
@@ -2655,7 +2655,7 @@ TEST_CASE("a Lambert plane under a cylinder light is lit as the closed form says
     auto raster = technique::VisibilityRaster::create(*gpu->library);
     auto programs = technique::MaterialPrograms::create(*gpu->library);
     auto shading = technique::MaterialShading::create(*gpu->library);
-    auto table = light::LightTable::create(*gpu->device);
+    auto table = light::LightTable::create(*gpu->library);
     if (!compiler) FAIL(compiler.error().toString());
     if (!textures) FAIL(textures.error().toString());
     if (!builder) FAIL(builder.error().toString());
@@ -2785,7 +2785,7 @@ TEST_CASE("a Lambert plane under a cylinder light is lit as the closed form says
 TEST_CASE("the cylinder sampler alone estimates the irradiance its integral gives",
           "[technique][lights][cylinder]") {
     LRT_REQUIRE_GPU(gpu);
-    auto table = light::LightTable::create(*gpu->device);
+    auto table = light::LightTable::create(*gpu->library);
     if (!table) FAIL(table.error().toString());
     auto made = gpu::ComputeKernel::create(*gpu->library, "lrt/test/light_check", "lightIrradianceAt");
     if (!made) FAIL(made.error().toString());
@@ -2822,5 +2822,38 @@ TEST_CASE("the cylinder sampler alone estimates the irradiance its integral give
                     double(pt[1]), double(pt[2]), double(e[0]), double(e[1]), relative * 100.0);
         CHECK(relative < 0.005);
     }
+}
+
+// The light table's cumulative shares are accumulated on the device now,
+// not on the host: checked against the power written a second time from the
+// record alone, in order, for five lights of mixed kinds and exposures.
+TEST_CASE("a light table's cumulative shares are each light's power, accumulated on the device",
+          "[technique][lights][prefix]") {
+    LRT_REQUIRE_GPU(gpu);
+    auto table = light::LightTable::create(*gpu->library);
+    if (!table) FAIL(table.error().toString());
+    auto made = gpu::ComputeKernel::create(*gpu->library, "lrt/test/light_check", "lightPrefixCheck");
+    if (!made) FAIL(made.error().toString());
+    std::array<light::Light, 5> lamps;
+    lamps[0].kind = light::LightKind::Sphere;   lamps[0].radius = 0.4F;  lamps[0].intensity = 2.0F;
+    lamps[1].kind = light::LightKind::Rect;     lamps[1].width = 1.2F;   lamps[1].height = 0.8F; lamps[1].exposure = 1.0F;
+    lamps[2].kind = light::LightKind::Distant;  lamps[2].intensity = 3.0F;
+    lamps[3].kind = light::LightKind::Cylinder; lamps[3].radius = 0.3F;  lamps[3].length = 1.4F;
+    lamps[4].kind = light::LightKind::Disk;     lamps[4].radius = 0.6F;  lamps[4].normalize = true;
+    REQUIRE(table->set(std::span<const light::Light>(lamps.data(), lamps.size())));
+    gpu::Buffer misses = test::uintBuffer(*gpu->device, 1, "prefix.misses");
+    {
+        gpu::CommandBatch batch(*gpu->device);
+        made->dispatch(batch, {1, 1, 1}, [&](rhi::ShaderCursor cursor) {
+            cursor["lights"].setBinding(table->records().rhi());
+            cursor["prefixMisses"].setBinding(misses.rhi());
+            cursor["prefixCount"].setData(table->count());
+        });
+        REQUIRE(batch.submit(true));
+    }
+    uint32_t n = 0;
+    REQUIRE(misses.read(*gpu->device, 0, sizeof(n), &n));
+    std::printf("  five lights: %u cumulative shares miss their power\n", n);
+    CHECK(n == 0);
 }
 

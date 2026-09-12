@@ -331,7 +331,7 @@ TEST_CASE("a splat asked to be relit shows the scene's light, not the light it w
     b.add(0.0F, 0.0F, 0.0F, 0.99F, 0.6F, 0.6F, 0.02F, {1.0F, 0.0F, 0.0F, 0.0F}, {0.8F, 0.4F, 0.2F});
     auto cloud = h->loader.upload(b.raw);
     if (!cloud) FAIL(cloud.error().toString());
-    auto table = light::LightTable::create(*gpu->device);
+    auto table = light::LightTable::create(*gpu->library);
     if (!table) FAIL(table.error().toString());
 
     render::Camera camera = render::Camera::lookingAt({0.0, 0.0, 3.0}, {0.0, 0.0, 0.0});
@@ -351,7 +351,6 @@ TEST_CASE("a splat asked to be relit shows the scene's light, not the light it w
         render::SplatLights lights;
         lights.records = &table->records();
         lights.count = table->count();
-        lights.power = table->power();
         std::vector<render::SplatInstance> instances{{&*cloud, render::Mat4::identity()}};
         instances[0].relight = relight;
         REQUIRE(h->raster.render(camera, instances, settings, into, {}, nullptr, &lights));
