@@ -1292,9 +1292,14 @@ enough that what is left is the light and not the noise.
     makes that filter mark a prim is not happening here, and its
     implementation is headers only in this install. The USD case is written
     and hidden (`[.][usd][gpu][mesh][lights][linking]`) with that list in it.
-- **Shadow linking is carried, not honoured.** The category reaches the light
-  record; what is missing is for the trace to skip an instance outside the
-  set, which is the cutouts' re-trace loop applied to a different test.
+- **Shadow linking is honoured in the trace.** A light with a shadow link
+  walks its ray on past whatever does not carry that category, as a cutout
+  walks past what its opacity removed, up to sixteen times; a light without
+  one keeps the cheap first-hit query. Checked both ways against the closed
+  form: with the link naming the occluder's category the umbra is exactly
+  where it projects, and with it naming another the plane is lit as if
+  nothing were there -- 0 pixels of 7440 away from the closed form either
+  way. What arrives from USD is the same half that light linking is missing.
 - **The rest of the ground is surveyed:** USD
   resolves the collections for us if the delegate registers
   `HdsiLightLinkingSceneIndex` (`RegisterSceneIndexForRenderer` with our

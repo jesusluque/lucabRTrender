@@ -225,6 +225,12 @@ TEST_CASE("a Lambert plane under a sphere, a disk and a rectangle is lit as the 
         lamp.intensity = 1.0F;
         lamp.radius = 0.0F;   // a point: a hard shadow with an exact edge
         lamp.shadow = true;
+        // The occluder is in category 1; a shadow link naming category 0
+        // leaves it casting nothing, and the plane reads as if it were not
+        // there at all.
+        both[1].categories = uint64_t{1} << 1;
+        REQUIRE(scene->update(std::span<const world::MeshInstance>(both.data(), both.size()), projection));
+        REQUIRE(accel->build(*scene));
         REQUIRE(table->set(std::span<const light::Light>(&lamp, 1)));
         technique::VisibilityTargets visibility;
         render::RenderTargets out;
@@ -654,5 +660,155 @@ TEST_CASE("a light reaches the categories it is linked to, and no others", "[tec
         CHECK(n[1] == n[0]);         // and the light reaches all of it
         CHECK(n[2] > 1000);          // the right square is there too
         CHECK(n[3] == (c.rightLit ? n[2] : 0u));
+    }
+}
+
+TEST_CASE("an occluder outside a light's shadow link casts nothing", "[technique][lights][linking]") {
+    LRT_REQUIRE_GPU(gpu);
+    const gpu::Caps& caps = gpu->device->caps();
+    if (!caps.rasterization || !caps.rayQuery || !caps.accelerationStructure) {
+        SKIP("needs rasterisation and ray queries");
+    }
+    std::vector<std::filesystem::path> shaderPaths;
+    for (const std::string& path : gpu->device->shaderSearchPaths()) {
+        shaderPaths.emplace_back(path);
+    }
+    auto compiler = material::MaterialCompiler::create({LRT_MATERIALX_ROOT}, shaderPaths);
+    auto textures = material::TextureStore::create(*gpu->library);
+    auto builder = geom::MeshBuilder::create(*gpu->library);
+    auto scene = world::GpuScene::create(*gpu->library);
+    auto accel = world::RayTracingScene::create(*gpu->library);
+    auto raster = technique::VisibilityRaster::create(*gpu->library);
+    auto programs = technique::MaterialPrograms::create(*gpu->library);
+    auto shading = technique::MaterialShading::create(*gpu->library);
+    auto table = light::LightTable::create(*gpu->device);
+    if (!compiler) FAIL(compiler.error().toString());
+    if (!textures) FAIL(textures.error().toString());
+    if (!builder) FAIL(builder.error().toString());
+    if (!scene) FAIL(scene.error().toString());
+    if (!accel) FAIL(accel.error().toString());
+    if (!raster) FAIL(raster.error().toString());
+    if (!programs) FAIL(programs.error().toString());
+    if (!shading) FAIL(shading.error().toString());
+    if (!table) FAIL(table.error().toString());
+    auto lambert = (*compiler)->compileXml(
+        "<?xml version=\"1.0\"?>\n<materialx version=\"1.39\">\n"
+        "  <oren_nayar_diffuse_bsdf name=\"d\" type=\"BSDF\">\n"
+        "    <input name=\"color\" type=\"color3\" value=\"0.8, 0.8, 0.8\" />\n"
+        "    <input name=\"roughness\" type=\"float\" value=\"0\" />\n"
+        "  </oren_nayar_diffuse_bsdf>\n"
+        "  <surface name=\"shader\" type=\"surfaceshader\"><input name=\"bsdf\" type=\"BSDF\" nodename=\"d\" /></surface>\n"
+        "  <surfacematerial name=\"material\" type=\"material\">\n"
+        "    <input name=\"surfaceshader\" type=\"surfaceshader\" nodename=\"shader\" />\n"
+        "  </surfacematerial>\n</materialx>\n");
+    if (!lambert) FAIL(lambert.error().toString());
+    REQUIRE(programs->setModules(std::span<const material::CompiledMaterial>(&*lambert, 1)));
+    REQUIRE(shading->setPrograms(*programs));
+    const std::vector<float> blob = material::MaterialCompiler::parameters(
+        *lambert, **textures, [](const std::string&) { return 0xFFFFFFFFu; });
+    REQUIRE((*textures)->commit());
+    const std::vector<technique::MaterialRecord> rows{{0, 0, 0, 0}, {1, 0, 0, 0}};
+    auto records = gpu::Buffer::fromSpan<technique::MaterialRecord>(*gpu->device, rows, "materials.records");
+    auto blobBuffer = gpu::Buffer::fromSpan<float>(*gpu->device, blob, "materials.blob");
+    REQUIRE(records);
+    REQUIRE(blobBuffer);
+
+    const uint32_t w = 161;
+    const uint32_t h = 121;
+    render::Camera camera = render::Camera::lookingAt({0.0, 0.0, 0.0}, {0.0, 0.0, -1.0});
+    camera.lens.focal = 35.0;
+    const render::Projection projection = render::projectionFor(camera, w, h);
+    // The plane, and an occluder between it and a point light. The occluder is
+    // in category 1.
+    std::array<world::MeshInstance, 2> both;
+    both[0].mesh = lambertSquare(*builder, 1.0F);
+    both[0].objectToWorld = aofx::xform::translation({0.0, 0.0, -5.0});
+    both[0].material = 1;
+    both[1].mesh = lambertSquare(*builder, 0.25F);
+    both[1].objectToWorld = aofx::xform::translation({0.0, 0.0, -4.0});
+    both[1].material = 1;
+    both[1].categories = uint64_t{1} << 1;
+    REQUIRE(scene->update(std::span<const world::MeshInstance>(both.data(), both.size()), projection));
+    REQUIRE(accel->build(*scene));
+    auto check = gpu::ComputeKernel::create(*gpu->library, "lrt/test/lambert_irradiance", "lambertIrradiance");
+    if (!check) FAIL(check.error().toString());
+
+    struct Case {
+        const char* name;
+        uint32_t    shadowCategory;
+        bool        shadowed;
+    };
+    // Linked to the category the occluder carries, it shadows; linked to
+    // another, it does not and the plane is lit as if nothing were there.
+    const std::array<Case, 2> cases{Case{"shadow link names the occluder's category", 1, true},
+                                    Case{"shadow link names another category", 0, false}};
+    for (const Case& c : cases) {
+        light::Light lamp;
+        lamp.kind = light::LightKind::Sphere;
+        lamp.lightToWorld = aofx::xform::translation({0.0, 0.0, -3.0});
+        lamp.radius = 0.0F;
+        lamp.shadow = true;
+        lamp.shadowCategory = c.shadowCategory;
+        REQUIRE(table->set(std::span<const light::Light>(&lamp, 1)));
+        technique::VisibilityTargets visibility;
+        render::RenderTargets out;
+        {
+            gpu::CommandBatch batch(*gpu->device);
+            REQUIRE(raster->render(batch, *scene, projection, w, h, visibility));
+            technique::MaterialFrame frame;
+            frame.programs = &*programs;
+            frame.scene = &*scene;
+            frame.records = &*records;
+            frame.blob = &*blobBuffer;
+            frame.textures = &**textures;
+            frame.lights = &*table;
+            frame.shadows = accel->topLevel();
+            frame.samples = 1;
+            REQUIRE(shading->shade(batch, visibility, projection, frame, out));
+            REQUIRE(batch.submit(true));
+        }
+        gpu::Buffer counts = test::uintBuffer(*gpu->device, 2, "counts");
+        gpu::Buffer worst = test::uintBuffer(*gpu->device, 5, "worst");
+        const std::array<float, 12> toWorld = aofx::xform::inverseAffine(projection.worldToView).rows3x4();
+        {
+            gpu::CommandBatch batch(*gpu->device);
+            check->dispatch(batch, {1, 1, 1}, [&](rhi::ShaderCursor cursor) {
+                cursor["colour"].setBinding(out.colour.rhi());
+                cursor["depth"].setBinding(out.depth.rhi());
+                cursor["counts"].setBinding(counts.rhi());
+                cursor["worst"].setBinding(worst.rhi());
+                technique::setCamera(cursor["camera"], projection, w, h);
+                rhi::ShaderCursor p = cursor["plane"];
+                p["kind"].setData(uint32_t{4});   // a point light
+                p["vertices"].setData(uint32_t{512});
+                p["row0"].setData(toWorld.data(), sizeof(float) * 4);
+                p["row1"].setData(toWorld.data() + 4, sizeof(float) * 4);
+                p["row2"].setData(toWorld.data() + 8, sizeof(float) * 4);
+                const float centre[4] = {0.0F, 0.0F, -3.0F, 0.0F};
+                const float axisX[4] = {1.0F, 0.0F, 0.0F, 0.0F};
+                const float axisY[4] = {0.0F, 1.0F, 0.0F, 0.0F};
+                const float normal[4] = {0.0F, 0.0F, 1.0F, 0.8F};
+                const float radiance[4] = {1.0F, 1.0F, 1.0F, 0.02F};
+                // The umbra is expected only where the occluder casts one.
+                const float occluder[4] = {0.0F, 0.0F, -4.0F, c.shadowed ? 0.25F : 0.0F};
+                const float axes[4] = {4.5F, 0.0F, 0.0F, 0.0F};
+                p["centre"].setData(centre, sizeof(centre));
+                p["axisX"].setData(axisX, sizeof(axisX));
+                p["axisY"].setData(axisY, sizeof(axisY));
+                p["normal"].setData(normal, sizeof(normal));
+                p["radiance"].setData(radiance, sizeof(radiance));
+                p["occluder"].setData(occluder, sizeof(occluder));
+                p["occluderAxes"].setData(axes, sizeof(axes));
+            });
+            REQUIRE(batch.submit(true));
+        }
+        uint32_t c2[2] = {0, 0};
+        float probe[5] = {};
+        REQUIRE(counts.read(*gpu->device, 0, sizeof(c2), c2));
+        REQUIRE(worst.read(*gpu->device, 0, sizeof(probe), probe));
+        std::printf("  %-42s: %u plane pixels, %u away from the closed form, worst %.4f\n", c.name, c2[0], c2[1],
+                    double(probe[0]));
+        CHECK(c2[0] > 5000);
+        CHECK(c2[1] == 0);
     }
 }

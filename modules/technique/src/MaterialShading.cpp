@@ -42,7 +42,13 @@ float2 sampleAt(uint2 pixel, uint light, uint index) {
 const char* kShadowRay = R"(
 uniform RaytracingAccelerationStructure shadowScene;
 
-bool occluded(float3 p, float3 n, float3 wi, float distance) {
+/// Whether the instance a shadow ray found casts this light's shadow: shadow
+/// linking, resolved the same way light linking is, by one bit.
+bool castsShadow(uint category, uint instance) {
+    return lightLinked(category, instances[instance].categoriesLo, instances[instance].categoriesHi);
+}
+
+bool occluded(float3 p, float3 n, float3 wi, float distance, uint shadowCategory) {
     // Off the surface it sits on, by a distance that grows with the scene, so
     // a grazing ray does not find the triangle it started from. Along the ray
     // as well as the normal, since a normal only says which side the surface
@@ -58,15 +64,38 @@ bool occluded(float3 p, float3 n, float3 wi, float distance) {
     if (ray.TMax <= ray.TMin) {
         return false;
     }
-    RayQuery<RAY_FLAG_FORCE_OPAQUE | RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH> query;
-    query.TraceRayInline(shadowScene, RAY_FLAG_FORCE_OPAQUE | RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH, 0xFF, ray);
-    query.Proceed();
-    return query.CommittedStatus() == COMMITTED_TRIANGLE_HIT;
+    if (shadowCategory == kLightUnlinked) {
+        // Nothing to ask of the occluder: the first hit is the answer.
+        RayQuery<RAY_FLAG_FORCE_OPAQUE | RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH> query;
+        query.TraceRayInline(shadowScene, RAY_FLAG_FORCE_OPAQUE | RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH, 0xFF,
+                             ray);
+        query.Proceed();
+        return query.CommittedStatus() == COMMITTED_TRIANGLE_HIT;
+    }
+    // Linked: walk on past whatever does not cast this light's shadow, as a
+    // cutout walks past what its opacity removed. Sixteen is the same bound.
+    for (uint step = 0; step < 16; ++step) {
+        RayQuery<RAY_FLAG_FORCE_OPAQUE> query;
+        query.TraceRayInline(shadowScene, RAY_FLAG_FORCE_OPAQUE, 0xFF, ray);
+        query.Proceed();
+        if (query.CommittedStatus() != COMMITTED_TRIANGLE_HIT) {
+            return false;
+        }
+        if (castsShadow(shadowCategory, query.CommittedInstanceID())) {
+            return true;
+        }
+        const float t = query.CommittedRayT();
+        ray.TMin = t + max(1.0e-4, t * 1.0e-5);
+        if (ray.TMin >= ray.TMax) {
+            return false;
+        }
+    }
+    return false;
 }
 )";
 
 const char* kNoShadowRay = R"(
-bool occluded(float3 p, float3 n, float3 wi, float distance) {
+bool occluded(float3 p, float3 n, float3 wi, float distance, uint shadowCategory) {
     return false;
 }
 )";
@@ -123,7 +152,8 @@ void shadeMaterials(uint3 group: SV_GroupID, uint index: SV_GroupIndex) {
                 if (!any(f > float3(0.0))) {
                     continue;
                 }
-                if (shadow && occluded(inputs.positionWorld, inputs.normalWorld, ls.wi, ls.distance)) {
+                if (shadow && occluded(inputs.positionWorld, inputs.normalWorld, ls.wi, ls.distance,
+                                       light.shadowCategory)) {
                     continue;
                 }
                 sum += f * ls.radiance / ls.pdf;
