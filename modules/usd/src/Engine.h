@@ -66,6 +66,7 @@ struct SplatEntry {
     /// LrtSplatLightingAPI: relit by the scene's lights rather than shown as
     /// it was baked.
     bool                                relight = false;
+    std::vector<pxr::TfToken>           categories;   ///< what a light's link is tested against
     std::optional<StreamedAsset>        assetPending;
     StreamedAsset                       asset;
     std::unique_ptr<lod::LodCloud>      lodCloud;   ///< the asset read whole
@@ -165,7 +166,8 @@ public:
                    const render::Mat4* transform, std::optional<bool> visible,
                    std::optional<render::SplatEdit> edit = std::nullopt,
                    std::optional<StreamedAsset> asset = std::nullopt,
-                   std::optional<bool> relight = std::nullopt);
+                   std::optional<bool> relight = std::nullopt,
+                   std::optional<std::vector<pxr::TfToken>> categories = std::nullopt);
     void setPoints(const pxr::SdfPath& id, std::optional<PointsArrays> raw,
                    const render::Mat4* transform, std::optional<bool> visible,
                    std::optional<render::PointStyle> style);

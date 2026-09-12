@@ -56,6 +56,21 @@ struct SplatInstance {
     /// LrtSplatLightingAPI: relight these splats from the scene's lights
     /// instead of showing the radiance they were baked with.
     bool                    relight = false;
+    /// The categories this cloud belongs to, one bit each, as a mesh instance
+    /// carries them: a light reaches it only where its link says so.
+    uint64_t                categories = 0;
+};
+
+/// The frame's lights, as a renderer that must not depend on the light module
+/// can take them: the records buffer light::LightTable uploads, how many there
+/// are, and the total power their cumulative shares are of. Splats relight
+/// from these where their prim asked for it (LrtSplatLightingAPI).
+struct SplatLights {
+    const gpu::Buffer* records = nullptr;
+    uint32_t           count = 0;
+    float              power = 0.0F;
+
+    [[nodiscard]] bool any() const noexcept { return records != nullptr && count > 0 && power > 0.0F; }
 };
 
 struct RenderSettings {
@@ -100,13 +115,15 @@ public:
                                             std::span<const SplatInstance> instances,
                                             const RenderSettings& settings, RenderTargets& targets,
                                             std::span<const PointInstance> points = {},
-                                            const RenderTargets* under = nullptr);
+                                            const RenderTargets* under = nullptr,
+                                            const SplatLights* lights = nullptr);
     /// The same, from a projection someone else computed (a Hydra host).
     [[nodiscard]] Result<FrameStats> render(const Projection& projection,
                                             std::span<const SplatInstance> instances,
                                             const RenderSettings& settings, RenderTargets& targets,
                                             std::span<const PointInstance> points = {},
-                                            const RenderTargets* under = nullptr);
+                                            const RenderTargets* under = nullptr,
+                                            const SplatLights* lights = nullptr);
 
 private:
     [[nodiscard]] Result<void> reserveSplats(uint32_t count);
@@ -137,6 +154,9 @@ private:
     gpu::SortBuffers tileSort_;    // keysLo = pair tiles, values = pair splats
     gpu::Buffer ranges_buffer_;
     gpu::Buffer placeholderColour_, placeholderDepth_;
+    /// One record of nothing, for the frames that relight nothing: a name the
+    /// shader declares has to be bound whether it is read or not.
+    gpu::Buffer emptyLights_;
 };
 
 }   // namespace lrt::render

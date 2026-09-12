@@ -198,7 +198,10 @@ void HdLrtParticleField::Sync(HdSceneDelegate* delegate, HdRenderParam* renderPa
         visible = IsVisible();
     }
     engine->setSplats(id, std::move(raw), transformDirty ? &transform : nullptr, visible, edit, std::move(asset),
-                      relightOf(delegate, id));
+                      relightOf(delegate, id), [&] {
+                          const VtArray<TfToken> cats = delegate->GetCategories(id);
+                          return std::vector<TfToken>(cats.begin(), cats.end());
+                      }());
     *dirtyBits &= ~HdChangeTracker::AllSceneDirtyBits;
 }
 

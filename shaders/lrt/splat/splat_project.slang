@@ -7,10 +7,14 @@ import lrt.common.packing;
 import lrt.common.sh;
 import frame;
 import lrt.common.edit;
+// The core of the light module, which reads no texture: a dome is its colour
+// here, since this kernel lives below material and has no table to sample.
+import lrt.light.lights;
 
 StructuredBuffer<float4>    positions;
 StructuredBuffer<uint>      shape;
 StructuredBuffer<uint>      sh;
+StructuredBuffer<LightRecord> lights;
 RWStructuredBuffer<ProjRecord> proj;
 RWStructuredBuffer<uint>    visible;      // 1 when the splat touches a tile
 RWStructuredBuffer<uint>    tileRects;    // 4 per splat
@@ -149,6 +153,38 @@ void splatProject(uint3 tid: SV_DispatchThreadID) {
     const uint degree = min(degreeOf(params.restPerColour), params.shLimit);
     const float3 dir = normalize(posOpacity.xyz - float3(params.eyeX, params.eyeY, params.eyeZ));
     float3 colour = max(base + evaluateRest(sh, i * params.shWords, degree, dir), 0.0);
+    if (params.relight != 0) {
+        // LrtSplatLightingAPI: the radiance a capture was baked with replaced
+        // by what this scene's lights put on it. A splat is not a surface, so
+        // both of these are approximations and say so: the normal is its
+        // shortest axis -- the direction a flattened Gaussian faces -- turned
+        // towards the eye, and the albedo is the harmonics' constant term,
+        // which is the colour it shows on average.
+        const float3 albedo = max(base, 0.0);
+        const uint shortest = scale.x <= scale.y ? (scale.x <= scale.z ? 0u : 2u) : (scale.y <= scale.z ? 1u : 2u);
+        float3 normal = normalize(float3(r[0][shortest], r[1][shortest], r[2][shortest]));
+        const float3 position = posOpacity.xyz;
+        const float3 toEye = normalize(float3(params.eyeX, params.eyeY, params.eyeZ) - position);
+        if (dot(normal, toEye) < 0.0) {
+            normal = -normal;
+        }
+        float3 lit = float3(0.0);
+        for (uint k = 0; k < params.lightCount; ++k) {
+            const LightRecord light = lights[k];
+            // Light linking reaches a cloud as it reaches a mesh: by one bit.
+            if (!lightLinked(light.lightCategory, params.categoriesLo, params.categoriesHi)) {
+                continue;
+            }
+            // One sample at the middle of the light: a splat has no shadow
+            // ray and no second sample, so what it gets is the light's centre.
+            const LightSample ls = sampleLight(light, position, normal, float2(0.5, 0.5));
+            if (!ls.valid) {
+                continue;
+            }
+            lit += albedo * (1.0 / 3.14159265358979) * max(dot(normal, ls.wi), 0.0) * ls.radiance / ls.pdf;
+        }
+        colour = lit;
+    }
     if (fate.graded) {
         colour = editGrade(params.edit, colour);
     }

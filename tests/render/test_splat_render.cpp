@@ -11,6 +11,7 @@
 #include "lrt/io/RawSplats.h"
 #include "lrt/render/ReferenceRenderer.h"
 #include "lrt/render/TileRasterizer.h"
+#include "lrt/light/LightTable.h"
 #include "lrt/scene/GpuClouds.h"
 
 using namespace lrt;
@@ -319,4 +320,70 @@ TEST_CASE("a SplatEdit is in the cloud's own space and per instance", "[render][
     CHECK(right[0] < 0.01F);             // tinted green
     CHECK(right[2] < 0.01F);
     CHECK(right[1] > 0.3F);
+}
+
+TEST_CASE("a splat asked to be relit shows the scene's light, not the light it was baked with",
+          "[render][splats][relight]") {
+    LRT_REQUIRE_GPU(gpu);
+    auto h = harness(gpu);
+    // One flat splat facing the camera, its baked colour a known albedo.
+    CloudBuilder b;
+    b.add(0.0F, 0.0F, 0.0F, 0.99F, 0.6F, 0.6F, 0.02F, {1.0F, 0.0F, 0.0F, 0.0F}, {0.8F, 0.4F, 0.2F});
+    auto cloud = h->loader.upload(b.raw);
+    if (!cloud) FAIL(cloud.error().toString());
+    auto table = light::LightTable::create(*gpu->device);
+    if (!table) FAIL(table.error().toString());
+
+    render::Camera camera = render::Camera::lookingAt({0.0, 0.0, 3.0}, {0.0, 0.0, 0.0});
+    render::RenderSettings settings;
+    settings.width = 96;
+    settings.height = 96;
+
+    const auto draw = [&](bool relight, uint32_t category, render::RenderTargets& into) {
+        light::Light lamp;
+        lamp.kind = light::LightKind::Sphere;
+        lamp.lightToWorld = aofx::xform::translation({0.0, 0.0, 2.0});
+        lamp.radius = 0.3F;
+        lamp.intensity = 4.0F;
+        lamp.shadow = false;
+        lamp.lightCategory = category;
+        REQUIRE(table->set(std::span<const light::Light>(&lamp, 1)));
+        render::SplatLights lights;
+        lights.records = &table->records();
+        lights.count = table->count();
+        lights.power = table->power();
+        std::vector<render::SplatInstance> instances{{&*cloud, render::Mat4::identity()}};
+        instances[0].relight = relight;
+        REQUIRE(h->raster.render(camera, instances, settings, into, {}, nullptr, &lights));
+    };
+
+    render::RenderTargets baked;
+    render::RenderTargets bakedAgain;
+    render::RenderTargets relit;
+    render::RenderTargets unreached;
+    draw(false, light::kLightUnlinked, baked);
+    draw(false, light::kLightUnlinked, bakedAgain);
+    draw(true, light::kLightUnlinked, relit);
+    // Relit, but by a light whose collection does not include this cloud:
+    // nothing reaches it, so nothing lights it.
+    draw(true, 0, unreached);
+
+    const auto compare = [&](const render::RenderTargets& a, const render::RenderTargets& c) {
+        auto diff = render::compareImages(*gpu->library, a.colour, c.colour, settings.width, settings.height);
+        if (!diff) FAIL(diff.error().toString());
+        return *diff;
+    };
+    const auto same = compare(baked, bakedAgain);
+    const auto changed = compare(baked, relit);
+    const auto dark = compare(relit, unreached);
+    std::printf("  baked against itself: max %u; baked against relit: max %u, %llu pixels beyond 2; "
+                "relit against unreached: max %u\n",
+                same.max, changed.max, static_cast<unsigned long long>(changed.over2), dark.max);
+    // Asking for nothing changes nothing: the path a frame without relighting
+    // takes is the one it always took.
+    CHECK(same.max == 0);
+    // Asking for it changes the picture.
+    CHECK(changed.over2 > 100);
+    // And a light that does not reach the cloud lights none of it.
+    CHECK(dark.max > 0);
 }

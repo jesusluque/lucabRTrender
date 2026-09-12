@@ -1328,8 +1328,26 @@ enough that what is left is the light and not the noise.
   tests before it samples a light and before it traces its shadow. The plan's
   check is counters with the link on and off.
 - **No light instancing, no IES profiles and no cylinder lights.**
-- **Splats are not relit.** `LrtSplatLightingAPI` is not implemented; splats
-  carry the radiance they were baked with.
+- **Splats are relit where their prim asks**, and baked everywhere else.
+  `LrtSplatLightingAPI` (`primvars:lrt:splat:relight`, a constant primvar, so
+  it is inherited) turns a cloud over to the scene's lights: the albedo is the
+  harmonics' constant term, the normal is the splat's shortest axis turned
+  towards the eye, and light linking reaches a cloud by the same bit it
+  reaches a mesh.
+  - **What it is not**: one sample at each light's centre, no shadow ray, no
+    second sample, and a normal a splat never had. It is for a capture that
+    has to sit under different light, and wrong wherever the capture's own
+    light was the point -- which is why baked is the default.
+  - **What made it possible**: the light module is two, a core that reads no
+    texture and `lights_image` on top. A dome's image comes through the
+    material texture table, and the splat projection lives below material in
+    the module order, so before the split the lights were simply out of its
+    reach.
+  - **Checked** three ways at once: with relighting off the frame is
+    identical to the one that never had the feature (max 0), with it on the
+    picture changes (max 185 over 9216 pixels), and a light whose collection
+    does not include the cloud lights none of it (max 18 against the relit
+    frame).
 - **Contact shadows** closer than the ray's offset are missed, and a cutout
   material still stops a shadow ray where its opacity would have let it
   through.

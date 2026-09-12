@@ -80,6 +80,11 @@ Result<TileRasterizer> TileRasterizer::create(gpu::ShaderLibrary& library) {
     if (!placeholderDepth) return std::move(placeholderDepth).error();
     r.placeholderColour_ = *placeholderColour;
     r.placeholderDepth_ = *placeholderDepth;
+    // One record of nothing, for frames that relight nothing: a name the
+    // shader declares must be bound whether it is read or not.
+    auto emptyLights = buffer(*r.device_, 1, 96, "splat.lights.empty");
+    if (!emptyLights) return std::move(emptyLights).error();
+    r.emptyLights_ = *emptyLights;
     LRT_TRY(make(r.gather_, "lrt/splat/splat_gather_counts", "splatGatherCounts"));
     LRT_TRY(make(r.emit_, "lrt/splat/splat_emit", "splatEmit"));
     LRT_TRY(make(r.clear_, "lrt/splat/splat_tiles_clear", "splatTilesClear"));
@@ -167,16 +172,16 @@ Result<FrameStats> TileRasterizer::render(const Camera& camera,
                                           std::span<const SplatInstance> instances,
                                           const RenderSettings& settings, RenderTargets& targets,
                                           std::span<const PointInstance> points,
-                                          const RenderTargets* under) {
+                                          const RenderTargets* under, const SplatLights* lights) {
     return render(projectionFor(camera, settings.width, settings.height), instances, settings,
-                  targets, points, under);
+                  targets, points, under, lights);
 }
 
 Result<FrameStats> TileRasterizer::render(const Projection& projection,
                                           std::span<const SplatInstance> instances,
                                           const RenderSettings& settings, RenderTargets& targets,
                                           std::span<const PointInstance> points,
-                                          const RenderTargets* under) {
+                                          const RenderTargets* under, const SplatLights* lights) {
     const auto frameStart = std::chrono::steady_clock::now();
     if (settings.width == 0 || settings.height == 0) {
         return Error(ErrorCode::InvalidArgument, "a frame needs a size");
@@ -240,6 +245,15 @@ Result<FrameStats> TileRasterizer::render(const Projection& projection,
             cursor["params"]["restPerColour"].setData(cloud->restPerColour);
             cursor["params"]["shWords"].setData(cloud->shWords);
             setEdit(cursor["params"]["edit"], instance.edit);
+            // Relighting: only where the prim asked for it and the frame has
+            // lights to do it with. The buffer is bound either way, since a
+            // name a shader declares must be bound whether it is read or not.
+            const bool relight = instance.relight && lights != nullptr && lights->any();
+            cursor["params"]["relight"].setData(uint32_t{relight ? 1u : 0u});
+            cursor["params"]["lightCount"].setData(relight ? lights->count : 0u);
+            cursor["params"]["categoriesLo"].setData(static_cast<uint32_t>(instance.categories & 0xFFFFFFFFu));
+            cursor["params"]["categoriesHi"].setData(static_cast<uint32_t>(instance.categories >> 32));
+            cursor["lights"].setBinding(relight ? lights->records->rhi() : emptyLights_.rhi());
         });
         base += cloud->count;
     }

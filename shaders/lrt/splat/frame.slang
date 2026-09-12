@@ -60,7 +60,10 @@ public struct FrameParams {
     public float bgR; public float bgG; public float bgB; public float bgA;
     public uint  linearise;      // 1: finished pixel sRGB -> linear
     public uint  hasUnder;       // 1: an opaque layer (raster points) is under the splats
-    public uint  pad1; public uint pad2;
+    public uint  relight;        // 1: light these splats rather than show them as baked
+    public uint  lightCount;     // lights in `lights`, 0 when nothing is relit
+    public uint  categoriesLo;   // this cloud's categories, for a light's link
+    public uint  categoriesHi;
     public EditParams edit;      // this cloud instance's SplatEdit (common/edit.slang)
 };
 
