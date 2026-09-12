@@ -2418,3 +2418,89 @@ TEST_CASE("a UsdLux IES profile shapes a light through Hydra: lit inside its con
     CHECK(c[3] == 0);
 }
 
+
+// Light instancing through Hydra: a PointInstancer whose prototype is a
+// sphere light, against the same three lights authored one by one, on the
+// square. The frames must agree to what a differently ordered light table
+// allows -- the instancer's copies are the authored lights, placed by the
+// device.
+TEST_CASE("a PointInstancer of lights lights the scene as its instances authored one by one",
+          "[usd][gpu][mesh][lights][instancing]") {
+    LRT_REQUIRE_GPU(gpu);
+    if (!gpu->device->caps().rasterization) {
+        SKIP("no rasterisation on this device");
+    }
+    const char* positions[3] = {"(-1, 0.3, -3)", "(0, -0.5, -2.5)", "(1.2, 0.2, -3.5)"};
+    const std::string light =
+        "    bool inputs:shadow:enable = 0\n"
+        "    float inputs:radius = 0.1\n"
+        "    float inputs:intensity = 60\n"
+        "    bool inputs:normalize = 0\n"
+        "    color3f inputs:color = (1, 0.9, 0.8)\n";
+    const std::string materials =
+        "def Scope \"Materials\"\n{\n"
+        "    def Material \"Mat\"\n    {\n"
+        "        token outputs:mtlx:surface.connect = </Materials/Mat/Surface.outputs:out>\n"
+        "        def Shader \"Surface\"\n        {\n"
+        "            uniform token info:id = \"ND_surface\"\n"
+        "            token inputs:bsdf.connect = </Materials/Mat/Diffuse.outputs:out>\n"
+        "            token outputs:out\n        }\n"
+        "        def Shader \"Diffuse\"\n        {\n"
+        "            uniform token info:id = \"ND_oren_nayar_diffuse_bsdf\"\n"
+        "            color3f inputs:color = (0.8, 0.8, 0.8)\n"
+        "            float inputs:roughness = 0\n"
+        "            token outputs:out\n        }\n    }\n}\n";
+    const fs::path instanced = scratch("light_instancer.usda");
+    {
+        std::ofstream out(instanced);
+        out << kSquareStage << "def PointInstancer \"Many\"\n{\n"
+            << "    rel prototypes = [</Many/Prototypes/Key>]\n"
+            << "    int[] protoIndices = [0, 0, 0]\n"
+            << "    point3f[] positions = [" << positions[0] << ", " << positions[1] << ", " << positions[2] << "]\n"
+            << "    def Scope \"Prototypes\"\n    {\n"
+            << "        def SphereLight \"Key\"\n        {\n" << light << "        }\n    }\n}\n" << materials;
+    }
+    const fs::path authored = scratch("light_authored.usda");
+    {
+        std::ofstream out(authored);
+        out << kSquareStage;
+        for (int k = 0; k < 3; ++k) {
+            out << "def SphereLight \"Key" << k << "\"\n{\n" << light
+                << "    double3 xformOp:translate = " << positions[k] << "\n"
+                << "    uniform token[] xformOpOrder = [\"xformOp:translate\"]\n}\n";
+        }
+        out << materials;
+    }
+    const uint32_t w = 161;
+    const uint32_t h = 121;
+    const auto frame = [&](const fs::path& path) {
+        auto renderer = usd::StageRenderer::open(path);
+        if (!renderer) FAIL(renderer.error().toString());
+        (*renderer)->setLightSamples(64);
+        auto image = (*renderer)->render("/Camera", 0.0, w, h);
+        if (!image) FAIL(image.error().toString());
+        return *image;
+    };
+    const usd::StageImage a = frame(instanced);
+    const usd::StageImage b = frame(authored);
+    test::dumpPpm("light_instancer_hydra", a.rgba.data(), w, h);
+    gpu::BufferDesc desc;
+    desc.bytes = a.rgba.size() * sizeof(float);
+    desc.elementBytes = 16;
+    auto bufferA = gpu::Buffer::create(*gpu->device, desc, a.rgba.data());
+    auto bufferB = gpu::Buffer::create(*gpu->device, desc, b.rgba.data());
+    REQUIRE(bufferA);
+    REQUIRE(bufferB);
+    auto diff = render::compareHdr(*gpu->library, *bufferA, *bufferB, w, h);
+    REQUIRE(diff);
+    std::vector<float> blank(a.rgba.size(), 0.0F);
+    auto blankBuffer = gpu::Buffer::create(*gpu->device, desc, blank.data());
+    REQUIRE(blankBuffer);
+    auto drawn = render::compareHdr(*gpu->library, *bufferA, *blankBuffer, w, h);
+    REQUIRE(drawn);
+    std::printf("  PointInstancer of sphere lights against authored lights: relMSE %.2e, max relative %.2e "
+                "(against blank: relMSE %.2e)\n",
+                diff->relMse, diff->maxRelative, drawn->relMse);
+    CHECK(drawn->relMse > 1.0);
+    CHECK(diff->relMse < 1e-8);
+}

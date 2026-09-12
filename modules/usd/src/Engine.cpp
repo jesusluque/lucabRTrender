@@ -144,10 +144,20 @@ void Engine::setMaterial(const pxr::SdfPath& id, std::shared_ptr<void> mtlxDocum
     entry.pending = true;
 }
 
-void Engine::setLight(const pxr::SdfPath& id, const light::Light& lamp) {
+void Engine::setLight(const pxr::SdfPath& id, const light::Light& lamp, std::vector<InstancerLink> instancing) {
     revision_.fetch_add(1);
     const std::lock_guard<std::mutex> held(guard_);
-    lights_[id] = lamp;
+    LightEntry& entry = lights_[id];
+    entry.lamp = lamp;
+    // Sync gives the chain whole each time; a change is any link differing.
+    bool same = entry.instancing.size() == instancing.size();
+    for (size_t i = 0; same && i < instancing.size(); ++i) {
+        same = entry.instancing[i].instancer == instancing[i].instancer && entry.instancing[i].indices == instancing[i].indices;
+    }
+    if (!same) {
+        entry.instancing = std::move(instancing);
+        entry.chainDirty = true;
+    }
 }
 
 uint32_t Engine::categoryBit(const std::string& name) {
@@ -695,10 +705,55 @@ Result<void> Engine::render(const render::Projection& projection, const render::
     {
         const std::lock_guard<std::mutex> held(guard_);
         lamps.reserve(lights_.size());
-        for (const auto& [id, lamp] : lights_) {
+        for (auto& [id, entry] : lights_) {
+            const light::Light& lamp = entry.lamp;
             lamps.push_back(lamp);
             lamps.back().lightCategory = categoryBit(lamp.lightLink);
             lamps.back().shadowCategory = categoryBit(lamp.shadowLink);
+            // Under an instancer: the chain composed on the device, as a
+            // mesh's, once per change; its rows place the light's copies.
+            if (!entry.instancing.empty()) {
+                std::vector<uint64_t> versions;
+                bool complete = true;
+                for (const InstancerLink& link : entry.instancing) {
+                    const auto found = instancers_.find(link.instancer);
+                    complete = complete && found != instancers_.end();
+                    versions.push_back(found != instancers_.end() ? found->second.version : 0);
+                }
+                if (!complete) {
+                    // Its instancer has not arrived: as a mesh, not drawn yet.
+                    lamps.pop_back();
+                    continue;
+                }
+                {
+                    if (entry.chainDirty || versions != entry.chainVersions) {
+                        if (!instancing_.has_value()) {
+                            auto made = world::Instancing::create(*library_);
+                            if (!made) return std::move(made).error();
+                            instancing_.emplace(std::move(*made));
+                        }
+                        std::vector<world::InstancerLevel> levels;
+                        for (const InstancerLink& link : entry.instancing) {
+                            const InstancerArrays& a = instancers_.at(link.instancer).arrays;
+                            world::InstancerLevel level;
+                            level.indices = std::span<const int32_t>(link.indices.cdata(), link.indices.size());
+                            level.translations = streamOf(a.translations);
+                            level.rotations = streamOf(a.rotations);
+                            level.scales = streamOf(a.scales);
+                            level.transforms = streamOf(a.transforms);
+                            level.instancerTransform = a.instancerTransform;
+                            levels.push_back(level);
+                        }
+                        auto chain = instancing_->compose(levels);
+                        if (!chain) return std::move(chain).error();
+                        entry.chain = std::move(*chain);
+                        entry.chainVersions = std::move(versions);
+                        entry.chainDirty = false;
+                    }
+                    lamps.back().instanceRows = &entry.chain.rows;
+                    lamps.back().instanceCount = entry.chain.count;
+                }
+            }
         }
         for (const auto& [id, entry] : splats_) {
             if (!entry.visible) {

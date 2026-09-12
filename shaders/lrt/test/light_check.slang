@@ -551,3 +551,36 @@ void lightPrefixCheck(uint3 tid: SV_DispatchThreadID) {
     prefixMisses[0] = misses;
 }
 
+
+// Light instancing: a light's copies, placed on the device from an
+// instancer's rows, against the same lights authored one by one. Every
+// record must match its authored twin -- rows, size, power share -- and the
+// tables must be the same length.
+StructuredBuffer<LightRecord> authored;
+RWStructuredBuffer<uint>      instanceMisses;   // [records differing, records compared]
+uniform uint                  authoredCount;
+
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void lightInstanceCheck(uint3 tid: SV_DispatchThreadID) {
+    if (tid.x != 0) {
+        return;
+    }
+    uint misses = prefixCount == authoredCount ? 0u : 1u;
+    const uint n = min(prefixCount, authoredCount);
+    for (uint k = 0; k < n; ++k) {
+        const LightRecord a = lights[k];
+        const LightRecord b = authored[k];
+        const float rows = max(max(maxElement(abs(a.row0 - b.row0)), maxElement(abs(a.row1 - b.row1))),
+                               maxElement(abs(a.row2 - b.row2)));
+        const bool same = rows <= 1.0e-5 && a.kind == b.kind && a.sizeX == b.sizeX && a.sizeY == b.sizeY &&
+                          abs(a.cumulative - b.cumulative) <= 1.0e-5 * max(b.cumulative, 1.0e-6);
+        misses += same ? 0u : 1u;
+    }
+    instanceMisses[0] = misses;
+    instanceMisses[1] = n;
+}
+
+float maxElement(float4 v) {
+    return max(max(v.x, v.y), max(v.z, v.w));
+}

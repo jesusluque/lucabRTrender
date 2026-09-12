@@ -19,8 +19,11 @@ Result<LightTable> LightTable::create(gpu::ShaderLibrary& library) {
     if (!prefix) return std::move(prefix).error();
     auto iesPrepare = gpu::ComputeKernel::create(library, "lrt/light/ies_prepare", "iesPrepare");
     if (!iesPrepare) return std::move(iesPrepare).error();
+    auto instances = gpu::ComputeKernel::create(library, "lrt/light/light_instances", "lightInstances");
+    if (!instances) return std::move(instances).error();
     table.prefix_.emplace(std::move(*prefix));
     table.iesPrepare_.emplace(std::move(*iesPrepare));
+    table.instances_.emplace(std::move(*instances));
     return table;
 }
 
@@ -77,6 +80,12 @@ Result<void> LightTable::set(std::span<const Light> lights) {
     domes_ = false;
     // The frame's IES profiles, each once, concatenated into one values
     // buffer: angle lists and candela tables as authored.
+    struct Expansion {
+        uint32_t           base;
+        uint32_t           count;
+        const gpu::Buffer* rows;
+    };
+    std::vector<Expansion> expansions;
     std::vector<const io::IesProfile*> profiles;
     std::vector<IesRecord> iesRecords;
     std::vector<float> iesValues;
@@ -105,7 +114,13 @@ Result<void> LightTable::set(std::span<const Light> lights) {
             }
             record.ies = static_cast<uint32_t>(row);
         }
-        records.push_back(record);
+        if (light.instanceRows != nullptr && light.instanceCount > 0) {
+            // Once per instance; the placements are the device's to write.
+            expansions.push_back({static_cast<uint32_t>(records.size()), light.instanceCount, light.instanceRows});
+            records.insert(records.end(), light.instanceCount, record);
+        } else {
+            records.push_back(record);
+        }
         shadows_ = shadows_ || light.shadow;
         domes_ = domes_ || light.kind == LightKind::Dome;
     }
@@ -136,7 +151,7 @@ Result<void> LightTable::set(std::span<const Light> lights) {
     if (records.empty()) {
         records.emplace_back();   // a buffer to bind, which nothing reads
     }
-    count_ = static_cast<uint32_t>(lights.size());
+    count_ = static_cast<uint32_t>(records.size()) - (lights.empty() ? 1u : 0u);
     if (records.size() > capacity_ || !records_.valid()) {
         auto made = gpu::Buffer::fromSpan<LightRecord>(*device_, records, "lights.records");
         if (!made) return std::move(made).error();
@@ -146,9 +161,18 @@ Result<void> LightTable::set(std::span<const Light> lights) {
         return Error(ErrorCode::DeviceFailure, "lights: cannot upload the frame's records");
     }
     // Each light's share of the frame's power, accumulated on the device:
-    // the host uploads what was authored and computes nothing on it.
+    // the host uploads what was authored and computes nothing on it. Before
+    // that, an instanced light's copies are placed.
     if (count_ > 0) {
         gpu::CommandBatch batch(*device_);
+        for (const Expansion& e : expansions) {
+            instances_->dispatch(batch, {e.count, 1, 1}, [&](rhi::ShaderCursor cursor) {
+                cursor["records"].setBinding(records_.rhi());
+                cursor["chainRows"].setBinding(e.rows->rhi());
+                cursor["base"].setData(e.base);
+                cursor["count"].setData(e.count);
+            });
+        }
         prefix_->dispatch(batch, {1, 1, 1}, [&](rhi::ShaderCursor cursor) {
             cursor["records"].setBinding(records_.rhi());
             cursor["count"].setData(count_);

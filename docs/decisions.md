@@ -1281,6 +1281,31 @@ Not done: photometric types B and A are read but sampled as C; `TILT=<file>`
 is treated as none; the splat relighting samples a light's centre without
 its profile.
 
+### Light instancing, added with M6
+
+A light under an instancer is placed as a mesh under one: the delegate
+walks the instancer chain above the sprim (`_UpdateInstancer`, the same
+loop `Mesh.cpp` runs), and the engine composes it on the device with
+`world::Instancing::compose`, unchanged, once per change of any level. The
+light module sits below world, so `light::Light` carries the composed rows
+raw -- `instanceRows`, a buffer of 3 float4 rows an instance, and
+`instanceCount` -- and `LightTable::set` does bookkeeping only: it copies
+the prototype's record once per instance and `light_instances.slang`
+rewrites each copy's rows as the instance's rows times the prototype's own,
+before `light_prefix` accumulates the power over the whole table. A light
+whose instancer has not arrived is not drawn, as a mesh in that state is
+not.
+
+Checked twice, both exact. In the technique: a rect light that itself
+rotates, under an instancer that rotates and takes four elements out of
+order, against the four lights authored at `instancer * element * prototype`
+-- `lightInstanceCheck` finds 0 of 6 records differing in rows, size or
+cumulative power (a product in the wrong order shows, since both factors
+rotate). Through Hydra: a `PointInstancer` whose prototype is a sphere light
+at three positions over the plane, against the three lights authored one by
+one, relMSE 0 -- Hydra delivers instanced lights in this install, which is
+the half light linking is missing.
+
 ### In Hydra
 
 The delegate takes sphere, disk, rect, distant, dome and cylinder lights as
@@ -1403,7 +1428,8 @@ enough that what is left is the light and not the noise.
   where it projects, and with it naming another the plane is lit as if
   nothing were there -- 0 pixels of 7440 away from the closed form either
   way. What arrives from USD is the same half that light linking is missing.
-- **No light instancing.** (The cylinder and IES profiles arrived with M6.)
+- **Light instancing arrived with M6**, below. (So did the cylinder and IES
+  profiles.)
 - **Splats are relit where their prim asks**, and baked everywhere else.
   `LrtSplatLightingAPI` (`primvars:lrt:splat:relight`, a constant primvar, so
   it is inherited) turns a cloud over to the scene's lights: the albedo is the

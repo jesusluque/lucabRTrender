@@ -29,6 +29,7 @@
 #include "lrt/technique/PathTracer.h"
 #include "lrt/technique/Visibility.h"
 #include "lrt/world/GpuScene.h"
+#include "lrt/world/Instancing.h"
 #include "lrt/world/RayTracingScene.h"
 
 using namespace lrt;
@@ -2927,3 +2928,83 @@ TEST_CASE("an IES profile is read as authored and sampled at its nodes exactly",
     CHECK(c[1] == 0);
 }
 
+
+// Light instancing: one sphere light under an instancer of four elements,
+// against the four lights authored where the instancer puts them. The
+// table copies the prototype and a kernel places the copies from the rows
+// world::Instancing composed; a check kernel compares every record with its
+// authored twin. The instancer and the prototype both rotate, so a product
+// in the wrong order shows.
+TEST_CASE("an instanced light's records are the lights authored where the instancer puts them",
+          "[technique][lights][instancing]") {
+    LRT_REQUIRE_GPU(gpu);
+    auto instancing = world::Instancing::create(*gpu->library);
+    if (!instancing) FAIL(instancing.error().toString());
+    auto instanced = light::LightTable::create(*gpu->library);
+    auto authored = light::LightTable::create(*gpu->library);
+    if (!instanced) FAIL(instanced.error().toString());
+    if (!authored) FAIL(authored.error().toString());
+    auto made = gpu::ComputeKernel::create(*gpu->library, "lrt/test/light_check", "lightInstanceCheck");
+    if (!made) FAIL(made.error().toString());
+
+    const std::vector<float> translations{-2, 0, 0, 0, 1, -1, 2, 0.5F, 0, 0.5F, -1, 1};
+    const std::vector<int32_t> indices{2, 0, 3, 1};   // the prototype takes the elements out of order
+    world::InstancerLevel level;
+    level.indices = indices;
+    level.translations = {std::as_bytes(std::span<const float>(translations)), false};
+    level.instancerTransform = aofx::xform::rotationY(30.0) * aofx::xform::translation({0.0, 0.25, 0.0});
+    const std::array<world::InstancerLevel, 1> levels{level};
+    auto chain = instancing->compose(levels);
+    if (!chain) FAIL(chain.error().toString());
+    REQUIRE(chain->count == 4);
+
+    light::Light proto;
+    proto.kind = light::LightKind::Rect;   // oriented: its rows carry the rotation
+    proto.width = 0.8F;
+    proto.height = 0.5F;
+    proto.intensity = 3.0F;
+    proto.lightToWorld = aofx::xform::translation({0.1, 0.0, -0.3}) * aofx::xform::rotationX(-20.0);
+    light::Light copies = proto;
+    copies.instanceRows = &chain->rows;
+    copies.instanceCount = chain->count;
+    // A plain light before and after, so the copies sit inside the table.
+    light::Light before;
+    before.kind = light::LightKind::Sphere;
+    before.radius = 0.3F;
+    light::Light after;
+    after.kind = light::LightKind::Distant;
+    after.intensity = 2.0F;
+    const std::array<light::Light, 3> withInstances{before, copies, after};
+    REQUIRE(instanced->set(std::span<const light::Light>(withInstances.data(), withInstances.size())));
+    CHECK(instanced->count() == 6);
+
+    std::vector<light::Light> oneByOne{before};
+    for (const int32_t e : indices) {
+        light::Light l = proto;
+        l.lightToWorld = level.instancerTransform *
+                         aofx::xform::translation({translations[size_t(e) * 3], translations[size_t(e) * 3 + 1],
+                                                   translations[size_t(e) * 3 + 2]}) *
+                         proto.lightToWorld;
+        oneByOne.push_back(l);
+    }
+    oneByOne.push_back(after);
+    REQUIRE(authored->set(std::span<const light::Light>(oneByOne.data(), oneByOne.size())));
+
+    gpu::Buffer misses = test::uintBuffer(*gpu->device, 2, "instances.misses");
+    {
+        gpu::CommandBatch batch(*gpu->device);
+        made->dispatch(batch, {1, 1, 1}, [&](rhi::ShaderCursor cursor) {
+            cursor["lights"].setBinding(instanced->records().rhi());
+            cursor["authored"].setBinding(authored->records().rhi());
+            cursor["instanceMisses"].setBinding(misses.rhi());
+            cursor["prefixCount"].setData(instanced->count());
+            cursor["authoredCount"].setData(authored->count());
+        });
+        REQUIRE(batch.submit(true));
+    }
+    uint32_t m[2] = {0, 0};
+    REQUIRE(misses.read(*gpu->device, 0, sizeof(m), m));
+    std::printf("  instanced rect light: %u of %u records differ from the authored lights\n", m[0], m[1]);
+    CHECK(m[1] == 6);
+    CHECK(m[0] == 0);
+}

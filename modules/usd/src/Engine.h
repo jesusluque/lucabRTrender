@@ -189,7 +189,8 @@ public:
     void removeMaterial(const pxr::SdfPath& id);
     /// A UsdLux light, as the delegate read it. Lights light the meshes; the
     /// splats carry their own radiance until LrtSplatLightingAPI (M5).
-    void setLight(const pxr::SdfPath& id, const light::Light& lamp);
+    void setLight(const pxr::SdfPath& id, const light::Light& lamp,
+                  std::vector<InstancerLink> instancing = {});
     void removeLight(const pxr::SdfPath& id);
     /// Samples per light per pixel. One is what an interactive frame takes;
     /// a render that wants an area light without noise asks for more.
@@ -295,7 +296,16 @@ private:
     std::atomic<bool>                         denoise_{false};
     bool                                      denoiserFailed_ = false;   ///< said once
     std::map<pxr::SdfPath, MaterialEntry>     materials_;
-    std::map<pxr::SdfPath, light::Light>      lights_;
+    /// A light as the delegate read it, and the instancers above it, whose
+    /// chain is composed on the device as a mesh's is.
+    struct LightEntry {
+        light::Light               lamp;
+        std::vector<InstancerLink> instancing;
+        world::InstanceChain       chain;
+        std::vector<uint64_t>      chainVersions;
+        bool                       chainDirty = false;
+    };
+    std::map<pxr::SdfPath, LightEntry>        lights_;
     /// IES profiles by path, read once; a file that cannot be read is said
     /// once and the light goes unshaped.
     std::map<std::string, std::shared_ptr<const io::IesProfile>> iesProfiles_;

@@ -1,6 +1,8 @@
 // Copyright (c) 2026 lucabRTrender contributors.
 #include "Light.h"
 
+#include <pxr/imaging/hd/instancer.h>
+
 #include <cmath>
 
 #include <pxr/imaging/hd/sceneDelegate.h>
@@ -43,6 +45,22 @@ bool kindOf(const TfToken& type, lrt::light::LightKind& kind) {
 }   // namespace
 
 void HdLrtLight::Sync(HdSceneDelegate* sceneDelegate, HdRenderParam* renderParam, HdDirtyBits* dirtyBits) {
+    // A light under an instancer, as a mesh under one: the chain of
+    // instancers above it, innermost first, with the elements each level
+    // takes of the one above.
+    _UpdateInstancer(sceneDelegate, dirtyBits);
+    HdInstancer::_SyncInstancerAndParents(sceneDelegate->GetRenderIndex(), GetInstancerId());
+    std::vector<lrt::usd::InstancerLink> instancing;
+    {
+        SdfPath child = GetId();
+        SdfPath instancer = GetInstancerId();
+        while (!instancer.IsEmpty()) {
+            instancing.push_back({instancer, sceneDelegate->GetInstanceIndices(instancer, child)});
+            HdInstancer* level = sceneDelegate->GetRenderIndex().GetInstancer(instancer);
+            child = instancer;
+            instancer = level != nullptr ? level->GetParentId() : SdfPath();
+        }
+    }
     auto* engine = static_cast<HdLrtRenderParam*>(renderParam)->GetEngine();
     if (engine == nullptr || *dirtyBits == Clean) {
         *dirtyBits = Clean;
@@ -105,7 +123,7 @@ void HdLrtLight::Sync(HdSceneDelegate* sceneDelegate, HdRenderParam* renderParam
             lamp.texture = !asset.GetResolvedPath().empty() ? asset.GetResolvedPath() : asset.GetAssetPath();
         }
     }
-    engine->setLight(id, lamp);
+    engine->setLight(id, lamp, std::move(instancing));
     *dirtyBits = Clean;
 }
 

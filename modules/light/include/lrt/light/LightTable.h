@@ -59,6 +59,12 @@ struct Light {
     std::string  iesFile;              ///< where the profile comes from (Hydra); the engine reads it into `ies`
     float        iesAngleScale = 0.0F;
     bool         iesNormalize = false;
+    /// Instanced: `instanceCount` placements, 3 float4 rows each, before the
+    /// light's own transform -- world::Instancing's rows, handed over as a
+    /// buffer since this module sits below world. The table copies the
+    /// record once per instance and a kernel places each copy.
+    const gpu::Buffer* instanceRows = nullptr;
+    uint32_t     instanceCount = 0;
     float        temperature = 6500.0F;
     bool         enableTemperature = false;
     bool         normalize = false;
@@ -155,6 +161,7 @@ private:
     gpu::Buffer  records_;
     std::optional<gpu::ComputeKernel> prefix_;   ///< light_prefix: each light's cumulative share, on the device
     std::optional<gpu::ComputeKernel> iesPrepare_;   ///< ies_prepare: each profile's power
+    std::optional<gpu::ComputeKernel> instances_;    ///< light_instances: an instanced light's placements
     gpu::Buffer  iesRecords_;
     gpu::Buffer  iesValues_;
     uint32_t     iesCount_ = 0;
