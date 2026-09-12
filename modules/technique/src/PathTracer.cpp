@@ -86,8 +86,9 @@ const char* kRays = R"(
 uniform RaytracingAccelerationStructure scene;
 
 struct PathHit {
-    uint4 seen;   // (instance + 1, triangle, 0, 0); 0 for nothing
-    float t;
+    uint4  seen;          // (instance + 1, triangle, 0, 0); 0 for nothing
+    float  t;
+    float2 barycentrics;  // of the committed triangle: where the ray met it
 };
 
 PathHit traceNearestFrom(float3 origin, float3 direction, float tMin) {
@@ -103,9 +104,11 @@ PathHit traceNearestFrom(float3 origin, float3 direction, float tMin) {
     if (query.CommittedStatus() == COMMITTED_TRIANGLE_HIT) {
         hit.seen = uint4(query.CommittedInstanceID() + 1, query.CommittedPrimitiveIndex(), 0, 0);
         hit.t = query.CommittedRayT();
+        hit.barycentrics = query.CommittedTriangleBarycentrics();
     } else {
         hit.seen = uint4(0);
         hit.t = 0.0;
+        hit.barycentrics = float2(0.0);
     }
     return hit;
 }
@@ -152,14 +155,16 @@ static const bool kTraces = true;
 
 const char* kNoRays = R"(
 struct PathHit {
-    uint4 seen;
-    float t;
+    uint4  seen;
+    float  t;
+    float2 barycentrics;
 };
 
 PathHit traceNearestFrom(float3 origin, float3 direction, float tMin) {
     PathHit hit;
     hit.seen = uint4(0);
     hit.t = 0.0;
+    hit.barycentrics = float2(0.0);
     return hit;
 }
 
@@ -184,16 +189,11 @@ struct Shaded {
     bool           valid;
 };
 
-/// Rebuilds a surface from the visibility pair as the raster shading does,
-/// then evaluates whatever material it wears.
-Shaded shadeAt(uint2 pixel, uint4 seen) {
+/// Evaluates whatever material a surface wears. `pixel` is only the uv
+/// footprint's: materialInputsAt takes it from the neighbouring pixels' rays,
+/// which is right for the camera's hit and an approximation for a bounce's.
+Shaded shadeSurface(uint2 pixel, Surface s) {
     Shaded out;
-    out.valid = false;
-    out.depth = 0.0;
-    if (seen.x == 0) {
-        return out;
-    }
-    const Surface s = surfaceAt(camera, pixel.x, pixel.y, seen);
     out.categoriesLo = s.instance.categoriesLo;
     out.categoriesHi = s.instance.categoriesHi;
     out.inputs = materialInputsAt(camera, toWorld, pixel.x, pixel.y, s, lookup.time);
@@ -206,13 +206,44 @@ Shaded shadeAt(uint2 pixel, uint4 seen) {
     return out;
 }
 
+/// The camera's hit, rebuilt from the visibility pair as the raster shading
+/// does, so the two shade the same point.
+Shaded shadeAt(uint2 pixel, uint4 seen) {
+    Shaded out;
+    out.valid = false;
+    out.depth = 0.0;
+    if (seen.x == 0) {
+        return out;
+    }
+    return shadeSurface(pixel, surfaceAt(camera, pixel.x, pixel.y, seen));
+}
+
 /// A surface away from the camera: the same reconstruction, but the eye is
 /// wherever the ray came from.
-Shaded shadeHit(uint2 pixel, uint4 seen, float3 from) {
-    Shaded out = shadeAt(pixel, seen);
-    if (out.valid) {
-        out.toEye = normalize(from - out.inputs.positionWorld);
+/// A bounce's hit, rebuilt from where the ray met the triangle -- not from
+/// the pixel. It used to call shadeAt, which re-intersects the *camera's* ray
+/// with the triangle the bounce found: a point that is not on the bounce ray
+/// at all, with barycentrics and a normal to match. The closed box read 5 pi
+/// times its geometric series while that stood.
+Shaded shadeHit(uint2 pixel, PathHit hit, float3 from, float3 direction) {
+    Shaded out;
+    out.valid = false;
+    out.depth = 0.0;
+    if (hit.seen.x == 0) {
+        return out;
     }
+    // The bounce's direction in view space, for which side of the surface it
+    // arrives at: toWorld's rows are view-to-world, their transpose takes a
+    // direction back -- the same rigid reading of those rows materialInputsAt
+    // makes when it turns a normal to world with them.
+    const float3 d = direction;
+    const float3 viewDirection = float3(toWorld.row0.x * d.x + toWorld.row1.x * d.y + toWorld.row2.x * d.z,
+                                        toWorld.row0.y * d.x + toWorld.row1.y * d.y + toWorld.row2.y * d.z,
+                                        toWorld.row0.z * d.x + toWorld.row1.z * d.y + toWorld.row2.z * d.z);
+    const float3 weights = float3(1.0 - hit.barycentrics.x - hit.barycentrics.y, hit.barycentrics.x,
+                                  hit.barycentrics.y);
+    out = shadeSurface(pixel, surfaceFromWeights(hit.seen, weights, viewDirection));
+    out.toEye = normalize(from - out.inputs.positionWorld);
     return out;
 }
 
@@ -296,7 +327,10 @@ void tracePaths(uint3 group: SV_GroupID, uint index: SV_GroupIndex) {
             if (!ms.valid || ms.pdf <= 0.0) {
                 break;
             }
-            throughput *= ms.weight / ms.pdf;
+            // LobeSample.weight is already f |cos| / pdf (lobes.slang); dividing
+            // by the pdf again turned rho into rho pi / cos, and the closed box
+            // read 5 pi times its geometric series.
+            throughput *= ms.weight;
             if (!any(throughput > float3(0.0))) {
                 break;
             }
@@ -308,7 +342,7 @@ void tracePaths(uint3 group: SV_GroupID, uint index: SV_GroupIndex) {
             if (hit.seen.x == 0) {
                 break;
             }
-            Shaded next = shadeHit(tid, hit.seen, p);
+            Shaded next = shadeHit(tid, hit, p, ms.wi);
             if (!next.valid) {
                 break;
             }

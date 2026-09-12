@@ -65,5 +65,17 @@ PYTHON="$(command -v python3)"
     -j "$JOBS" \
     "$PREFIX"
 
+# GCC 13 rejects the injected-class-name written with its template arguments
+# in a constructor of the bool specialisation (retainedDataSource.h:235,
+# `HdRetainedTypedSampledDataSource<bool>(const bool&)`); clang accepts it.
+# Only translation units that include the header meet it, which the light
+# linking's retained data sources do. Patched in place so the prefix is the
+# same one the Mac and the Linux machine build against.
+HDR="$PREFIX/include/pxr/imaging/hd/retainedDataSource.h"
+if grep -q "HdRetainedTypedSampledDataSource<bool>(const bool& value)" "$HDR"; then
+    sed -i.orig "s/HdRetainedTypedSampledDataSource<bool>(const bool& value)/HdRetainedTypedSampledDataSource(const bool\& value)/" "$HDR"
+    echo "patched ${HDR} for GCC 13"
+fi
+
 echo "OpenUSD ${VERSION} installed at ${PREFIX}"
 echo "Configure lucabRTrender with -DLRT_USD_ROOT=${PREFIX} (the presets default to it)."

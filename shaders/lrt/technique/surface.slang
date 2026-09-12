@@ -56,7 +56,11 @@ public struct Surface {
 };
 
 /// The surface at pixel (px, py) (bottom row first) seen as `seen`.
-public Surface surfaceAt(CameraParams camera, uint px, uint py, uint4 seen) {
+/// A surface from the pair alone plus where on the triangle: the tail every
+/// reconstruction shares. `weights` are the barycentrics (w0, w1, w2) and
+/// `viewDirection` is what arrived at it, in view space -- the primary ray's
+/// for a pixel, the bounce's for a path -- which decides which side is seen.
+public Surface surfaceFromWeights(uint4 seen, float3 weights, float3 viewDirection) {
     Surface s;
     s.instanceIndex = seen.x - 1;
     s.instance = instances[s.instanceIndex];
@@ -68,12 +72,10 @@ public Surface surfaceAt(CameraParams camera, uint px, uint py, uint4 seen) {
     const float3 a = rowsApply(r.view0, r.view1, r.view2, positions[s.mesh.firstPoint + s.points.x].xyz, 1.0);
     const float3 b = rowsApply(r.view0, r.view1, r.view2, positions[s.mesh.firstPoint + s.points.y].xyz, 1.0);
     const float3 c = rowsApply(r.view0, r.view1, r.view2, positions[s.mesh.firstPoint + s.points.z].xyz, 1.0);
-    float3 origin;
-    viewRay(camera, float2(px, py) + 0.5, origin, s.viewDirection);
-    const Hit hit = intersect(origin, s.viewDirection, a, b, c);
-    s.weights = float3(1.0 - hit.barycentrics.x - hit.barycentrics.y, hit.barycentrics.x, hit.barycentrics.y);
-    s.depth = hit.t;
-    s.viewPosition = origin + s.viewDirection * hit.t;
+    s.weights = weights;
+    s.viewDirection = viewDirection;
+    s.viewPosition = a * weights.x + b * weights.y + c * weights.z;
+    s.depth = s.viewPosition.z;
     s.geometricNormal = normalize(cross(b - a, c - a));
     s.normal = s.geometricNormal;
     const uint normals = primvarRecordOf(s.mesh, kSlotNormals);
@@ -85,6 +87,30 @@ public Surface surfaceAt(CameraParams camera, uint px, uint py, uint4 seen) {
             s.normal = viewNormal / sqrt(length2);
         }
     }
+    return s;
+}
+
+/// The surface a pixel sees: its primary ray re-intersected with the triangle
+/// the visibility pass recorded, so every route shades the same point.
+public Surface surfaceAt(CameraParams camera, uint px, uint py, uint4 seen) {
+    const uint instanceIndex = seen.x - 1;
+    const InstanceRecord r = instances[instanceIndex];
+    const MeshRecord mesh = meshes[r.mesh];
+    const uint t = mesh.firstTriangle + seen.y;
+    const uint3 points = uint3(indices[t * 3], indices[t * 3 + 1], indices[t * 3 + 2]);
+    const float3 a = rowsApply(r.view0, r.view1, r.view2, positions[mesh.firstPoint + points.x].xyz, 1.0);
+    const float3 b = rowsApply(r.view0, r.view1, r.view2, positions[mesh.firstPoint + points.y].xyz, 1.0);
+    const float3 c = rowsApply(r.view0, r.view1, r.view2, positions[mesh.firstPoint + points.z].xyz, 1.0);
+    float3 origin;
+    float3 direction;
+    viewRay(camera, float2(px, py) + 0.5, origin, direction);
+    const Hit hit = intersect(origin, direction, a, b, c);
+    Surface s = surfaceFromWeights(
+        seen, float3(1.0 - hit.barycentrics.x - hit.barycentrics.y, hit.barycentrics.x, hit.barycentrics.y),
+        direction);
+    // Depth is the ray's, as before: the same view z the splat cut compares.
+    s.depth = hit.t;
+    s.viewPosition = origin + direction * hit.t;
     return s;
 }
 

@@ -56,6 +56,50 @@ std::shared_ptr<const geom::GpuMesh> lambertSquare(geom::MeshBuilder& builder, f
     return std::make_shared<const geom::GpuMesh>(std::move(*mesh));
 }
 
+/// A UV sphere of radius `radius` whose faces wind so their normals point
+/// inward: a closed furnace seen from inside, with no edge for a bounce's
+/// origin offset to push it through.
+std::shared_ptr<const geom::GpuMesh> insideSphere(geom::MeshBuilder& builder, float radius, uint32_t rings,
+                                                  uint32_t segments) {
+    static std::vector<float> points;
+    static std::vector<int32_t> counts;
+    static std::vector<int32_t> indices;
+    points.clear();
+    counts.clear();
+    indices.clear();
+    // Poles as rings of coincident points keep every face a quad.
+    for (uint32_t r = 0; r <= rings; ++r) {
+        const double theta = 3.14159265358979 * double(r) / double(rings);
+        for (uint32_t c = 0; c <= segments; ++c) {
+            const double phi = 2.0 * 3.14159265358979 * double(c) / double(segments);
+            const double rho = static_cast<double>(radius);
+            points.push_back(float(rho * std::sin(theta) * std::cos(phi)));
+            points.push_back(float(rho * std::cos(theta)));
+            points.push_back(float(rho * std::sin(theta) * std::sin(phi)));
+        }
+    }
+    const auto at = [&](uint32_t r, uint32_t c) { return int32_t(r * (segments + 1) + c); };
+    for (uint32_t r = 0; r < rings; ++r) {
+        for (uint32_t c = 0; c < segments; ++c) {
+            counts.push_back(4);
+            // Clockwise seen from outside, so the normal faces the centre.
+            indices.push_back(at(r, c));
+            indices.push_back(at(r, c + 1));
+            indices.push_back(at(r + 1, c + 1));
+            indices.push_back(at(r + 1, c));
+        }
+    }
+    geom::MeshInput in;
+    in.source = "insideSphere";
+    in.points = {std::as_bytes(std::span<const float>(points)), false};
+    in.faceVertexCounts = counts;
+    in.faceVertexIndices = indices;
+    in.smoothNormals = false;
+    auto mesh = builder.build(in);
+    if (!mesh) FAIL(mesh.error().toString());
+    return std::make_shared<const geom::GpuMesh>(std::move(*mesh));
+}
+
 }   // namespace
 
 TEST_CASE("a Lambert plane under a sphere, a disk and a rectangle is lit as the closed form says",
@@ -1943,10 +1987,10 @@ TEST_CASE("neighbouring pixels' path traced errors average away as independent e
         REQUIRE(batch.submit(true));
         float m[3] = {0.0F, 0.0F, 0.0F};
         REQUIRE(moments->read(*gpu->device, 0, sizeof(m), m));
-        const double mean = m[0] / m[2];
-        variance[k] = m[1] / m[2] - mean * mean;
-        std::printf("  block %u: %5.0f blocks, mean error %.3e, variance of block mean %.4e\n", blocks[k], m[2],
-                    mean, variance[k]);
+        const double mean = static_cast<double>(m[0]) / static_cast<double>(m[2]);
+        variance[k] = static_cast<double>(m[1]) / static_cast<double>(m[2]) - mean * mean;
+        std::printf("  block %u: %5.0f blocks, mean error %.3e, variance of block mean %.4e\n", blocks[k],
+                    static_cast<double>(m[2]), mean, variance[k]);
     }
     const double fall2 = variance[0] / variance[1];
     const double fall4 = variance[0] / variance[2];
@@ -1957,5 +2001,153 @@ TEST_CASE("neighbouring pixels' path traced errors average away as independent e
     // a real mean-error step, which keeps the fall a little under ideal.
     CHECK(fall2 > 2.5);
     CHECK(fall4 > 8.0);
+}
+
+// The closed furnace: a shell that everywhere emits E and reflects rho, seen
+// from inside. After N bounces the radiance is E (1 + rho + ... + rho^N). With
+// cosine sampling of a Lambert lobe each bounce's weight over pdf is rho with
+// no variance, so this is exact, not statistical -- and it is the only check
+// there is on PathSettings::bounces above one.
+TEST_CASE("a closed emissive shell reads the geometric series of its bounces",
+          "[technique][path][furnace]") {
+    LRT_REQUIRE_GPU(gpu);
+    const gpu::Caps& caps = gpu->device->caps();
+    if (!caps.rasterization) {
+        SKIP("no rasterisation on this device");
+    }
+    if (!caps.rayQuery || !caps.accelerationStructure) {
+        SKIP("no ray queries on this device: no bounce to check");
+    }
+    std::vector<std::filesystem::path> shaderPaths;
+    for (const std::string& path : gpu->device->shaderSearchPaths()) {
+        shaderPaths.emplace_back(path);
+    }
+    auto compiler = material::MaterialCompiler::create({LRT_MATERIALX_ROOT}, shaderPaths);
+    auto textures = material::TextureStore::create(*gpu->library);
+    auto builder = geom::MeshBuilder::create(*gpu->library);
+    auto scene = world::GpuScene::create(*gpu->library);
+    auto accel = world::RayTracingScene::create(*gpu->library);
+    auto raster = technique::VisibilityRaster::create(*gpu->library);
+    auto programs = technique::MaterialPrograms::create(*gpu->library);
+    auto tracer = technique::PathTracer::create(*gpu->library);
+    auto table = light::LightTable::create(*gpu->device);
+    if (!compiler) FAIL(compiler.error().toString());
+    if (!textures) FAIL(textures.error().toString());
+    if (!builder) FAIL(builder.error().toString());
+    if (!scene) FAIL(scene.error().toString());
+    if (!accel) FAIL(accel.error().toString());
+    if (!raster) FAIL(raster.error().toString());
+    if (!programs) FAIL(programs.error().toString());
+    if (!tracer) FAIL(tracer.error().toString());
+    if (!table) FAIL(table.error().toString());
+    const float kEmission = 0.2F;
+    const float kAlbedo = 0.5F;
+    auto glowing = (*compiler)->compileXml(
+        "<?xml version=\"1.0\"?>\n<materialx version=\"1.39\">\n"
+        "  <oren_nayar_diffuse_bsdf name=\"d\" type=\"BSDF\">\n"
+        "    <input name=\"color\" type=\"color3\" value=\"0.5, 0.5, 0.5\" />\n"
+        "    <input name=\"roughness\" type=\"float\" value=\"0\" />\n"
+        "  </oren_nayar_diffuse_bsdf>\n"
+        "  <uniform_edf name=\"edf\" type=\"EDF\">\n"
+        "    <input name=\"color\" type=\"color3\" value=\"0.2, 0.2, 0.2\" />\n"
+        "  </uniform_edf>\n"
+        "  <surface name=\"shader\" type=\"surfaceshader\">\n"
+        "    <input name=\"bsdf\" type=\"BSDF\" nodename=\"d\" />\n"
+        "    <input name=\"edf\" type=\"EDF\" nodename=\"edf\" />\n"
+        "  </surface>\n"
+        "  <surfacematerial name=\"material\" type=\"material\">\n"
+        "    <input name=\"surfaceshader\" type=\"surfaceshader\" nodename=\"shader\" />\n"
+        "  </surfacematerial>\n</materialx>\n");
+    if (!glowing) FAIL(glowing.error().toString());
+    REQUIRE(programs->setModules(std::span<const material::CompiledMaterial>(&*glowing, 1)));
+    REQUIRE(tracer->setPrograms(*programs));
+    const std::vector<float> blob = material::MaterialCompiler::parameters(
+        *glowing, **textures, [](const std::string&) { return 0xFFFFFFFFu; });
+    REQUIRE((*textures)->commit());
+    const std::vector<technique::MaterialRecord> rows{{0, 0, 0, 0}, {1, 0, 0, 0}};
+    auto records = gpu::Buffer::fromSpan<technique::MaterialRecord>(*gpu->device, rows, "materials.records");
+    auto blobBuffer = gpu::Buffer::fromSpan<float>(*gpu->device, blob, "materials.blob");
+    REQUIRE(records);
+    REQUIRE(blobBuffer);
+
+    const uint32_t w = 64;
+    const uint32_t h = 48;
+    render::Camera camera = render::Camera::lookingAt({0.0, 0.0, 0.0}, {0.0, 0.0, -1.0});
+    camera.lens.focal = 35.0;
+    const render::Projection projection = render::projectionFor(camera, w, h);
+    // A sphere seen from inside, not a box: a box has edges, and a bounce
+    // leaving a face near one is offset by the tracer's p + (n + wi) * 1e-3
+    // scale before it is traced -- which, beside an edge, puts the origin
+    // outside the box, where the neighbouring face is a back face and culled,
+    // so the ray escapes and that sample loses the rest of its series.
+    // Measured with a box of half 2: 25 of 3072 pixels at two bounces, each
+    // one sample in sixteen short, worst rho^2/(1 + rho + rho^2)/16 = 0.89%
+    // exactly; overlapping the faces past the corners changed nothing, since
+    // the origin was already outside. From inside a sphere n + wi always
+    // points in.
+    world::MeshInstance shell;
+    shell.mesh = insideSphere(*builder, 2.0F, 24, 48);
+    shell.material = 1;
+    REQUIRE(scene->update(std::span<const world::MeshInstance>(&shell, 1), projection));
+    REQUIRE(accel->build(*scene));
+    // No lights: everything the frame gathers is emission carried by bounces.
+    REQUIRE(table->set(std::span<const light::Light>()));
+
+    technique::VisibilityTargets visibility;
+    technique::MaterialFrame frame;
+    frame.programs = &*programs;
+    frame.scene = &*scene;
+    frame.records = &*records;
+    frame.blob = &*blobBuffer;
+    frame.textures = &**textures;
+    frame.lights = &*table;
+    frame.shadows = accel->topLevel();
+    frame.samples = 1;
+    {
+        gpu::CommandBatch batch(*gpu->device);
+        REQUIRE(raster->render(batch, *scene, projection, w, h, visibility));
+        REQUIRE(batch.submit(true));
+    }
+    auto made = gpu::ComputeKernel::create(*gpu->library, "lrt/test/furnace_check", "furnaceCheck");
+    if (!made) FAIL(made.error().toString());
+    gpu::ComputeKernel check = std::move(*made);
+    gpu::Buffer counts = test::uintBuffer(*gpu->device, 2, "furnace.counts");
+    gpu::Buffer worst = test::uintBuffer(*gpu->device, 1, "furnace.worst");
+
+    for (const uint32_t bounces : {0u, 1u, 2u, 3u, 6u}) {
+        render::RenderTargets out;
+        tracer->restart();
+        technique::PathSettings paths;
+        paths.samples = 16;
+        paths.bounces = bounces;
+        paths.seed = 7u;
+        {
+            gpu::CommandBatch batch(*gpu->device);
+            REQUIRE(tracer->trace(batch, visibility, projection, frame, paths, out));
+            REQUIRE(batch.submit(true));
+        }
+        {
+            gpu::CommandBatch batch(*gpu->device);
+            check.dispatch(batch, {1, 1, 1}, [&](rhi::ShaderCursor cursor) {
+                cursor["colour"].setBinding(out.colour.rhi());
+                cursor["counts"].setBinding(counts.rhi());
+                cursor["worst"].setBinding(worst.rhi());
+                cursor["furnace"]["emission"].setData(kEmission);
+                cursor["furnace"]["albedo"].setData(kAlbedo);
+                cursor["furnace"]["bounces"].setData(bounces);
+                cursor["furnace"]["tolerance"].setData(1.0e-4F);
+                cursor["furnace"]["pixels"].setData(w * h);
+            });
+            REQUIRE(batch.submit(true));
+        }
+        uint32_t c[2] = {0, 0};
+        float largest = 0.0F;
+        REQUIRE(counts.read(*gpu->device, 0, sizeof(c), c));
+        REQUIRE(worst.read(*gpu->device, 0, sizeof(largest), &largest));
+        std::printf("  %u bounces: %u covered, %u beyond 1e-4, worst relative %.2e\n", bounces, c[0], c[1],
+                    static_cast<double>(largest));
+        CHECK(c[0] == w * h);
+        CHECK(c[1] == 0);
+    }
 }
 

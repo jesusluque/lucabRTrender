@@ -1420,7 +1420,10 @@ finished.
 
 - **A white furnace** under an imageless dome, path traced against unweighted
   NEE: p99 relative 0.0000, max 0.0003 at 4096 light samples against 4096
-  paths. The first of the plan's checks, and the one the MIS weight failed.
+  paths. The one the MIS weight failed.
+- **A closed emissive shell** reads its geometric series exactly: 0 of 3072
+  pixels beyond 1e-4 at 0, 1, 2, 3 and 6 bounces, worst 1.7e-7. The plan's
+  first check, and the only one on more than one bounce.
 - **One bounce against the raster's direct light**, in a scene with nothing
   for a bounce to find: p99 1 and max 1, with no pixel beyond 2, over 4096
   accumulated paths. That is the plan's check, and it holds the two
@@ -1428,7 +1431,7 @@ finished.
 - **The error falls as 1/sqrt(N)**, measured without a reference: pairs of
   independent estimates at 64 to 1024 paths, six pairs a point, the median
   of their mean squared difference, and a least-squares exponent on the
-  square root: -0.449, window -0.42 to -0.58 calibrated as above. The
+  square root: -0.499, window -0.42 to -0.58 calibrated as above. The
   plan asked for a 64k spp reference; measured, that is ~80 s for one scene
   at the other cases' resolution, and depth of reference is not what verifies
   a law -- the ratio between points is, and a reference only adds a floor.
@@ -1444,7 +1447,8 @@ finished.
   the same seeds: the direct term is identical, so what is left between them is
   the bounce alone. p99 41 and max 73 over 4688 pixels. The control is the
   scene without the wall, where the two come out at max 0 -- identical frames,
-  which is what makes the 73 the bounce and not the noise.
+  which is what makes the difference the bounce and not the noise. (It read
+  p99 41, max 73 while the bounce carried rho pi / cos; p99 10, max 13 now.)
 - **The traced technique over a mesh, through Hydra.** A plane under one sphere
   light has nothing for a bounce to find, so the traced frame and the raster
   frame are two estimators of the same direct light: p99 1 and max 1 at 1024
@@ -1486,28 +1490,48 @@ Two defects, found by reading before any new test was run, and then measured.
   rather than `mean(colour * alpha)`: identical while every sample is opaque,
   which was every test, and biased the moment opacity varied.
 
-And one anomaly that took fourteen hypotheses to close, each killed by a
-measurement. The 1/sqrt(N) ladder read exponents of -0.43 with one point
-spreading 3.4x between draws. In order, and what killed each: the running mean
-(read: algebraically right); the hash (read: a full avalanche); overlapping
-seeds (computed: disjoint); the split into passes (D1: 3.9e-15); the MIS weight
-and the premultiply (fixed, and the ladder did not move to its fourth
-significant figure); pixels sharing a sample *sequence* (fingerprints sorted:
-0 of 3072); pixels sharing a sample *set* in another order (a commutative
-fingerprint: 0 of 3072); neighbours' errors correlated (block variance fell
-4.42x at 2x2 and 15.94x at 4x4 against 4 and 16); the sampler itself (replaced
-by the PCG chain: -0.435 before, -0.435 after); the metric (relMSE's
-`1/(b^2 + 1e-2)` weight has a tail heavy enough that four draws are few --
-swapped for a plain mean square: -0.448); the reference (dropped: two
-independent estimates at the same N have `E[(a - b)^2] = 2 Var`, no floor by
-construction); and the mean over pairs (a bright rare bounce skews it: the
-median). What was left was the statistic's own scatter: adjacent ratios of
-1.47 to 2.51 around the law's 2, and a deep probe over 256 to 4096 paths that
-fitted **-0.488** with no floor (2048 paths at 5.5e-7 where a floor would have
-held it at 1.25e-6). The 3.4x spread was four draws of a skewed statistic on a
-lattice of seeds, read as a switch. The lesson is written into the test: the
-window is the measured scatter, and it still rejects no convergence, a floor
-and a linear law.
+**Two more in the bounce, found by the first check that ever exercised more
+than one.** A closed emissive shell -- every point emits E and reflects rho,
+seen from inside -- must read E (1 + rho + ... + rho^N) after N bounces, and
+with cosine sampling of a Lambert lobe each bounce's weight over pdf is rho
+with no variance at all, so the check is exact, not statistical. It read 5 pi
+times the series at one bounce. Two causes: `throughput *= weight / pdf`,
+where `LobeSample.weight` is by its own contract already `f |cos| / pdf`, so
+the bounce carried rho pi / cos instead of rho; and `shadeHit` rebuilt the
+bounce's hit by calling `shadeAt`, which re-intersects the *camera's* ray with
+the triangle the bounce found -- a point not on the bounce ray at all, with
+barycentrics and a normal to match. The hit is now rebuilt from the ray
+query's committed barycentrics (`surfaceFromWeights`, which `surfaceAt` now
+shares), with the bounce's own direction deciding which side it arrived at.
+Shell: 0 of 3072 pixels beyond 1e-4 at 0, 1, 2, 3 and 6 bounces, worst 1.7e-7.
+A box was tried first and leaks at its edges -- the tracer's origin offset
+`p + (n + wi) * 1e-3 scale` puts a ray leaving a face beside an edge outside
+the box, where the next face is a back face and culled: one sample in sixteen
+short in 25 pixels, worst exactly rho^2/(1 + rho + rho^2)/16 -- which is the
+test's geometry, not the integrator's, and the reason the shell is a sphere.
+
+**And the 1/sqrt(N) anomaly, which those two explain.** The ladder had read
+exponents of -0.43 to -0.45 through five different instruments, and one point
+had spread 3.4x between draws. Fourteen hypotheses were killed by measurement
+first, in this order: the running mean (read: algebraically right); the hash
+(read: a full avalanche); overlapping seeds (computed: disjoint); the split
+into passes (the invariant `1x256 = 4x64 = 16x16` holds to 3.9e-15); the MIS
+weight and the premultiply (fixed: the ladder did not move); pixels sharing a
+sample *sequence* (fingerprints sorted: 0 of 3072); pixels sharing a sample
+*set* in another order (a commutative fingerprint: 0 of 3072); neighbours'
+errors correlated (block variance fell 4.42x at 2x2 and 15.94x at 4x4, against
+4 and 16); the sampler (replaced by the PCG chain: -0.435 before and after);
+the metric (relMSE's `1/(b^2 + 1e-2)` weight has a heavy tail: a plain mean
+square instead); the reference (dropped: two independent estimates at the same
+N have `E[(a - b)^2] = 2 Var`, no floor by construction); the mean over pairs
+(the median); and the box's own seams. Each of those was worth doing and none
+was the cause. The cause was the double division: rho pi / cos has a finite
+mean under cosine sampling but an infinite second moment, so the bounce's
+contribution had infinite variance and a mean of N of them does not tighten as
+1/sqrt(N). The ladder was right to complain and the shell found why. With the
+bounce fixed the same ladder fits **-0.499**. The 3.4x spread was four draws
+of a heavy-tailed statistic read as a switch; the window is calibrated to the
+measured scatter and still rejects no convergence, a floor and a linear law.
 
 ### Three things the ground did not turn out to be
 
@@ -1535,13 +1559,28 @@ the rest of M6 has to build:
 - Albedo and normal AOVs, adaptive sampling, and the denoiser itself.
 - Splats in rays, points as spheres, depth of field, lens distortion and
   exposure.
-- More than one bounce is a parameter away (`PathSettings::bounces`) and has
-  no check of its own yet.
 - **Real MIS**, for when the two strategies overlap: mesh lights. It needs a
   "does this direction reach light k, and with what radiance" beside
   `lightPdf`, which does not exist. Until then the disjointness above is the
   argument, and a weight here would be the defect again.
 ## Linux, on the 94 (M11's first half)
+
+### The first table, after the port was reconciled with engine
+
+`engine` at the M6 path tracer, built with GCC 13 on the L4 -- once
+`retainedDataSource.h` was patched: GCC rejects the injected-class-name written
+with its template arguments in the bool specialisation's constructor
+(`HdRetainedTypedSampledDataSource<bool>(const bool&)`), which only a
+translation unit including that header meets, and the light linking's retained
+data sources do. `scripts/build-usd.sh` now patches it after install so the two
+machines build against the same prefix. Then `ctest`: **107 of 119 passed, 12
+failed, 38 skipped** (no display, no gpe on this backend, no OptiX). The twelve,
+before any of them is looked at: six of the splat ray tracer (the tests that
+choose the Hardware route, with no OptiX to give one), three of eight-bit
+textures (the port's own section below on what a float4 store becomes), the
+lobes against MaterialX's genglsl, and two Hydra cases with splats. That is the
+table M11 starts from; the plan's order verifies each new piece on both
+devices from here.
 
 The engine built and ran on Linux for the first time: Ubuntu 24.04, an NVIDIA
 L4, CUDA as the backend. What follows is what the port needed, what it found
