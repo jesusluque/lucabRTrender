@@ -4,10 +4,10 @@ include(Catch)
 #
 # A Catch2 executable, registered with ctest case by case. GPU tests skip when
 # the machine has no device; they never fall back to anything else. Every
-# case carries the label `gpu`; a binary that needs a window carries
-# `display`, one that needs gpe's device `gpe` -- so a machine without
-# either excludes them by label (`ctest -LE display`) rather than reading
-# their skips as passes. What a case skips for a capability the device lacks
+# case carries one label: `display` for a binary that needs a window, `gpe`
+# for one that needs gpe's device, `gpu` otherwise -- so a machine without
+# a window or gpe excludes those by label (`ctest -LE display`) rather than
+# reading their skips as passes. What a case skips for a capability the device lacks
 # (rasterisation, ray queries) it says in its skip message, which
 # scripts/remote-test.sh tabulates.
 function(lrt_test name)
@@ -17,7 +17,14 @@ function(lrt_test name)
     lrt_set_target_defaults(${name})
     set_target_properties(${name} PROPERTIES BUILD_RPATH "${SLANG_ROOT}/lib")
     add_dependencies(${name} lrt_shaders_copy)
-    set(properties ENVIRONMENT "LRT_SHADER_DIR=${LRT_SHADER_OUTPUT_DIR}" LABELS "gpu;${ARG_LABELS}")
+    # One label a binary: the most specific it needs (a window, gpe's
+    # device), `gpu` otherwise -- a list of labels does not survive the
+    # discovery script's quoting.
+    set(label gpu)
+    if(ARG_LABELS)
+        list(GET ARG_LABELS 0 label)
+    endif()
+    set(properties ENVIRONMENT "LRT_SHADER_DIR=${LRT_SHADER_OUTPUT_DIR}" LABELS "${label}")
     if(ARG_ENVIRONMENT_MODIFICATION)
         list(APPEND properties ENVIRONMENT_MODIFICATION "${ARG_ENVIRONMENT_MODIFICATION}")
     endif()
@@ -72,6 +79,11 @@ target_compile_definitions(lrt_technique_tests PRIVATE LRT_MATERIALX_ROOT="${LRT
 lrt_test(lrt_lod_tests
     SOURCES lod/test_lod.cpp
     LIBS lrt::lod)
+
+lrt_test(lrt_volume_tests
+    SOURCES volume/test_volume.cpp
+    LIBS lrt::world lrt::io)
+set_target_properties(lrt_volume_tests PROPERTIES BUILD_RPATH "${SLANG_ROOT}/lib;${LRT_USD_ROOT}/lib")
 
 lrt_test(lrt_usd_tests
     SOURCES usd/test_usd.cpp

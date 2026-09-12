@@ -26,3 +26,23 @@ foreach(_mx MaterialXCore MaterialXFormat MaterialXGenShader MaterialXGenHw Mate
         endif()
     endif()
 endforeach()
+
+# OpenVDB and NanoVDB's headers come with the same prefix: what a volume is
+# read from and laid out as. PNanoVDB.h travels with the shaders, since
+# lrt/volume/nanovdb.slang includes it.
+find_library(LRT_OPENVDB_LIB openvdb HINTS "${LRT_USD_ROOT}/lib" NO_DEFAULT_PATH)
+if(LRT_OPENVDB_LIB AND EXISTS "${LRT_USD_ROOT}/include/nanovdb/PNanoVDB.h")
+    set(LRT_HAVE_OPENVDB ON)
+    add_custom_command(OUTPUT "${CMAKE_BINARY_DIR}/shaders/nanovdb/PNanoVDB.h"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${LRT_USD_ROOT}/include/nanovdb/PNanoVDB.h"
+                "${CMAKE_BINARY_DIR}/shaders/nanovdb/PNanoVDB.h"
+        DEPENDS "${LRT_USD_ROOT}/include/nanovdb/PNanoVDB.h" VERBATIM)
+    add_custom_target(lrt_nanovdb_header ALL DEPENDS "${CMAKE_BINARY_DIR}/shaders/nanovdb/PNanoVDB.h")
+    if(TARGET lrt_shaders_copy)
+        add_dependencies(lrt_shaders_copy lrt_nanovdb_header)
+    endif()
+    message(STATUS "OpenVDB: ${LRT_OPENVDB_LIB} (volumes read and laid out as NanoVDB)")
+else()
+    set(LRT_HAVE_OPENVDB OFF)
+    message(STATUS "OpenVDB: not found in ${LRT_USD_ROOT}; .vdb is refused with a message")
+endif()

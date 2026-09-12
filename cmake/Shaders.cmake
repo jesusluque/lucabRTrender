@@ -27,6 +27,10 @@ function(lrt_shader_copy_target)
         list(APPEND _outputs "${_dst}")
     endforeach()
     add_custom_target(lrt_shaders_copy ALL DEPENDS ${_outputs})
+    # PNanoVDB.h from the USD prefix travels with the shaders (cmake/Usd.cmake).
+    if(TARGET lrt_nanovdb_header)
+        add_dependencies(lrt_shaders_copy lrt_nanovdb_header)
+    endif()
 endfunction()
 
 function(lrt_copy_shaders target)

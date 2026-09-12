@@ -6,8 +6,10 @@ lrt_add_module(world
         src/Instancing.cpp
         src/RayTracingScene.cpp
         src/BvhScene.cpp
+        src/VolumeSet.cpp
     PUBLIC_LIBS
         lrt::core
         lrt::gpu
+        lrt::io
         lrt::geom
         lrt::render)

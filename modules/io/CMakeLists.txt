@@ -18,6 +18,17 @@ if(LRT_HAVE_SPZ)
     target_compile_definitions(lrt_io PRIVATE LRT_HAVE_SPZ=1)
 endif()
 
+# .vdb: OpenVDB reads it and NanoVDB lays it out (cmake/Usd.cmake finds both).
+target_sources(lrt_io PRIVATE src/Vdb.cpp)
+if(LRT_HAVE_OPENVDB)
+    target_link_libraries(lrt_io PRIVATE ${LRT_OPENVDB_LIB})
+    target_include_directories(lrt_io SYSTEM PRIVATE "${LRT_USD_ROOT}/include")
+    target_compile_definitions(lrt_io PRIVATE LRT_HAVE_OPENVDB=1)
+    # OpenVDB's headers predate the warnings this engine asks for.
+    set_source_files_properties(src/Vdb.cpp PROPERTIES COMPILE_OPTIONS
+        "-Wno-old-style-cast;-Wno-shadow;-Wno-deprecated-declarations;-Wno-double-promotion;-Wno-cast-align;-Wno-sign-conversion;-Wno-conversion;-Wno-unused-parameter;-Wno-implicit-int-conversion;-Wno-implicit-float-conversion;-Wno-float-conversion;-Wno-shorten-64-to-32")
+endif()
+
 # SOG: zlib for the bundle, libwebp for its images. Without libwebp .sog is
 # refused with a message.
 find_package(ZLIB REQUIRED)
