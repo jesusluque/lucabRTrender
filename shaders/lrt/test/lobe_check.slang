@@ -19,6 +19,7 @@ struct LobeParams {
     float3 colour2;  float roughness;
     float  alphaX;   float alphaY;   float cosThetaO;   uint seed;
     uint   thetaBins; uint phiBins; uint pad0; uint pad1;
+    float4 hairA;    float4 hairB;
 };
 
 RWStructuredBuffer<uint>    bins;        // per sample: its bin, or thetaBins * phiBins where none
@@ -44,6 +45,9 @@ Lobe lobeOf() {
     lobe.alpha = float2(params.alphaX, params.alphaY);
     lobe.normal = float3(0.0, 0.0, 1.0);
     lobe.tangent = float3(1.0, 0.0, 0.0);
+    if (lobe.kind == kLobeHair) {
+        setHair(lobe, params.hairA.xyz, float2(params.hairA.w, params.hairB.x), params.hairB.yz);
+    }
     return lobe;
 }
 

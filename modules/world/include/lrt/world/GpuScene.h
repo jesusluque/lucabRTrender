@@ -135,10 +135,10 @@ public:
     [[nodiscard]] const gpu::Buffer& primvarRecords() const noexcept { return primvarRecords_; }
     [[nodiscard]] const gpu::Buffer& primvarSlots() const noexcept { return primvarSlots_; }
 
-    /// The primvar slots after the fixed four (displayColor, displayOpacity,
-    /// normals, st): names a frame looks up by slot (AOVs, materials).
+    /// The primvar slots after the fixed five (displayColor, displayOpacity,
+    /// normals, st, tangent): names a frame looks up by slot (AOVs, materials).
     void setExtraPrimvarSlots(std::vector<std::string> names);
-    [[nodiscard]] static constexpr uint32_t fixedSlots() noexcept { return 4; }
+    [[nodiscard]] static constexpr uint32_t fixedSlots() noexcept { return 5; }
     /// The slot a primvar name has, or ~0.
     [[nodiscard]] uint32_t slotOf(std::string_view name) const noexcept;
     [[nodiscard]] const gpu::Buffer& indices() const noexcept { return indices_; }
@@ -184,7 +184,8 @@ private:
     uint32_t                                           instanceCount_ = 0;
     uint64_t                                           generation_ = 0;
     [[nodiscard]] Result<void> writeSlots();
-    std::vector<std::string>                           slotNames_{"displayColor", "displayOpacity", "normals", "st"};
+    std::vector<std::string>                           slotNames_{"displayColor", "displayOpacity", "normals", "st",
+                                                                  "tangent"};
     bool                                               slotsDirty_ = true;
     std::vector<uint32_t>                              firstPrimvar_;   ///< per mesh: its first record
     std::vector<uint32_t>                              meshRecordWords_;   ///< the mesh records, as uploaded

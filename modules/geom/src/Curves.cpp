@@ -121,6 +121,9 @@ Result<CurveBuilder::Built> CurveBuilder::build(const CurveInput& in) {
     tubeDesc.label = "curves.tube";
     auto tube = gpu::Buffer::create(device, tubeDesc);
     if (!tube) return std::move(tube).error();
+    tubeDesc.label = "curves.tangents";
+    auto tangents = gpu::Buffer::create(device, tubeDesc);
+    if (!tangents) return std::move(tangents).error();
     {
         gpu::CommandBatch batch(device);
         points_.dispatch(batch, {controlPoints, 1, 1}, [&](rhi::ShaderCursor cursor) {
@@ -134,6 +137,7 @@ Result<CurveBuilder::Built> CurveBuilder::build(const CurveInput& in) {
             cursor["spans"].setBinding(spanBuffer->rhi());
             cursor["widths"].setBinding(widths->rhi());
             cursor["positions"].setBinding(tube->rhi());
+            cursor["tangents"].setBinding(tangents->rhi());
             rhi::ShaderCursor p = cursor["params"];
             p["vertices"].setData(vertices);
             p["sides"].setData(sides);
@@ -201,6 +205,14 @@ Result<CurveBuilder::Built> CurveBuilder::build(const CurveInput& in) {
         }
         primvars.push_back(out);
     }
+    // The fibre's direction at every vertex, for a hair material's frame.
+    PrimvarInput tangent;
+    tangent.name = "tangent";
+    tangent.interpolation = Interpolation::Vertex;
+    tangent.components = 3;
+    tangent.deviceValues = &*tangents;
+    tangent.deviceCount = vertices;
+    primvars.push_back(tangent);
     mesh.primvars = primvars;
     auto built = meshes_.build(mesh);
     if (!built) return std::move(built).error();

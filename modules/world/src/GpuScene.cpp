@@ -265,7 +265,7 @@ Result<void> GpuScene::repack() {
 }
 
 void GpuScene::setExtraPrimvarSlots(std::vector<std::string> names) {
-    std::vector<std::string> all{"displayColor", "displayOpacity", "normals", "st"};
+    std::vector<std::string> all{"displayColor", "displayOpacity", "normals", "st", "tangent"};
     all.insert(all.end(), names.begin(), names.end());
     if (all != slotNames_) {
         slotNames_ = std::move(all);

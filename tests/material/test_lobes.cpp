@@ -36,6 +36,11 @@ struct LobeCase {
     /// tailed under a narrow transmission lobe: two seeds gave 0.970 and
     /// 0.977 against a sampled 0.987.
     float                consistency = 0.02F;
+    /// How far the pdf's integral over the bins may miss what was drawn: the
+    /// bins' quadrature under a lobe as narrow as hair's R (v 0.1).
+    float                integralTolerance = 2e-3F;
+    std::array<float, 4> hairA{0.0F, 0.0F, 0.0F, 0.05F};   ///< hair: absorption, TT longitudinal variance
+    std::array<float, 4> hairB{0.05F, 0.2F, 0.2F, 0.0F};   ///< hair: TT azimuthal s, TRT variance and s
 };
 
 struct Outcome {
@@ -99,6 +104,8 @@ Outcome run(test::Gpu& gpu, const LobeCase& c) {
         p["seed"].setData(uint32_t{1234});
         p["thetaBins"].setData(kTheta);
         p["phiBins"].setData(kPhi);
+        p["hairA"].setData(c.hairA.data(), sizeof(float) * 4);
+        p["hairB"].setData(c.hairB.data(), sizeof(float) * 4);
     };
     {
         gpu::CommandBatch batch(*gpu.device);
@@ -135,7 +142,7 @@ TEST_CASE("each lobe samples its density, weighs its samples by its eval, and ke
           "[material][lobes]") {
     LRT_REQUIRE_GPU(gpu);
     constexpr uint32_t kOrenNayar = 1, kBurley = 2, kTranslucent = 3, kDielectric = 4, kConductor = 5, kSchlick = 6,
-                       kSheen = 7;
+                       kSheen = 7, kHair = 8;
     std::vector<LobeCase> cases;
     {
         LobeCase c{"Lambert (Oren-Nayar, roughness 0), white", kOrenNayar};
@@ -242,6 +249,59 @@ TEST_CASE("each lobe samples its density, weighs its samples by its eval, and ke
         c.atMostOne = true;
         cases.push_back(c);
     }
+    // Hair: with no absorption and white tints the attenuations sum to 1 and
+    // so does the albedo -- the white furnace, exactly. The cuticle tilts
+    // the lobes; at 0.5 there is no tilt.
+    {
+        LobeCase c{"hair, no absorption, roughness R 0.2 / 0.3", kHair};
+        c.colour1 = {1.0F, 1.0F, 1.0F};
+        c.colour2 = {1.0F, 1.0F, 1.0F};
+        c.alphaX = 0.2F;
+        c.alphaY = 0.3F;
+        c.roughness = 0.5F;
+        c.ior = 1.55F;
+        c.hairA = {0.0F, 0.0F, 0.0F, 0.1F};
+        c.hairB = {0.3F, 0.4F, 0.3F, 0.0F};
+        c.furnace = 1.0F;
+        c.furnaceTolerance = 0.02F;
+        c.consistency = 0.03F;
+        c.cosThetaO = 0.9F;
+        cases.push_back(c);
+    }
+    {
+        LobeCase c{"hair, absorbing, no tilt, 60 degrees", kHair};
+        c.colour0 = {1.0F, 1.0F, 1.0F};
+        c.colour1 = {0.9F, 0.7F, 0.5F};
+        c.colour2 = {0.8F, 0.8F, 0.8F};
+        c.alphaX = 0.1F;
+        c.alphaY = 0.2F;
+        c.roughness = 0.5F;
+        c.ior = 1.55F;
+        c.hairA = {0.3F, 0.5F, 0.9F, 0.05F};
+        c.hairB = {0.2F, 0.2F, 0.2F, 0.0F};
+        c.atMostOne = true;
+        c.consistency = 0.03F;
+        c.integralTolerance = 0.01F;
+        c.cosThetaO = 0.5F;
+        cases.push_back(c);
+    }
+    {
+        LobeCase c{"hair, absorbing, tilted cuticle, 60 degrees", kHair};
+        c.colour0 = {1.0F, 1.0F, 1.0F};
+        c.colour1 = {0.9F, 0.7F, 0.5F};
+        c.colour2 = {0.8F, 0.8F, 0.8F};
+        c.alphaX = 0.1F;
+        c.alphaY = 0.2F;
+        c.roughness = 0.52F;
+        c.ior = 1.55F;
+        c.hairA = {0.3F, 0.5F, 0.9F, 0.05F};
+        c.hairB = {0.2F, 0.2F, 0.2F, 0.0F};
+        c.atMostOne = true;
+        c.consistency = 0.03F;
+        c.cosThetaO = 0.5F;
+        c.integralTolerance = 0.01F;
+        cases.push_back(c);
+    }
     for (const LobeCase& c : cases) {
         SECTION(c.name) {
             const Outcome o = run(*gpu, c);
@@ -259,7 +319,7 @@ TEST_CASE("each lobe samples its density, weighs its samples by its eval, and ke
                         double(o.sampled[1]), double(o.uniform[1]));
             if (c.chiSquare) {
                 CHECK(z < 3.7);   // p > 1e-4
-                CHECK(std::abs(o.integral - o.drawn) < 2e-3F);
+                CHECK(std::abs(o.integral - o.drawn) < c.integralTolerance);
                 CHECK(worst < c.consistency);
             }
             if (c.furnace >= 0.0F) {

@@ -2184,6 +2184,65 @@ beyond the eight-sided tube's facet band and the depth within the sag
 over 0.7 of the cylinder's front (0.0169 against 0.0152), by raster, rays
 and the compute walker alike.
 
+### The hair lobe (Chiang et al. 2016)
+
+`chiang_hair_bsdf` is one more kind in the lobe library, `kLobeHair`, so
+the stack, its one-sample MIS and every consumer are unchanged. The lobe
+carries the R, TT and TRT tints in the three colours, the R roughness in
+`alpha`, the cuticle angle in `roughness`, the fibre's ior, and the
+absorption coefficient and the TT and TRT roughnesses in the struct's pads
+and in Schlick's `exponent` (`setHair`, `hairAbsorption` and the two
+roughness readers keep that in one place). The Lobe stays 128 bytes on
+purpose: the first version grew it by two float4, and the shadowed
+shading kernel then drew a point light's umbra wrong on Metal -- 2583 of
+7440 pixels off a closed form that had been exact, in a kernel that never
+touches the hair -- and packing the fields into the pads made it exact
+again. The cause is not explained; the size is what was measured to
+matter, so it is held. The MaterialX node's Slang implementation
+(`lrt_chiang_hair_bsdf.slang`) fills it and pushes it with the node's
+`curve_direction` as the tangent. The model is pbrt-v3's: for lobes p = R,
+TT, TRT and a geometric tail, a longitudinal density M_p over theta_i
+(d'Eon's, normalised against cos theta d theta), an azimuthal one N_p
+over phi (a trimmed logistic about the lobe's centre), and an attenuation
+A_p from the Fresnel terms and the absorption through the fibre; f cos
+theta_i is their sum, the pdf the same sum with each lobe's share of the
+attenuation in place of A_p, and a sample chooses a lobe by that share,
+draws theta_i from M_p and phi from N_p. The offset across the fibre comes
+from the hit's normal against the outgoing direction, as MaterialX's own
+eval takes it: on a tube the normal is the radial one, so the offset
+follows from it, and no separate curve intersector is needed. The fibre's
+direction is the tube's `tangent` primvar (the curve builder writes one a
+vertex, the builder takes it as a device primvar, `material_surface`
+prefers it to the texture-derived tangent).
+
+Two things differ from MaterialX's `mx_chiang_hair_bsdf.glsl` on purpose.
+The cuticle tilts the *outgoing* angle per lobe (pbrt's way), not the
+incoming one (MaterialX's): shifting theta_i changes the measure the
+density is normalised against, and a sampler drawing from the shifted
+density no longer matches the pdf -- the chi-square said z 126 before the
+change and 1.1 after. And the tail lobe's azimuthal density is 1 / (2 pi):
+MaterialX writes `1.0 / 2.0 * M_PI`, which is pi / 2.
+
+**Checked** in `test_lobes` as every lobe is: a million samples binned
+over the sphere against the pdf integrated over the bins, and the albedo
+from the samples' weights against the albedo from eval over uniform
+directions. With no absorption and white tints the attenuations sum to
+one, so the lobe returns everything: albedo 1.0000 sampled, 0.9944
+uniform, z -0.8; absorbing, off-axis at 60 degrees, with and without the
+cuticle's tilt: z -1.0 and 1.1, the two albedos 0.307 against 0.306. The
+pdf's integral over the bins reaches 0.996 under the R lobe's variance of
+0.1 -- the bins' quadrature, allowed 0.01 for hair where the others get
+0.002. The model is not reciprocal (the attenuation is the outgoing
+side's), as its authors' is not, so no reciprocity is asserted. Two of the
+lobe's own bugs the checks caught: a fourth random number taken from the
+second's low bits tied theta_i to phi_i (z 4.8), fixed by rescaling what
+the lobe choice left over; and dividing the pdf by cos theta_i as well as
+f, which put its integral at 1.32.
+
+Through Hydra, a B-spline curve under a chiang material draws lit
+(relMSE 4.9 against blank) and unlike the same curve under Lambert
+(relMSE 0.13).
+
 ## Linux, on the 94 (M11's first half)
 
 ### The first table, after the port was reconciled with engine

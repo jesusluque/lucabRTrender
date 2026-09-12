@@ -28,7 +28,8 @@ struct SpanRecord {
 StructuredBuffer<float4>     points;
 StructuredBuffer<SpanRecord> spans;
 StructuredBuffer<float4>     tube;
-RWStructuredBuffer<uint>     counts;   // [checked, beyond]
+StructuredBuffer<float4>     tangents;   // the tube's tangent primvar
+RWStructuredBuffer<uint>     counts;     // [checked, beyond, tangents off]
 RWStructuredBuffer<float>    worst;
 ConstantBuffer<CurveCheckParams> check;
 
@@ -67,6 +68,7 @@ void curveCheck(uint3 tid: SV_DispatchThreadID) {
         return;
     }
     uint beyond = 0;
+    uint tangentsOff = 0;
     float largest = 0.0;
     const uint perSpan = (check.segments + 1) * check.sides;
     for (uint v = 0; v < check.vertices; ++v) {
@@ -77,8 +79,19 @@ void curveCheck(uint3 tid: SV_DispatchThreadID) {
         const float gap = abs(length(tube[v].xyz - centre) - 0.5 * check.width);
         largest = max(largest, gap);
         beyond += gap > check.tolerance ? 1u : 0u;
+        // The tangent: unit, perpendicular to the ring's radius, and along
+        // the curve's own difference quotient about t (a step either way).
+        const float3 tangent = tangents[v].xyz;
+        const float step = 1.0e-3;
+        const float3 along = normalize(curveAt(s, min(t + step, 1.0)) - curveAt(s, max(t - step, 0.0)));
+        const float3 radius = tube[v].xyz - centre;
+        const bool unit = abs(length(tangent) - 1.0) < 1.0e-4;
+        const bool perpendicular = abs(dot(tangent, radius)) < 1.0e-4 * max(length(radius), 1.0e-6);
+        const bool aligned = dot(tangent, along) > 0.9999;
+        tangentsOff += (unit && perpendicular && aligned) ? 0u : 1u;
     }
     counts[0] = check.vertices;
     counts[1] = beyond;
+    counts[2] = tangentsOff;
     worst[0] = largest;
 }

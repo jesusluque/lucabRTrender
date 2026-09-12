@@ -20,6 +20,7 @@ public static const uint kSlotDisplayColor = 0;
 public static const uint kSlotDisplayOpacity = 1;
 public static const uint kSlotNormals = 2;
 public static const uint kSlotSt = 3;
+public static const uint kSlotTangent = 4;   // a curve tube's fibre direction, a vertex
 
 public struct PrimvarRecord {
     public uint interpolation;

@@ -79,6 +79,14 @@ public MaterialInputs materialInputsAt(CameraParams camera, ViewToWorld toWorld,
     if (stRecord != kNoPrimvar && abs(det) > 1e-12) {
         tangent = (e1 * dstdb2.y - e2 * dstdb1.y) / det;
     }
+    // A tube carries its fibre's direction as a primvar: a hair material's
+    // frame is the fibre's, not the texture's.
+    const uint tangentRecord = primvarRecordOf(s.mesh, kSlotTangent);
+    if (tangentRecord != kNoPrimvar) {
+        const float3 objectT = primvarAt(tangentRecord, s.mesh, s.triangle, s.points, s.weights, float4(0.0)).xyz;
+        const float3 viewT = rowsApply(r.view0, r.view1, r.view2, objectT, 0.0);
+        tangent = applyRows(toWorld, viewT, 0.0);
+    }
     tangent -= dot(tangent, inputs.normalWorld) * inputs.normalWorld;
     if (dot(tangent, tangent) < 1e-20) {
         const float3 n = inputs.normalWorld;

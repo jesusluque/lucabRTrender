@@ -83,7 +83,10 @@ void checkTube(test::Gpu& gpu, const char* what, geom::CurveBasis basis, geom::C
     REQUIRE(spanBuffer);
     auto made = gpu::ComputeKernel::create(*gpu.library, "lrt/test/curve_check", "curveCheck");
     if (!made) FAIL(made.error().toString());
-    gpu::Buffer counters = test::uintBuffer(*gpu.device, 2, "check.counts");
+    gpu::Buffer counters = test::uintBuffer(*gpu.device, 3, "check.counts");
+    const geom::GpuPrimvar* tangentPrimvar = built->mesh.primvar("tangent");
+    REQUIRE(tangentPrimvar != nullptr);
+    REQUIRE(tangentPrimvar->count == vertices);
     gpu::Buffer worst = test::uintBuffer(*gpu.device, 1, "check.worst");
     {
         gpu::CommandBatch batch(*gpu.device);
@@ -91,6 +94,7 @@ void checkTube(test::Gpu& gpu, const char* what, geom::CurveBasis basis, geom::C
             cursor["points"].setBinding(pointsBuffer->rhi());
             cursor["spans"].setBinding(spanBuffer->rhi());
             cursor["tube"].setBinding(built->mesh.positions.rhi());
+            cursor["tangents"].setBinding(tangentPrimvar->values.rhi());
             cursor["counts"].setBinding(counters.rhi());
             cursor["worst"].setBinding(worst.rhi());
             rhi::ShaderCursor c = cursor["check"];
@@ -103,15 +107,16 @@ void checkTube(test::Gpu& gpu, const char* what, geom::CurveBasis basis, geom::C
         });
         REQUIRE(batch.submit(true));
     }
-    uint32_t n[2] = {0, 0};
+    uint32_t n[3] = {0, 0, 0};
     float e = 0.0F;
     REQUIRE(counters.read(*gpu.device, 0, sizeof(n), n));
     REQUIRE(worst.read(*gpu.device, 0, sizeof(e), &e));
     std::printf("  %s: %u spans, %u tube vertices, %u farther than 1e-5 from half the width off the curve (worst "
-                "%.2e); %u triangles\n",
-                what, built->spans, n[0], n[1], static_cast<double>(e), built->mesh.triangles);
+                "%.2e), %u tangents off the curve's direction; %u triangles\n",
+                what, built->spans, n[0], n[1], static_cast<double>(e), n[2], built->mesh.triangles);
     CHECK(n[0] == vertices);
     CHECK(n[1] == 0);
+    CHECK(n[2] == 0);
     CHECK(built->mesh.triangles == spans.size() * segments * sides * 2);
 }
 

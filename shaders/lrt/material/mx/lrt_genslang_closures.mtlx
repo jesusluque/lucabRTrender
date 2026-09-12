@@ -11,6 +11,7 @@
   <implementation name="IM_conductor_bsdf_genslang" nodedef="ND_conductor_bsdf" file="lrt/material/mx/lrt_conductor_bsdf.slang" function="lrt_conductor_bsdf" target="genslang" />
   <implementation name="IM_generalized_schlick_bsdf_genslang" nodedef="ND_generalized_schlick_bsdf" file="lrt/material/mx/lrt_generalized_schlick_bsdf.slang" function="lrt_generalized_schlick_bsdf" target="genslang" />
   <implementation name="IM_sheen_bsdf_genslang" nodedef="ND_sheen_bsdf" file="lrt/material/mx/lrt_sheen_bsdf.slang" function="lrt_sheen_bsdf" target="genslang" />
+  <implementation name="IM_chiang_hair_bsdf_genslang" nodedef="ND_chiang_hair_bsdf" file="lrt/material/mx/lrt_chiang_hair_bsdf.slang" function="lrt_chiang_hair_bsdf" target="genslang" />
   <implementation name="IM_layer_bsdf_genslang" nodedef="ND_layer_bsdf" file="lrt/material/mx/lrt_layer_bsdf.slang" function="lrt_layer_bsdf" target="genslang" />
   <implementation name="IM_mix_bsdf_genslang" nodedef="ND_mix_bsdf" file="lrt/material/mx/lrt_mix_bsdf.slang" function="lrt_mix_bsdf" target="genslang" />
   <implementation name="IM_add_bsdf_genslang" nodedef="ND_add_bsdf" file="lrt/material/mx/lrt_add_bsdf.slang" function="lrt_add_bsdf" target="genslang" />

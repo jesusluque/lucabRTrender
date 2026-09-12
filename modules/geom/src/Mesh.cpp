@@ -263,6 +263,24 @@ Result<GpuMesh> MeshBuilder::build(const MeshInput& in) {
     bool authoredNormals = false;
     for (const PrimvarInput& p : in.primvars) {
         const uint32_t components = std::clamp<uint32_t>(p.components, 1, 4);
+        if (p.deviceValues != nullptr && p.deviceCount > 0) {
+            // A kernel's own: copied, not expanded.
+            GpuPrimvar primvar;
+            primvar.name = p.name;
+            primvar.interpolation = p.interpolation;
+            primvar.components = components;
+            primvar.count = p.deviceCount;
+            auto values = deviceBuffer(device, p.deviceCount, 16, "mesh.primvar");
+            if (!values) return std::move(values).error();
+            primvar.values = std::move(*values);
+            gpu::CommandBatch batch(device);
+            batch.encoder()->copyBuffer(primvar.values.rhi(), 0, p.deviceValues->rhi(), 0, uint64_t{p.deviceCount} * 16);
+            batch.markDirty();
+            LRT_TRY(batch.submit(true));
+            authoredNormals = authoredNormals || p.name == "normals";
+            mesh.primvars.push_back(std::move(primvar));
+            continue;
+        }
         const uint64_t elements = p.values.values() / components;
         const uint32_t count = static_cast<uint32_t>(p.indices.empty() ? elements : p.indices.size());
         if (count == 0 || p.values.empty()) {

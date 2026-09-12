@@ -36,6 +36,10 @@ struct PrimvarInput {
     uint32_t                 components = 1;   ///< 1..4 per element
     scene::FloatStream       values;           ///< float, half or double
     std::span<const int32_t> indices;          ///< empty unless indexed
+    /// Already on the device, float4 an element (a kernel's): taken as it
+    /// is, `values` and `indices` ignored.
+    const gpu::Buffer*       deviceValues = nullptr;
+    uint32_t                 deviceCount = 0;
 };
 
 /// A primvar on the device: one float4 per element (indices resolved).

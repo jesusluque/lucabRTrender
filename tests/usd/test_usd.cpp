@@ -3339,3 +3339,85 @@ TEST_CASE("a linear BasisCurves prim draws as a tube of its width through Hydra,
         CHECK(e <= sag / 0.7F + 1e-3F);
     }
 }
+
+// A hair material on a curve through Hydra: chiang_hair_bsdf bound to a
+// BasisCurves prim, lit by a sun. The tube draws lit and not black, and
+// differently from the same curve under a Lambert material -- the lobe is
+// the one shading it, with the tube's own tangent as the fibre's direction.
+TEST_CASE("a chiang hair material shades a curve through Hydra", "[usd][gpu][mesh][curves][hair]") {
+    LRT_REQUIRE_GPU(gpu);
+    if (!gpu->device->caps().rasterization) {
+        SKIP("no rasterisation on this device");
+    }
+    const auto stageWith = [&](const char* name, bool hair) {
+        const fs::path path = scratch(name);
+        std::ofstream out(path);
+        out << "#usda 1.0\n(\n    upAxis = \"Y\"\n)\n"
+               "def BasisCurves \"Hair\" (\n    prepend apiSchemas = [\"MaterialBindingAPI\"]\n)\n{\n"
+               "    uniform token type = \"cubic\"\n    uniform token basis = \"bspline\"\n"
+               "    int[] curveVertexCounts = [6]\n"
+               "    point3f[] points = [(-3, -0.5, -5), (-2, 0.6, -5), (-1, -0.4, -4.5), (1, 0.5, -5.5), (2, -0.6, -5), (3, 0.5, -5)]\n"
+               "    float[] widths = [0.5] ( interpolation = \"constant\" )\n"
+               "    rel material:binding = </Materials/Mat>\n}\n"
+               "def DistantLight \"Sun\"\n{\n    float inputs:intensity = 3\n    bool inputs:shadow:enable = 0\n"
+               "    double xformOp:rotateX = -30\n    uniform token[] xformOpOrder = [\"xformOp:rotateX\"]\n}\n"
+               "def Camera \"Camera\"\n{\n"
+               "    float focalLength = 35\n"
+               "    float horizontalAperture = 24.576\n    float verticalAperture = 18.432\n"
+               "    float2 clippingRange = (0.1, 1000)\n}\n"
+               "def Scope \"Materials\"\n{\n"
+               "    def Material \"Mat\"\n    {\n"
+               "        token outputs:mtlx:surface.connect = </Materials/Mat/Surface.outputs:out>\n"
+               "        def Shader \"Surface\"\n        {\n"
+               "            uniform token info:id = \"ND_surface\"\n"
+               "            token inputs:bsdf.connect = </Materials/Mat/Bsdf.outputs:out>\n"
+               "            token outputs:out\n        }\n";
+        if (hair) {
+            out << "        def Shader \"Bsdf\"\n        {\n"
+                   "            uniform token info:id = \"ND_chiang_hair_bsdf\"\n"
+                   "            color3f inputs:tint_R = (1, 1, 1)\n"
+                   "            color3f inputs:tint_TT = (1, 0.8, 0.6)\n"
+                   "            color3f inputs:tint_TRT = (1, 0.9, 0.8)\n"
+                   "            float3 inputs:absorption_coefficient = (0.2, 0.4, 0.8)\n"
+                   "            token outputs:out\n        }\n    }\n}\n";
+        } else {
+            out << "        def Shader \"Bsdf\"\n        {\n"
+                   "            uniform token info:id = \"ND_oren_nayar_diffuse_bsdf\"\n"
+                   "            color3f inputs:color = (0.8, 0.8, 0.8)\n"
+                   "            token outputs:out\n        }\n    }\n}\n";
+        }
+        return path;
+    };
+    const uint32_t w = 200;
+    const uint32_t h = 150;
+    const auto frame = [&](const fs::path& path) {
+        auto renderer = usd::StageRenderer::open(path);
+        if (!renderer) FAIL(renderer.error().toString());
+        (*renderer)->setLightSamples(16);
+        auto image = (*renderer)->render("/Camera", 0.0, w, h);
+        if (!image) FAIL(image.error().toString());
+        test::dumpPpm(path.stem().string(), image->rgba.data(), w, h);
+        gpu::BufferDesc desc;
+        desc.bytes = image->rgba.size() * sizeof(float);
+        desc.elementBytes = 16;
+        auto buffer = gpu::Buffer::create(*gpu->device, desc, image->rgba.data());
+        REQUIRE(buffer);
+        return *buffer;
+    };
+    const gpu::Buffer hair = frame(stageWith("hair_chiang.usda", true));
+    const gpu::Buffer lambert = frame(stageWith("hair_lambert.usda", false));
+    std::vector<float> blank(static_cast<size_t>(w) * h * 4, 0.0F);
+    gpu::BufferDesc desc;
+    desc.bytes = blank.size() * sizeof(float);
+    desc.elementBytes = 16;
+    auto blankBuffer = gpu::Buffer::create(*gpu->device, desc, blank.data());
+    REQUIRE(blankBuffer);
+    auto lit = render::compareHdr(*gpu->library, hair, *blankBuffer, w, h);
+    auto differs = render::compareHdr(*gpu->library, hair, lambert, w, h);
+    REQUIRE(lit);
+    REQUIRE(differs);
+    std::printf("  hair material on a curve: against blank relMSE %.2e; against Lambert relMSE %.2e\n", lit->relMse,
+                differs->relMse);
+    CHECK(lit->relMse > 0.1);
+    CHECK(differs->relMse > 1e-2);
+}

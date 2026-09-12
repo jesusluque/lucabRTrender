@@ -30,6 +30,7 @@ StructuredBuffer<float4>     points;      // control points
 StructuredBuffer<SpanRecord> spans;
 StructuredBuffer<float>      widths;      // by widthMode
 RWStructuredBuffer<float4>   positions;   // tube vertices
+RWStructuredBuffer<float4>   tangents;    // the curve's direction at each, unit
 
 static const float kPi = 3.14159265358979;
 
@@ -94,6 +95,7 @@ void curveTube(uint3 tid: SV_DispatchThreadID) {
     const float3 n2 = cross(a, n1);
     const float angle = 2.0 * kPi * float(side) / float(params.sides);
     positions[v] = float4(p + 0.5 * width * (cos(angle) * n1 + sin(angle) * n2), 1.0);
+    tangents[v] = float4(a, 0.0);
 }
 
 ConstantBuffer<CurveParams> params;
