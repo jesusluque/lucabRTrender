@@ -23,8 +23,7 @@ public struct MaterialLookupParams {
 };
 
 public StructuredBuffer<MaterialRecord> materials;
-public StructuredBuffer<uint>           triangleSubsets;   // per triangle: 0, or its GeomSubset + 1
-public StructuredBuffer<uint>           triangleHidden;    // per triangle: 1 where its face is invisible
+public StructuredBuffer<uint>           triangleSubsets;   // per triangle: 0, or its GeomSubset + 1; top bit: invisible face
 public StructuredBuffer<uint>           subsetRows;        // per mesh subset: its material row, 0 for the instance's
 public ConstantBuffer<ViewToWorld>      toWorld;
 public ConstantBuffer<MaterialLookupParams> lookup;
@@ -33,7 +32,7 @@ public ConstantBuffer<MaterialLookupParams> lookup;
 /// GeomSubset that binds one of its own.
 public uint materialRowOf(Surface s) {
     uint row = s.instance.flags >> 8;
-    const uint subset = triangleSubsets[s.mesh.firstTriangle + s.triangle];
+    const uint subset = triangleSubsets[s.mesh.firstTriangle + s.triangle] & 0x7FFFFFFFu;
     if (subset != 0) {
         const uint subsetRow = subsetRows[s.mesh.subsetBase + subset - 1];
         row = subsetRow != 0 ? subsetRow : row;

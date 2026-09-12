@@ -2115,12 +2115,22 @@ in the topology and is not drawn: unlike a hole, whose triangles the
 triangulation drops, an invisible face keeps its triangles and their
 numbering, so showing it again is a flag and not a rebuild. The builder
 marks the faces the way it marks holes (the same kernel over another
-list), `meshTriangulate` writes a `triangleHidden` flag a triangle, the
-scene pools it beside `triangleSubsets`, and the one place every route
-already evaluates a sample before keeping it -- the cutout passes'
-`materialCuts` -- answers yes for a hidden triangle before it looks at the
-material. The engine takes the cutout passes whenever a mesh has a hidden
-face, cutout materials or not.
+list), `subsetTriangles` writes the flag into the top bit of each
+triangle's subset word (a subset index never reaches it), the scene pools
+it as it pools the subsets, and the one place every route already
+evaluates a sample before keeping it -- the cutout passes' `materialCuts`
+-- answers yes for a flagged triangle before it looks at the material. The
+engine takes the cutout passes whenever a mesh has a hidden face, cutout
+materials or not.
+
+**Why a bit and not a buffer.** The first version gave the flag a buffer
+of its own, bound wherever materials are looked up, and every path traced
+test failed at once: Metal allows a kernel 31 buffers, the path tracer
+was at the edge, and the one more put a binding out of range -- the
+kernel did not compile, and the suite said so 18 times. The lesson stands
+in the docs because it will bite again: the material frame binds a dozen
+buffers and the path tracer adds its own, so a new per-triangle or
+per-mesh datum rides in a word that exists.
 
 **Checked** in `test_lights` on the bumpy grid with its odd faces
 invisible, by the three routes: every pixel where the full grid showed an

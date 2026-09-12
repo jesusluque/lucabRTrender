@@ -85,10 +85,9 @@ struct GpuMesh {
     gpu::Buffer   indices;          ///< uint, 3 per triangle: points
     gpu::Buffer   triangleCorners;  ///< uint, 3 per triangle: face-vertex indices
     gpu::Buffer   triangleFaces;    ///< uint per triangle: authored face
-    gpu::Buffer   triangleHidden;   ///< uint per triangle: 1 where its face is invisible
-    bool          hidden = false;   ///< any face invisible
+    bool          hidden = false;   ///< any face invisible: its triangleSubsets carry the flag in their top bit
     uint32_t      subsets = 0;      ///< GeomSubsets given
-    gpu::Buffer   triangleSubsets;  ///< uint per triangle: 0, or k + 1 for the k-th subset (when subsets > 0)
+    gpu::Buffer   triangleSubsets;  ///< uint per triangle: 0, or k + 1 for the k-th subset; top bit: the face is invisible
     std::vector<GpuPrimvar> primvars;   ///< authored, and "normals" when computed
     scene::Bounds bounds;
     /// The caller's key for the mesh's topology (MeshInput::topology): two

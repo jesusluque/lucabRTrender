@@ -44,6 +44,10 @@ void subsetScatter(uint3 tid: SV_DispatchThreadID) {
 [numthreads(256, 1, 1)]
 void subsetTriangles(uint3 tid: SV_DispatchThreadID) {
     if (tid.x < params.count) {
-        triangleSubsets[tid.x] = faceSubsets[triangleFaces[tid.x]];
+        // The top bit: the face is invisible. A subset index never reaches it.
+        const uint face = triangleFaces[tid.x];
+        triangleSubsets[tid.x] = faceSubsets[face] | (invisibleFlags[face] != 0 ? 0x80000000u : 0u);
     }
 }
+
+StructuredBuffer<uint> invisibleFlags;   // subsetTriangles: per face, 1 where invisible

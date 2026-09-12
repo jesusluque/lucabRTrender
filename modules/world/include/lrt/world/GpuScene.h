@@ -144,11 +144,10 @@ public:
     [[nodiscard]] const gpu::Buffer& indices() const noexcept { return indices_; }
     [[nodiscard]] const gpu::Buffer& triangleCorners() const noexcept { return triangleCorners_; }
     [[nodiscard]] const gpu::Buffer& triangleFaces() const noexcept { return triangleFaces_; }
-    /// Per triangle: 0, or k + 1 for its mesh's k-th GeomSubset.
+    /// Per triangle: 0, or k + 1 for its mesh's k-th GeomSubset; top bit set
+    /// where the face is invisible, which a visibility pass that evaluates
+    /// cutouts skips. `anyHidden` says whether any mesh has such a face.
     [[nodiscard]] const gpu::Buffer& triangleSubsets() const noexcept { return triangleSubsets_; }
-    /// Per triangle: 1 where its face is invisible; a visibility pass that
-    /// evaluates cutouts skips it. `anyHidden` says whether any mesh has one.
-    [[nodiscard]] const gpu::Buffer& triangleHidden() const noexcept { return triangleHidden_; }
     [[nodiscard]] bool anyHidden() const noexcept { return anyHidden_; }
     /// Per mesh (from MeshRecord.subsetBase), per subset: its material row, 0 for the instance's.
     [[nodiscard]] const gpu::Buffer& subsetRows() const noexcept { return subsetRows_; }
@@ -193,7 +192,6 @@ private:
     gpu::Buffer primvarValues_, primvarRecords_, primvarSlots_;
     gpu::Buffer setRows_, setRecords_;
     gpu::Buffer triangleSubsets_, subsetRows_;
-    gpu::Buffer triangleHidden_;
     bool        anyHidden_ = false;
     std::vector<uint32_t> subsetBases_;   ///< per mesh: its first entry in subsetRows_
     std::vector<uint32_t> subsetRowWords_;   ///< what subsetRows_ holds

@@ -195,12 +195,9 @@ Result<GpuMesh> MeshBuilder::build(const MeshInput& in) {
     if (!triangleCorners) return std::move(triangleCorners).error();
     auto triangleFaces = deviceBuffer(device, mesh.triangles, 4, "mesh.triangleFaces");
     if (!triangleFaces) return std::move(triangleFaces).error();
-    auto triangleHidden = deviceBuffer(device, mesh.triangles, 4, "mesh.triangleHidden");
-    if (!triangleHidden) return std::move(triangleHidden).error();
     mesh.indices = std::move(*triangles);
     mesh.triangleCorners = std::move(*triangleCorners);
     mesh.triangleFaces = std::move(*triangleFaces);
-    mesh.triangleHidden = std::move(*triangleHidden);
     if (mesh.triangles > 0) {
         gpu::CommandBatch batch(device);
         triangulate_.dispatch(batch, {mesh.faces, 1, 1}, [&](rhi::ShaderCursor cursor) {
@@ -211,15 +208,14 @@ Result<GpuMesh> MeshBuilder::build(const MeshInput& in) {
             cursor["triangles"].setBinding(mesh.indices.rhi());
             cursor["triangleCorners"].setBinding(mesh.triangleCorners.rhi());
             cursor["triangleFaces"].setBinding(mesh.triangleFaces.rhi());
-            cursor["invisibleFlags"].setBinding(invisibleFlags->rhi());
-            cursor["triangleHidden"].setBinding(mesh.triangleHidden.rhi());
             topologyParams(cursor["params"]);
         });
         LRT_TRY(batch.submit(true));
     }
 
-    // GeomSubsets: faces to subsets, then triangles to their faces' subsets.
-    if (!in.subsets.empty() && mesh.triangles > 0) {
+    // GeomSubsets: faces to subsets, then triangles to their faces' subsets
+    // -- and, in the top bit, whether the face is invisible.
+    if ((!in.subsets.empty() || mesh.hidden) && mesh.triangles > 0) {
         std::vector<uint32_t> pairs;
         for (size_t k = 0; k < in.subsets.size(); ++k) {
             for (const int32_t face : in.subsets[k]) {
@@ -252,6 +248,7 @@ Result<GpuMesh> MeshBuilder::build(const MeshInput& in) {
             });
         }
         subsetTriangles_.dispatch(batch, {mesh.triangles, 1, 1}, [&](rhi::ShaderCursor cursor) {
+            cursor["invisibleFlags"].setBinding(invisibleFlags->rhi());
             cursor["faceSubsets"].setBinding(faceSubsets->rhi());
             cursor["triangleFaces"].setBinding(mesh.triangleFaces.rhi());
             cursor["triangleSubsets"].setBinding(triangleSubsets->rhi());

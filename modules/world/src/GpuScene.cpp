@@ -186,7 +186,6 @@ Result<void> GpuScene::repack() {
     LRT_TRY(make(triangleCorners_, triangles * 3, 4, "scene.triangleCorners"));
     LRT_TRY(make(triangleFaces_, triangles, 4, "scene.triangleFaces"));
     LRT_TRY(make(triangleSubsets_, triangles, 4, "scene.triangleSubsets"));
-    LRT_TRY(make(triangleHidden_, triangles, 4, "scene.triangleHidden"));
     anyHidden_ = false;
     subsetBases_.assign(meshes_.size(), 0);
     uint32_t subsetsSoFar = 0;
@@ -225,12 +224,8 @@ Result<void> GpuScene::repack() {
                           uint64_t{m.triangles} * 12);
             e->copyBuffer(triangleFaces_.rhi(), uint64_t{r.firstTriangle} * 4, m.triangleFaces.rhi(), 0,
                           uint64_t{m.triangles} * 4);
-            if (m.subsets > 0 && m.triangleSubsets.valid()) {
+            if ((m.subsets > 0 || m.hidden) && m.triangleSubsets.valid()) {
                 e->copyBuffer(triangleSubsets_.rhi(), uint64_t{r.firstTriangle} * 4, m.triangleSubsets.rhi(), 0,
-                              uint64_t{m.triangles} * 4);
-            }
-            if (m.triangleHidden.valid()) {
-                e->copyBuffer(triangleHidden_.rhi(), uint64_t{r.firstTriangle} * 4, m.triangleHidden.rhi(), 0,
                               uint64_t{m.triangles} * 4);
             }
             anyHidden_ = anyHidden_ || m.hidden;

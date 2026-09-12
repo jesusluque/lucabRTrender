@@ -17,8 +17,10 @@ namespace {
 const char* kCutout = R"(
 public bool materialCuts(CameraParams camera, uint2 pixel, uint4 seen) {
     const Surface s = surfaceAt(camera, pixel.x, pixel.y, seen);
-    // An invisible face cuts as a cutout does, whatever its material.
-    if (triangleHidden[s.mesh.firstTriangle + s.triangle] != 0) {
+    // An invisible face cuts as a cutout does, whatever its material. Its
+    // flag rides in the subset word's top bit: Metal allows a kernel 31
+    // buffers, and the path tracer had no room for one more.
+    if ((triangleSubsets[s.mesh.firstTriangle + s.triangle] & 0x80000000u) != 0) {
         return true;
     }
     const MaterialRecord m = materials[materialRowOf(s)];
@@ -93,7 +95,6 @@ void bindMaterialFrame(rhi::ShaderCursor cursor, const MaterialFrame& frame, con
     bindScene(cursor, *frame.scene);
     cursor["materials"].setBinding(frame.records->rhi());
     cursor["triangleSubsets"].setBinding(frame.scene->triangleSubsets().rhi());
-    cursor["triangleHidden"].setBinding(frame.scene->triangleHidden().rhi());
     cursor["subsetRows"].setBinding(frame.scene->subsetRows().rhi());
     cursor["gMaterialBlob"].setBinding(frame.blob->rhi());
     frame.textures->bind(cursor["gTextures"]);
