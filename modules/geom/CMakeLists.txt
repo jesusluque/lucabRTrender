@@ -5,6 +5,7 @@ lrt_add_module(geom
         src/Mesh.cpp
         src/Skinner.cpp
         src/Curves.cpp
+        src/Subdivision.cpp
     PUBLIC_LIBS
         lrt::core
         lrt::gpu

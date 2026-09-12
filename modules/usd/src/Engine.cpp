@@ -1,6 +1,7 @@
 // Copyright (c) 2026 lucabRTrender contributors.
 #include "Engine.h"
 #include <pxr/imaging/hd/tokens.h>
+#include <pxr/imaging/pxOsd/tokens.h>
 #include <pxr/base/gf/vec4f.h>
 #include <pxr/base/gf/vec2f.h>
 #include <pxr/base/gf/vec2i.h>
@@ -528,13 +529,56 @@ Result<size_t> Engine::commit() {
                 log::warn("hdLrt: {}: skinning: {}", id.GetString(), result.error().toString());
             }
         }
+        // A subdivision surface at a refine level above zero: refined on the
+        // device (after the skinning, when there is any) and built from the
+        // refined mesh. The refined topology is the mesh's own key.
+        std::optional<geom::Refined> refined;
+        std::optional<geom::Refined::AsInput> refinedInput;
+        const bool subdivides = a.refineLevel > 0 && !a.scheme.IsEmpty() &&
+                                a.scheme != pxr::PxOsdOpenSubdivTokens->none && input.points.values() >= 3 &&
+                                !a.faceVertexCounts.empty();
+        if (subdivides) {
+            if (!subdivider_.has_value()) {
+                auto made = geom::Subdivider::create(*library_);
+                if (!made) return std::move(made).error();
+                subdivider_.emplace(std::move(*made));
+            }
+            geom::SubdivisionInput sub;
+            sub.source = input.source;
+            sub.points = input.points;
+            sub.devicePositions = input.devicePositions;
+            sub.devicePoints = input.devicePoints;
+            sub.faceVertexCounts = input.faceVertexCounts;
+            sub.faceVertexIndices = input.faceVertexIndices;
+            sub.holeIndices = input.holeIndices;
+            sub.scheme = a.scheme == pxr::PxOsdOpenSubdivTokens->loop       ? geom::SubdivisionScheme::Loop
+                         : a.scheme == pxr::PxOsdOpenSubdivTokens->bilinear ? geom::SubdivisionScheme::Bilinear
+                                                                             : geom::SubdivisionScheme::CatmullClark;
+            sub.levels = static_cast<uint32_t>(std::min(a.refineLevel, 5));
+            sub.creaseIndices = std::span<const int32_t>(a.creaseIndices.cdata(), a.creaseIndices.size());
+            sub.creaseLengths = std::span<const int32_t>(a.creaseLengths.cdata(), a.creaseLengths.size());
+            sub.creaseSharpnesses = std::span<const float>(a.creaseSharpnesses.cdata(), a.creaseSharpnesses.size());
+            sub.cornerIndices = std::span<const int32_t>(a.cornerIndices.cdata(), a.cornerIndices.size());
+            sub.cornerSharpnesses = std::span<const float>(a.cornerSharpnesses.cdata(), a.cornerSharpnesses.size());
+            sub.primvars = input.primvars;
+            auto made = subdivider_->refine(sub);
+            if (made) {
+                refined.emplace(std::move(*made));
+                refinedInput.emplace(refined->asMeshInput(input.source, input.topology));
+                refinedInput->mesh.invisibleFaces = {};   // a coarse face's flag does not survive refinement yet
+                refinedInput->mesh.leftHanded = input.leftHanded;
+            } else {
+                log::warn("hdLrt: {}: subdivision: {}", id.GetString(), made.error().toString());
+            }
+        }
+        const geom::MeshInput& built_input = refinedInput.has_value() ? refinedInput->mesh : input;
         if (input.points.values() >= 3 && !a.faceVertexCounts.empty()) {
             if (!meshBuilder_.has_value()) {
                 auto made = geom::MeshBuilder::create(*library_);
                 if (!made) return std::move(made).error();
                 meshBuilder_.emplace(std::move(*made));
             }
-            auto mesh = meshBuilder_->build(input);
+            auto mesh = meshBuilder_->build(built_input);
             if (mesh) {
                 entry.gpu = std::make_shared<const geom::GpuMesh>(std::move(*mesh));
             } else {

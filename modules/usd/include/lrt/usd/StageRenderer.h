@@ -119,6 +119,9 @@ public:
     /// Motion blur's shutter slices for `rt`, 1 to 8; the shutter itself is
     /// the camera's.
     void setMotionBuckets(uint32_t buckets);
+    /// Subdivision surfaces refined this many levels (0: the control mesh),
+    /// as usdview's complexity sets it.
+    void setRefineLevel(uint32_t level);
     void setPathTotal(uint32_t total);
     /// Denoise a path traced frame once it has gathered its total.
     void setDenoise(bool denoise);

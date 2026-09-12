@@ -25,6 +25,7 @@
 #include <pxr/usdImaging/usdImaging/sceneIndices.h>
 
 #include <pxr/imaging/hd/sceneIndexPluginRegistry.h>
+#include <pxr/imaging/hdsi/legacyDisplayStyleOverrideSceneIndex.h>
 #include <pxr/usdImaging/usdImaging/stageSceneIndex.h>
 
 #include "RenderDelegate.h"
@@ -37,6 +38,7 @@ namespace lrt::usd {
 struct StageRenderer::Impl {
     UsdStageRefPtr                         stage;
     std::unique_ptr<HdLrtRenderDelegate>   delegate;
+    HdsiLegacyDisplayStyleOverrideSceneIndexRefPtr displayStyle;
     HdRenderIndex*                         index = nullptr;
     UsdImagingSceneIndices                 sceneIndices;
     std::unique_ptr<HdxTaskController>     controller;
@@ -75,8 +77,11 @@ Result<std::unique_ptr<StageRenderer>> StageRenderer::open(const std::filesystem
     // GetCategories then reports. Inserting the stage's own chain directly
     // skips every one of them.
     HdLrtRegisterSceneIndices();
-    const HdSceneIndexBaseRefPtr scene = HdSceneIndexPluginRegistry::GetInstance().AppendSceneIndicesForRenderer(
-        "lucabRTrender", impl.sceneIndices.finalSceneIndex);
+    // The display style's fallback refine level, for setRefineLevel: what
+    // usdview's complexity sets, the same way.
+    impl.displayStyle = HdsiLegacyDisplayStyleOverrideSceneIndex::New(impl.sceneIndices.finalSceneIndex);
+    const HdSceneIndexBaseRefPtr scene =
+        HdSceneIndexPluginRegistry::GetInstance().AppendSceneIndicesForRenderer("lucabRTrender", impl.displayStyle);
     impl.index->InsertSceneIndex(scene, SdfPath::AbsoluteRootPath());
 
     impl.controller = std::make_unique<HdxTaskController>(
@@ -145,6 +150,12 @@ void StageRenderer::setPathSamples(uint32_t samples) {
 }
 void StageRenderer::setPathBounces(uint32_t bounces) {
     impl_->delegate->SetRenderSetting(TfToken("lrt:pathBounces"), VtValue(static_cast<int>(bounces)));
+}
+void StageRenderer::setRefineLevel(uint32_t level) {
+    if (impl_->displayStyle) {
+        impl_->displayStyle->SetRefineLevelFallback(level > 0 ? std::optional<int>(static_cast<int>(level))
+                                                               : std::nullopt);
+    }
 }
 void StageRenderer::setMotionBuckets(uint32_t buckets) {
     impl_->delegate->SetRenderSetting(TfToken("lrt:motionBuckets"), VtValue(static_cast<int>(buckets)));

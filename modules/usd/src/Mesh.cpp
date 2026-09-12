@@ -1,6 +1,8 @@
 // Copyright (c) 2026 lucabRTrender contributors.
 #include "Mesh.h"
 
+#include <algorithm>
+
 #include <pxr/base/gf/vec3f.h>
 #include <pxr/imaging/hd/changeTracker.h>
 #include <pxr/imaging/hd/instancer.h>
@@ -8,6 +10,7 @@
 #include <pxr/imaging/hd/meshTopology.h>
 #include <pxr/imaging/hd/sceneDelegate.h>
 #include <pxr/imaging/hd/tokens.h>
+#include <pxr/imaging/pxOsd/subdivTags.h>
 #include <pxr/imaging/pxOsd/tokens.h>
 
 #include "RenderParam.h"
@@ -101,6 +104,13 @@ void HdLrtMesh::Sync(HdSceneDelegate* delegate, HdRenderParam* renderParam, HdDi
         a.faceVertexIndices = topology.GetFaceVertexIndices();
         a.holeIndices = topology.GetHoleIndices();
         a.invisibleFaces = topology.GetInvisibleFaces();
+        a.scheme = topology.GetScheme();
+        const PxOsdSubdivTags& tags = topology.GetSubdivTags();
+        a.creaseIndices = tags.GetCreaseIndices();
+        a.creaseLengths = tags.GetCreaseLengths();
+        a.creaseSharpnesses = tags.GetCreaseWeights();
+        a.cornerIndices = tags.GetCornerIndices();
+        a.cornerSharpnesses = tags.GetCornerWeights();
         a.leftHanded = topology.GetOrientation() != HdTokens->rightHanded;
         for (const HdGeomSubset& subset : topology.GetGeomSubsets()) {
             if (subset.type == HdGeomSubset::TypeFaceSet) {
@@ -190,6 +200,7 @@ void HdLrtMesh::Sync(HdSceneDelegate* delegate, HdRenderParam* renderParam, HdDi
         const HdDisplayStyle style = GetDisplayStyle(delegate);
         a.smoothNormals = !style.flatShadingEnabled && topology.GetScheme() != PxOsdOpenSubdivTokens->none &&
                           topology.GetScheme() != PxOsdOpenSubdivTokens->bilinear;
+        a.refineLevel = std::max(style.refineLevel, 0);
         a.topologyChanged = (*dirtyBits & HdChangeTracker::DirtyTopology) != 0;
         arrays = std::move(a);
     }

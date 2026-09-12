@@ -35,6 +35,7 @@
 #include "lrt/geom/Curves.h"
 #include "lrt/geom/Mesh.h"
 #include "lrt/geom/Skinner.h"
+#include "lrt/geom/Subdivision.h"
 #include "lrt/lod/Lod.h"
 #include "lrt/technique/Visibility.h"
 #include "lrt/world/GpuScene.h"
@@ -309,7 +310,8 @@ private:
     std::optional<world::Instancing>          instancing_;
     std::optional<geom::MeshBuilder>          meshBuilder_;
     std::optional<geom::Skinner>              skinner_;
-    std::optional<geom::CurveBuilder>         curveBuilder_;   ///< made on first use
+    std::optional<geom::CurveBuilder>         curveBuilder_;
+    std::optional<geom::Subdivider>           subdivider_;   ///< made on first use
     std::optional<world::GpuScene>            scene_;
     std::optional<technique::VisibilityRaster> visibilityRaster_;   ///< each made on first use
     std::optional<world::RayTracingScene>      rayTracingScene_;

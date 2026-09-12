@@ -2243,6 +2243,86 @@ Through Hydra, a B-spline curve under a chiang material draws lit
 (relMSE 4.9 against blank) and unlike the same curve under Lambert
 (relMSE 0.13).
 
+### Subdivision surfaces on the device
+
+`geom::Subdivider` refines a mesh `levels` times under Catmull-Clark, Loop
+(all-triangle meshes; anything else falls back to Catmull-Clark) or
+bilinear rules, and pushes the last level onto the limit surface. The
+split of work follows the rule: the host lays out each level's topology
+as tables of indices -- which corners make which edges (an edge map over
+(min, max) pairs), what each vertex touches (a CSR of its edges and faces),
+which edges and vertices are sharp, and the children's corner lists in the
+[vertex points][edge points][face points] numbering -- and
+`subdivision.slang` places every point: a face's centroid, an edge's point
+(the four-point Catmull-Clark rule, Loop's 3/8-1/8, or the midpoint on a
+boundary or a sharp edge, blended by a semi-sharp edge's sharpness), and a
+vertex's new place (Catmull-Clark's (Q + 2R + (n-3)P)/n, Loop's beta rule,
+the crease rule (E1 + 6P + E2)/8 through two sharp edges, blended by
+sharpness; a corner, a vertex with three or more sharp edges, or a boundary
+vertex that is only its two boundary edges stays -- edgeAndCorner for
+points, cornersOnly for a face-varying channel). Creases and corners come
+from `UsdGeomMesh` as authored (a sharpness a crease or an edge), a
+boundary edge is a crease, and a child edge keeps its parent's sharpness
+less one. Face-varying channels run the same kernels over their own
+topology: the channel's unique values (its indices) are its vertices, an
+edge one face makes is a seam and so a boundary; vertex channels follow
+the points, varying ones the bilinear rule, uniform ones map each refined
+face to its coarse face, and authored normals are dropped for the refined
+surface's own. The limit projection is `subdivLimit`: Halstead, Kass and
+DeRose's stencil for Catmull-Clark -- (n^2 P + 4 sum of edge neighbours +
+sum of the quads' diagonal vertices) / (n (n + 5)) -- and (1 - n gamma) P
++ gamma sum of neighbours for Loop, (E1 + 4P + E2)/6 along a crease or
+boundary, corners fixed. `ref/falcor`'s LoopSubdivide was read for the
+Loop rules and never built.
+
+**Checked** in `test_subdivision`, everything exact:
+
+- **Euler's counts**, integer and exact at every level: a cube's 26/24/48
+  points, faces and edges after one level, 98/96/192 after two, 386/384/768
+  after three; an octahedron under Loop 18/32/48, 66/128/192, 258/512/768.
+- **The limit converges and does not drift.** The cube corner's limit from
+  the coarse cube alone, by the closed form written a second time in the
+  check kernel, is (-0.5, -0.5, -0.5); the kernel's projection of that
+  corner's descendant reaches it to 0.000000 at levels 1, 2 and 3 alike.
+  The first stencil written took edge midpoints and face centroids for the
+  two sums and put the corner at 0.75; the projections then moved with the
+  level (0.38, 0.42, 0.43 off), which is what told it from the right one --
+  a limit stencil applied at any level must land on one point. Loop's
+  octahedron vertex reaches its closed form (0.5, 0, 0) to 0.000000 at
+  every level.
+- **A crease holds its plane.** A sharpness-10 crease around the cube's
+  top keeps every descendant of the top on y = 1 (9 points at level 1, 25
+  at level 2, none above) where the smooth cube's highest point is 0.8395.
+- **A face-varying square stays a grid**: each of the cube's faces with
+  its own unit square of st, refined twice, gives 96 faces whose four st
+  corners are all axis-aligned rectangles (a first version of the test
+  gave the six faces the same four values, and the six squares became one
+  face-varying vertex a corner with no seam).
+
+**Through Hydra.** `HdLrtMesh` hands the engine the scheme, the display
+style's refine level and `UsdGeomMesh`'s creases and corners; the engine
+refines a mesh whose scheme is not `none` at a level above zero (after
+the skinning, when there is any; five levels at most) and builds the
+refined mesh under the coarse mesh's topology key, so an animated
+subdivision surface is still a refit. The level is the display style's,
+as usdview's complexity sets it: `StageRenderer::setRefineLevel` and
+`lrt stage --refine` set it through `HdsiLegacyDisplayStyleOverrideSceneIndex`
+inserted ahead of the renderer's chain; a host's `HdDisplayStyle` reaches
+the delegate the ordinary way. Checked with a catmullClark cube at refine
+0, 1 and 2: the centre pixel's depth is the flat face's 5.0000 at 0, and
+5.168 and 5.164 at 1 and 2 -- the limit surface inside the cube, one
+surface at both levels to a facet's sag -- while the coverage falls from
+8464 pixels to 2956 and 3196 as the corners pull in.
+
+**Not done.** Boundary interpolation is `edgeAndCorner` and face-varying
+interpolation `cornersOnly` whatever the mesh authors (`edgeOnly` and the
+other face-varying rules are not read); holes are refined and dropped
+after; invisible faces do not survive refinement; a mesh's refined
+normals are the refined surface's smooth ones, not limit normals; Storm
+was not used as an image oracle here -- the closed forms above are the
+checks, and Storm's own OpenSubdiv would have been checked against them
+the same way.
+
 ## Linux, on the 94 (M11's first half)
 
 ### The first table, after the port was reconciled with engine

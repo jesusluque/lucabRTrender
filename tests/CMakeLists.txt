@@ -45,7 +45,7 @@ if(LRT_HAVE_SPZ)
 endif()
 
 lrt_test(lrt_geom_tests
-    SOURCES geom/test_mesh.cpp geom/test_skinning.cpp geom/test_curves.cpp
+    SOURCES geom/test_mesh.cpp geom/test_skinning.cpp geom/test_curves.cpp geom/test_subdivision.cpp
     LIBS lrt::geom)
 
 lrt_test(lrt_material_tests

@@ -3421,3 +3421,61 @@ TEST_CASE("a chiang hair material shades a curve through Hydra", "[usd][gpu][mes
     CHECK(lit->relMse > 0.1);
     CHECK(differs->relMse > 1e-2);
 }
+
+// Subdivision through Hydra: a catmullClark cube drawn at refine levels 0,
+// 1 and 2. The face centre of the +z face is a vertex from level 1 on and
+// its limit is one point, so the depth at the pixel looking straight at it
+// is the same at levels 1 and 2 to a facet's sag (the limit projection),
+// while the flat control face at level 0 sits nearer the camera: the
+// surface bulges inward there, so the centre depth grows.
+TEST_CASE("a catmullClark cube refines through Hydra, its limit the same at every level", "[usd][gpu][mesh][subdivision]") {
+    LRT_REQUIRE_GPU(gpu);
+    if (!gpu->device->caps().rasterization) {
+        SKIP("no rasterisation on this device");
+    }
+    const fs::path path = scratch("subdiv_cube.usda");
+    {
+        std::ofstream out(path);
+        out << "#usda 1.0\n(\n    upAxis = \"Y\"\n)\n"
+               "def Mesh \"Cube\"\n{\n"
+               "    int[] faceVertexCounts = [4, 4, 4, 4, 4, 4]\n"
+               "    int[] faceVertexIndices = [0, 3, 2, 1, 4, 5, 6, 7, 0, 1, 5, 4, 2, 3, 7, 6, 1, 2, 6, 5, 0, 4, 7, 3]\n"
+               "    point3f[] points = [(-1, -1, -1), (1, -1, -1), (1, 1, -1), (-1, 1, -1), (-1, -1, 1), (1, -1, 1), "
+               "(1, 1, 1), (-1, 1, 1)]\n"
+               "    uniform token subdivisionScheme = \"catmullClark\"\n"
+               "    color3f[] primvars:displayColor = [(0.7, 0.6, 0.4)] ( interpolation = \"constant\" )\n"
+               "    double3 xformOp:translate = (0, 0, -6)\n"
+               "    uniform token[] xformOpOrder = [\"xformOp:translate\"]\n}\n"
+               "def Camera \"Camera\"\n{\n"
+               "    float focalLength = 35\n"
+               "    float horizontalAperture = 24.576\n    float verticalAperture = 18.432\n"
+               "    float2 clippingRange = (0.1, 1000)\n}\n";
+    }
+    const uint32_t w = 160;
+    const uint32_t h = 120;
+    auto renderer = usd::StageRenderer::open(path);
+    if (!renderer) FAIL(renderer.error().toString());
+    std::array<float, 3> centreDepth{};
+    std::array<uint32_t, 3> covered{};
+    for (uint32_t level = 0; level < 3; ++level) {
+        (*renderer)->setRefineLevel(level);
+        auto image = (*renderer)->render("/Camera", 0.0, w, h);
+        if (!image) FAIL(image.error().toString());
+        centreDepth[level] = image->depth[(h / 2) * w + w / 2];
+        test::dumpPpm("subdiv_cube_" + std::to_string(level), image->rgba.data(), w, h);
+        for (const float d : image->depth) {
+            covered[level] += d > 0.0F ? 1u : 0u;
+        }
+    }
+    std::printf("  refine 0, 1, 2: centre depth %.5f %.5f %.5f; covered %u %u %u pixels\n",
+                static_cast<double>(centreDepth[0]), static_cast<double>(centreDepth[1]),
+                static_cast<double>(centreDepth[2]), covered[0], covered[1], covered[2]);
+    CHECK(std::abs(centreDepth[0] - 5.0F) < 1e-4F);            // the control face at z = -5
+    CHECK(centreDepth[1] > centreDepth[0] + 0.05F);           // the limit surface sits inside the cube
+    // One surface whatever the level: the centre pixel's ray meets a facet
+    // beside the centre vertex, so the two levels differ by a facet's sag
+    // (0.004 here), not by a level's worth of motion (0.17).
+    CHECK(std::abs(centreDepth[1] - centreDepth[2]) < 0.01F);
+    CHECK(covered[1] < covered[0]);                           // the corners pull in
+    CHECK(covered[2] < covered[0]);
+}

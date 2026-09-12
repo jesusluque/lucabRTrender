@@ -81,6 +81,12 @@ struct MeshArrays {
     pxr::VtArray<int>      faceVertexIndices;
     pxr::VtArray<int>      holeIndices;
     pxr::VtArray<int>      invisibleFaces;   ///< Hydra's: kept in the topology, not drawn
+    /// Subdivision: the scheme (none, bilinear, catmullClark, loop), the
+    /// display style's refine level, and UsdGeomMesh's creases and corners.
+    pxr::TfToken           scheme;
+    int                    refineLevel = 0;
+    pxr::VtArray<int>      creaseIndices, creaseLengths, cornerIndices;
+    pxr::VtArray<float>    creaseSharpnesses, cornerSharpnesses;
     bool                   leftHanded = false;
     bool                   smoothNormals = true;
     /// Hydra marked the topology dirty: the mesh is a new one, not the last
