@@ -537,3 +537,122 @@ TEST_CASE("a dome with a sun in it samples what its density describes",
     CHECK(differ == 0);
     CHECK(std::abs(z) < 4.0F);
 }
+
+TEST_CASE("a light reaches the categories it is linked to, and no others", "[technique][lights][linking]") {
+    LRT_REQUIRE_GPU(gpu);
+    if (!gpu->device->caps().rasterization) {
+        SKIP("no rasterisation on this device");
+    }
+    std::vector<std::filesystem::path> shaderPaths;
+    for (const std::string& path : gpu->device->shaderSearchPaths()) {
+        shaderPaths.emplace_back(path);
+    }
+    auto compiler = material::MaterialCompiler::create({LRT_MATERIALX_ROOT}, shaderPaths);
+    auto textures = material::TextureStore::create(*gpu->library);
+    auto builder = geom::MeshBuilder::create(*gpu->library);
+    auto scene = world::GpuScene::create(*gpu->library);
+    auto raster = technique::VisibilityRaster::create(*gpu->library);
+    auto programs = technique::MaterialPrograms::create(*gpu->library);
+    auto shading = technique::MaterialShading::create(*gpu->library);
+    auto table = light::LightTable::create(*gpu->device);
+    if (!compiler) FAIL(compiler.error().toString());
+    if (!textures) FAIL(textures.error().toString());
+    if (!builder) FAIL(builder.error().toString());
+    if (!scene) FAIL(scene.error().toString());
+    if (!raster) FAIL(raster.error().toString());
+    if (!programs) FAIL(programs.error().toString());
+    if (!shading) FAIL(shading.error().toString());
+    if (!table) FAIL(table.error().toString());
+
+    auto lambert = (*compiler)->compileXml(
+        "<?xml version=\"1.0\"?>\n<materialx version=\"1.39\">\n"
+        "  <oren_nayar_diffuse_bsdf name=\"d\" type=\"BSDF\">\n"
+        "    <input name=\"color\" type=\"color3\" value=\"0.8, 0.8, 0.8\" />\n"
+        "    <input name=\"roughness\" type=\"float\" value=\"0\" />\n"
+        "  </oren_nayar_diffuse_bsdf>\n"
+        "  <surface name=\"shader\" type=\"surfaceshader\"><input name=\"bsdf\" type=\"BSDF\" nodename=\"d\" /></surface>\n"
+        "  <surfacematerial name=\"material\" type=\"material\">\n"
+        "    <input name=\"surfaceshader\" type=\"surfaceshader\" nodename=\"shader\" />\n"
+        "  </surfacematerial>\n</materialx>\n");
+    if (!lambert) FAIL(lambert.error().toString());
+    REQUIRE(programs->setModules(std::span<const material::CompiledMaterial>(&*lambert, 1)));
+    REQUIRE(shading->setPrograms(*programs));
+    const std::vector<float> blob = material::MaterialCompiler::parameters(
+        *lambert, **textures, [](const std::string&) { return 0xFFFFFFFFu; });
+    REQUIRE((*textures)->commit());
+    const std::vector<technique::MaterialRecord> rows{{0, 0, 0, 0}, {1, 0, 0, 0}};
+    auto records = gpu::Buffer::fromSpan<technique::MaterialRecord>(*gpu->device, rows, "materials.records");
+    auto blobBuffer = gpu::Buffer::fromSpan<float>(*gpu->device, blob, "materials.blob");
+    REQUIRE(records);
+    REQUIRE(blobBuffer);
+
+    const uint32_t w = 160;
+    const uint32_t h = 120;
+    render::Camera camera = render::Camera::lookingAt({0.0, 0.0, 0.0}, {0.0, 0.0, -1.0});
+    camera.lens.focal = 35.0;
+    const render::Projection projection = render::projectionFor(camera, w, h);
+    // Two squares side by side, in different categories: the left one in the
+    // category the light is linked to, the right one in another.
+    std::array<world::MeshInstance, 2> both;
+    for (size_t k = 0; k < 2; ++k) {
+        both[k].mesh = lambertSquare(*builder, 0.9F);
+        both[k].objectToWorld = aofx::xform::translation({k == 0 ? -1.0 : 1.0, 0.0, -5.0});
+        both[k].material = 1;
+        both[k].categories = uint64_t{1} << k;
+    }
+    REQUIRE(scene->update(std::span<const world::MeshInstance>(both.data(), both.size()), projection));
+    auto counters = gpu::ComputeKernel::create(*gpu->library, "lrt/test/light_check", "lightLinkCounters");
+    if (!counters) FAIL(counters.error().toString());
+
+    struct Case {
+        const char* name;
+        uint32_t    category;
+        bool        rightLit;
+    };
+    const std::array<Case, 2> cases{Case{"linked to the left square's category", 0, false},
+                                    Case{"no collection at all", light::kLightUnlinked, true}};
+    for (const Case& c : cases) {
+        light::Light lamp;
+        lamp.kind = light::LightKind::Sphere;
+        lamp.lightToWorld = aofx::xform::translation({0.0, 0.0, -3.0});
+        lamp.radius = 0.4F;
+        lamp.shadow = false;
+        lamp.lightCategory = c.category;
+        REQUIRE(table->set(std::span<const light::Light>(&lamp, 1)));
+        technique::VisibilityTargets visibility;
+        render::RenderTargets out;
+        {
+            gpu::CommandBatch batch(*gpu->device);
+            REQUIRE(raster->render(batch, *scene, projection, w, h, visibility));
+            technique::MaterialFrame frame;
+            frame.programs = &*programs;
+            frame.scene = &*scene;
+            frame.records = &*records;
+            frame.blob = &*blobBuffer;
+            frame.textures = &**textures;
+            frame.lights = &*table;
+            frame.samples = 16;
+            REQUIRE(shading->shade(batch, visibility, projection, frame, out));
+            REQUIRE(batch.submit(true));
+        }
+        gpu::Buffer halves = test::uintBuffer(*gpu->device, 4, "halves");
+        {
+            gpu::CommandBatch batch(*gpu->device);
+            counters->dispatch(batch, {1, 1, 1}, [&](rhi::ShaderCursor cursor) {
+                cursor["image"].setBinding(out.colour.rhi());
+                cursor["imageDepth"].setBinding(out.depth.rhi());
+                cursor["halves"].setBinding(halves.rhi());
+                cursor["params"]["thetaBins"].setData(h);   // rows
+                cursor["params"]["phiBins"].setData(w);     // columns
+            });
+            REQUIRE(batch.submit(true));
+        }
+        uint32_t n[4] = {0, 0, 0, 0};
+        REQUIRE(halves.read(*gpu->device, 0, sizeof(n), n));
+        std::printf("  %-38s: left %u drawn %u lit, right %u drawn %u lit\n", c.name, n[0], n[1], n[2], n[3]);
+        CHECK(n[0] > 1000);          // the left square is there
+        CHECK(n[1] == n[0]);         // and the light reaches all of it
+        CHECK(n[2] > 1000);          // the right square is there too
+        CHECK(n[3] == (c.rightLit ? n[2] : 0u));
+    }
+}
