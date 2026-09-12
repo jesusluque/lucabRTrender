@@ -38,6 +38,10 @@ struct MeshInstance {
     bool                                 doubleSided = true;
     uint32_t                             material = 0;     ///< its row in the frame's material records; 0 none
     std::vector<uint32_t>                subsetMaterials;  ///< per GeomSubset of the mesh: its row (0: the instance's)
+    /// The categories it belongs to, one bit each (Hydra's, resolved by the
+    /// light linking scene index). 0: none, which only an unlinked light
+    /// reaches.
+    uint64_t                             categories = 0;
 };
 
 /// Many instances of one mesh whose transforms are already on the device
@@ -53,6 +57,7 @@ struct InstanceSet {
     bool                                 doubleSided = true;
     uint32_t                             material = 0;
     std::vector<uint32_t>                subsetMaterials;
+    uint64_t                             categories = 0;   ///< as MeshInstance's
 };
 
 /// Consecutive instances of one mesh: one draw.

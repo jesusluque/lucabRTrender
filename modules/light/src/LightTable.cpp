@@ -45,6 +45,8 @@ LightRecord LightTable::recordOf(const Light& light) {
     record.coneSoftness = light.coneSoftness;
     record.texture = light.textureId;
     record.sampler = light.sampler;
+    record.lightCategory = light.lightCategory;
+    record.shadowCategory = light.shadowCategory;
     const std::array<float, 12> rows = light.lightToWorld.rows3x4();
     for (size_t k = 0; k < rows.size(); ++k) {
         record.rows[k] = rows[k];

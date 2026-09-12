@@ -26,9 +26,10 @@ struct InstanceRecord {
     float    world[12];
     float    colour[4];
     uint32_t mesh, primId, instanceId, flags;
+    uint32_t categoriesLo, categoriesHi, pad0, pad1;
 };
 static_assert(sizeof(MeshRecord) == 64);
-static_assert(sizeof(InstanceRecord) == 176);
+static_assert(sizeof(InstanceRecord) == 192);
 
 /// shaders/lrt/world/instancing.slang's SetRecord.
 struct SetRecord {
@@ -39,7 +40,7 @@ struct SetRecord {
     uint32_t mesh;
     uint32_t primId;
     uint32_t flags;
-    uint32_t pad[3];
+    uint32_t categoriesLo, categoriesHi, pad0;
 };
 static_assert(sizeof(SetRecord) == 96);
 
@@ -308,6 +309,8 @@ Result<void> GpuScene::update(std::span<const MeshInstance> instances, const ren
             record.instanceId = instance.instanceId;
             // Bit 0: double sided; above bit 8, the material row.
             record.flags = (instance.doubleSided ? 1u : 0u) | (instance.material << 8);
+            record.categoriesLo = static_cast<uint32_t>(instance.categories & 0xFFFFFFFFu);
+            record.categoriesHi = static_cast<uint32_t>(instance.categories >> 32);
             records.push_back(record);
             ++draw.instances;
         }
@@ -382,6 +385,8 @@ Result<void> GpuScene::update(std::span<const MeshInstance> instances, const ren
         record.mesh = mesh;
         record.primId = set.primId;
         record.flags = (set.doubleSided ? 1u : 0u) | (set.material << 8);
+        record.categoriesLo = static_cast<uint32_t>(set.categories & 0xFFFFFFFFu);
+        record.categoriesHi = static_cast<uint32_t>(set.categories >> 32);
         setRecords.push_back(record);
         layout.emplace_back(set.chainRows, set.count);
         draws_.push_back({mesh, singles + setInstances, set.count});

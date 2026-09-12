@@ -49,6 +49,11 @@ struct Light {
     bool         shadow = true;
     float        coneAngle = 0.0F;     ///< shaping: the half angle; 0 or 180 means none
     float        coneSoftness = 0.0F;
+    /// Which category this light lights, and which casts its shadows: the
+    /// bit a prim must have for the light to reach it. kLightUnlinked: every
+    /// prim, which is what a light with no collection means.
+    uint32_t     lightCategory = 0xFFFFFFFFU;
+    uint32_t     shadowCategory = 0xFFFFFFFFU;
     /// A dome's lat-long image, resolved. Empty: the light is its colour.
     std::string  texture;
     /// Filled in by whoever owns the texture store, before the table is set.
@@ -69,9 +74,9 @@ struct LightRecord {
     float    coneSoftness = 0.0F;
     uint32_t texture = 0xFFFFFFFFU;   ///< a dome's image in the texture table; none: its colour alone
     uint32_t sampler = 0;
+    uint32_t lightCategory = 0xFFFFFFFFU;    ///< the bit a prim needs for this light to light it
+    uint32_t shadowCategory = 0xFFFFFFFFU;   ///< and for it to cast this light's shadow
     uint32_t pad0 = 0;
-    uint32_t pad1 = 0;
-    uint32_t pad2 = 0;
     float    rows[12] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0};   ///< light to world, rows of a 3x4
 };
 
@@ -79,6 +84,9 @@ struct LightRecord {
 inline constexpr uint32_t kLightShadow = 1;
 inline constexpr uint32_t kLightNormalize = 2;
 inline constexpr uint32_t kLightTemperature = 4;
+
+/// A light with no collection: it reaches every prim.
+inline constexpr uint32_t kLightUnlinked = 0xFFFFFFFFU;
 
 class LightTable {
 public:

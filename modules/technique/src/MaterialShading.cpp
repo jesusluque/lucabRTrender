@@ -104,6 +104,11 @@ void shadeMaterials(uint3 group: SV_GroupID, uint index: SV_GroupIndex) {
         const uint samples = max(lighting.samples, 1u);
         for (uint k = 0; k < lightCount; ++k) {
             const LightRecord light = lights[k];
+            // Light linking: a light reaches only the categories its
+            // collection resolved to, and one with no collection reaches all.
+            if (!lightLinked(light.lightCategory, s.instance.categoriesLo, s.instance.categoriesHi)) {
+                continue;
+            }
             const bool shadow = (light.flags & kLightShadow) != 0;
             float3 sum = float3(0.0);
             for (uint i = 0; i < samples; ++i) {

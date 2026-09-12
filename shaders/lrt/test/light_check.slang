@@ -24,6 +24,9 @@ RWStructuredBuffer<float4>       result;
 RWStructuredBuffer<uint>         mismatches;   // [samples whose reported pdf differs from lightPdf]
 RWStructuredBuffer<uint>         roundTrip;    // [uv that do not survive a turn through a direction]
 RWStructuredBuffer<float>        pyramid;      // [worst relative gap between a parent and its four children]
+StructuredBuffer<float4>         image;        // a rendered frame, for the link counters
+StructuredBuffer<float>          imageDepth;
+RWStructuredBuffer<uint>         halves;       // [drawn left, lit left, drawn right, lit right]
 RWStructuredBuffer<float>        worst;        // [the worst relative difference]
 ConstantBuffer<LightCheckParams> params;
 
@@ -174,6 +177,36 @@ void lightDraw(uint3 tid: SV_DispatchThreadID) {
                       : binOf(s.wi);
     }
     bins[i] = bin;
+}
+
+/// What a link let through, counted by halves: two prims of different
+/// categories, side by side, and a light that reaches one of them. Drawn says
+/// the geometry is there; lit says the light arrived.
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void lightLinkCounters(uint3 tid: SV_DispatchThreadID) {
+    uint drawnLeft = 0, litLeft = 0, drawnRight = 0, litRight = 0;
+    for (uint y = 0; y < params.thetaBins; ++y) {
+        for (uint x = 0; x < params.phiBins; ++x) {
+            const uint i = y * params.phiBins + x;
+            if (!(imageDepth[i] > 0.0)) {
+                continue;
+            }
+            const float3 c = image[i].rgb;
+            const bool lit = max(max(c.r, c.g), c.b) > 1.0e-4;
+            if (x < params.phiBins / 2) {
+                ++drawnLeft;
+                litLeft += lit ? 1u : 0u;
+            } else {
+                ++drawnRight;
+                litRight += lit ? 1u : 0u;
+            }
+        }
+    }
+    halves[0] = drawnLeft;
+    halves[1] = litLeft;
+    halves[2] = drawnRight;
+    halves[3] = litRight;
 }
 
 /// Does the chain telescope? A descent that splits by luminance is only

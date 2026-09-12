@@ -59,7 +59,9 @@ struct SetRecord {
     uint   mesh;
     uint   primId;
     uint   flags;        // bit 0: double sided
-    uint   pad0; uint pad1; uint pad2;
+    uint   categoriesLo; // what a light's link is tested against
+    uint   categoriesHi;
+    uint   pad0;
 };
 StructuredBuffer<SetRecord>         sets;             // records: in order of `first`
 StructuredBuffer<float4>            setRows;          // records: 3 per instance, every set's chain
@@ -222,5 +224,9 @@ void instanceRecords(uint3 tid: SV_DispatchThreadID) {
     record.primId = set.primId;
     record.instanceId = i - set.first;
     record.flags = set.flags;
+    record.categoriesLo = set.categoriesLo;
+    record.categoriesHi = set.categoriesHi;
+    record.pad0 = 0;
+    record.pad1 = 0;
     records[params.first + i] = record;
 }

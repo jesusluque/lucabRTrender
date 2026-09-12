@@ -30,6 +30,12 @@ public struct InstanceRecord {
     public uint   primId;
     public uint   instanceId;
     public uint   flags;        // bit 0: double sided; bits 8 and up: the material row (0: none)
+    /// The categories this instance belongs to, one bit each: what a light's
+    /// link is tested against. 0: none, which only an unlinked light reaches.
+    public uint   categoriesLo;
+    public uint   categoriesHi;
+    public uint   pad0;
+    public uint   pad1;
 };
 
 public float3 rowsApply(float4 r0, float4 r1, float4 r2, float3 x, float w) {

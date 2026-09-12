@@ -16,6 +16,9 @@ public static const uint kLightDisk    = 2;
 public static const uint kLightRect    = 3;
 public static const uint kLightDome    = 4;
 
+/// A light with no collection reaches every prim.
+public static const uint kLightUnlinked = 0xFFFFFFFF;
+
 public static const uint kLightShadow      = 1;   // casts one
 public static const uint kLightNormalize   = 2;   // intensity is power, not radiance: divide by area
 public static const uint kLightTemperature = 4;   // tint by the blackbody of `temperature`
@@ -32,13 +35,23 @@ public struct LightRecord {
     public float  coneSoftness;
     public uint   texture;       // a dome's lat-long image; 0xFFFFFFFF: its colour alone
     public uint   sampler;
+    public uint   lightCategory;    // the bit a prim needs for this light to light it
+    public uint   shadowCategory;   // and for it to cast this light's shadow
     public uint   pad0;
-    public uint   pad1;
-    public uint   pad2;
     public float4 row0;          // light to world, rows of a 3x4
     public float4 row1;
     public float4 row2;
 };
+
+/// Whether `l` reaches a surface in `categories`: USD resolves a light's
+/// collection into a category the geometry it lights carries, so the test is
+/// one bit -- and a light with no collection carries none and lights all.
+public bool lightLinked(uint category, uint categoriesLo, uint categoriesHi) {
+    if (category == kLightUnlinked) {
+        return true;
+    }
+    return category < 32 ? (categoriesLo & (1u << category)) != 0 : (categoriesHi & (1u << (category - 32))) != 0;
+}
 
 public struct LightSample {
     public float3 wi;         // from the shading point towards the light, unit
