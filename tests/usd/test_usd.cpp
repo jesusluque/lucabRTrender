@@ -3479,3 +3479,50 @@ TEST_CASE("a catmullClark cube refines through Hydra, its limit the same at ever
     CHECK(covered[1] < covered[0]);                           // the corners pull in
     CHECK(covered[2] < covered[0]);
 }
+
+// Coordinate systems through Hydra: UsdShadeCoordSysAPI binds a name on
+// the mesh to an xformable prim; hdsi makes a coordSys prim under that
+// target, the delegate takes the sprim, and the mesh's Sync reads its
+// bindings with the target's transform -- the name and the translation
+// arrive exactly. What a material does with them is not yet wired: this
+// is the resolution the plan asked for, by the scene index's prim and not
+// by parsing paths.
+TEST_CASE("a coordinate system bound to a mesh resolves to its target's transform through Hydra",
+          "[usd][gpu][mesh][coordSys]") {
+    LRT_REQUIRE_GPU(gpu);
+    const fs::path path = scratch("coordsys.usda");
+    {
+        std::ofstream out(path);
+        out << "#usda 1.0\n(\n    upAxis = \"Y\"\n)\n"
+               "def Xform \"Frame\"\n{\n"
+               "    double3 xformOp:translate = (1, 2, 3)\n"
+               "    uniform token[] xformOpOrder = [\"xformOp:translate\"]\n}\n"
+               "def Mesh \"Square\" (\n    prepend apiSchemas = [\"CoordSysAPI:paint\"]\n)\n{\n"
+               "    int[] faceVertexCounts = [4]\n"
+               "    int[] faceVertexIndices = [0, 1, 2, 3]\n"
+               "    point3f[] points = [(-1, -1, -5), (1, -1, -5), (1, 1, -5), (-1, 1, -5)]\n"
+               "    uniform token subdivisionScheme = \"none\"\n"
+               "    rel coordSys:paint:binding = </Frame>\n}\n"
+               "def Camera \"Camera\"\n{\n"
+               "    float focalLength = 35\n"
+               "    float horizontalAperture = 24.576\n    float verticalAperture = 18.432\n"
+               "    float2 clippingRange = (0.1, 1000)\n}\n";
+    }
+    auto renderer = usd::StageRenderer::open(path);
+    if (!renderer) FAIL(renderer.error().toString());
+    auto image = (*renderer)->render("/Camera", 0.0, 64, 48);
+    if (!image) FAIL(image.error().toString());
+    const std::vector<usd::CoordSysBinding> bindings = (*renderer)->coordSysBindings("/Square");
+    std::printf("  %zu coordinate systems bound to /Square", bindings.size());
+    for (const usd::CoordSysBinding& b : bindings) {
+        const render::Vec3 t = b.toWorld.translation();
+        std::printf("; '%s' at (%.1f, %.1f, %.1f)", b.name.c_str(), t.x, t.y, t.z);
+    }
+    std::printf("\n");
+    REQUIRE(bindings.size() == 1);
+    CHECK(bindings[0].name == "paint");
+    const render::Vec3 t = bindings[0].toWorld.translation();
+    CHECK(t.x == 1.0);
+    CHECK(t.y == 2.0);
+    CHECK(t.z == 3.0);
+}

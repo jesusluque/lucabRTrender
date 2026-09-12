@@ -247,6 +247,8 @@ public:
     /// The mesh pools' generation (a repack each) and positions revision (a
     /// deformation in place each), so a host can tell which one a change was.
     [[nodiscard]] uint64_t meshGeneration() const noexcept;
+    /// The coordinate systems bound to a mesh prim, as its last Sync read them.
+    [[nodiscard]] std::vector<CoordSysBinding> coordSysOf(const pxr::SdfPath& id) const;
     [[nodiscard]] uint64_t meshPositionsRevision() const noexcept;
     void setInstancer(const pxr::SdfPath& id, const pxr::SdfPath& parent, InstancerArrays arrays);
     void removeInstancer(const pxr::SdfPath& id);
@@ -300,7 +302,7 @@ private:
     const render::RenderTargets*              lastTargets_ = nullptr;
     render::RenderTargets                     pointLayer_;
 
-    std::mutex                                guard_;
+    mutable std::mutex                        guard_;
     std::map<pxr::SdfPath, SplatEntry>        splats_;
     std::map<pxr::SdfPath, PointsEntry>       points_;
     std::map<pxr::SdfPath, MeshEntry>         meshes_;

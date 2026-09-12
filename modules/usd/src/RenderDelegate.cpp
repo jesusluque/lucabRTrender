@@ -1,5 +1,6 @@
 // Copyright (c) 2026 lucabRTrender contributors.
 #include <pxr/imaging/hd/retainedDataSource.h>
+#include <pxr/imaging/hd/coordSys.h>
 #include <pxr/imaging/hd/extComputation.h>
 #include <pxr/imaging/hd/sceneIndexPluginRegistry.h>
 #include <pxr/imaging/hdsi/coordSysPrimSceneIndex.h>
@@ -171,7 +172,7 @@ TfTokenVector const& HdLrtRenderDelegate::GetSupportedSprimTypes() const {
                                      HdPrimTypeTokens->sphereLight, HdPrimTypeTokens->diskLight,
                                      HdPrimTypeTokens->rectLight,   HdPrimTypeTokens->distantLight,
                                      HdPrimTypeTokens->domeLight,   HdPrimTypeTokens->cylinderLight,
-                                     HdPrimTypeTokens->extComputation};
+                                     HdPrimTypeTokens->extComputation, HdPrimTypeTokens->coordSys};
     return types;
 }
 
@@ -377,6 +378,11 @@ HdSprim* HdLrtRenderDelegate::CreateSprim(TfToken const& typeId, SdfPath const& 
         // itself, on the device.
         return new HdExtComputation(id);
     }
+    if (typeId == HdPrimTypeTokens->coordSys) {
+        // A coordinate system a material may name: the prim hdsi made for
+        // it carries the name and the transform; a mesh reads its bindings.
+        return new HdCoordSys(id);
+    }
     return typeId == HdPrimTypeTokens->camera ? new HdCamera(id) : nullptr;
 }
 
@@ -389,6 +395,9 @@ HdSprim* HdLrtRenderDelegate::CreateFallbackSprim(TfToken const& typeId) {
     }
     if (typeId == HdPrimTypeTokens->extComputation) {
         return new HdExtComputation(SdfPath::EmptyPath());
+    }
+    if (typeId == HdPrimTypeTokens->coordSys) {
+        return new HdCoordSys(SdfPath::EmptyPath());
     }
     return typeId == HdPrimTypeTokens->camera ? new HdCamera(SdfPath::EmptyPath()) : nullptr;
 }

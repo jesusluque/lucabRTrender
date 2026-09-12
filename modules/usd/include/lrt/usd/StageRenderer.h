@@ -15,6 +15,7 @@
 
 #include "lrt/core/Result.h"
 #include "lrt/render/Camera.h"
+#include "lrt/usd/PrimData.h"
 #include "lrt/render/TileRasterizer.h"
 #include "lrt/scene/GpuClouds.h"
 #include "lrt/technique/DisplayTransform.h"
@@ -137,6 +138,9 @@ public:
     /// The mesh pools' generation and positions revision (Engine's): a
     /// deformation raises the second and not the first.
     [[nodiscard]] uint64_t meshGeneration() const;
+    /// The coordinate systems bound to a mesh prim (UsdShadeCoordSysAPI):
+    /// names and transforms, as the delegate resolved them.
+    [[nodiscard]] std::vector<CoordSysBinding> coordSysBindings(const std::string& prim) const;
     [[nodiscard]] uint64_t meshPositionsRevision() const;
 
     /// The Hydra outputs renders produce, colour and depth always among them

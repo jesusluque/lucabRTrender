@@ -14,6 +14,7 @@ namespace {
 /// dispatches to whatever materials the frame compiled.
 const char* kPrelude = R"(
 import lrt.light.lights_image;
+import lrt.light.light_bvh;
 
 struct PathParams {
     uint samples;      // paths a pixel this call
@@ -48,6 +49,9 @@ static const float3 kPathLuminance = float3(0.2126, 0.7152, 0.0722);
 ConstantBuffer<CameraParams>   camera;
 StructuredBuffer<LightRecord>  lights;
 uniform uint                   lightCount;
+uniform uint                   lightNodeBase;
+uniform uint                   lightTreeNodes;
+uniform uint                   lightUnboundedCount;
 ConstantBuffer<PathParams>     path;
 
 /// One round of PCG's output permutation over an LCG step: a hash of a
@@ -323,7 +327,10 @@ float3 gatherLight(Shaded sh, uint2 pixel, uint sample, uint bounce, uint mask) 
         return float3(0.0);
     }
     const float pick = random(pixel, sample, bounce, 11u);
-    const LightChoice choice = chooseLight(lights, lightCount, pick);
+    const LightChoice choice = path.chooseLights == 2
+                                   ? chooseLightAny(iesValues, lightNodeBase, lightTreeNodes, lightUnboundedCount,
+                                                    sh.inputs.positionWorld, sh.inputs.normalWorld, pick)
+                                   : chooseLight(lights, lightCount, pick);
     if (!choice.valid) {
         return float3(0.0);
     }
@@ -690,7 +697,8 @@ Result<void> PathTracer::trace(gpu::CommandBatch& batch, const VisibilityTargets
         cursor["path"]["bounces"].setData(settings.bounces);
         cursor["path"]["seed"].setData(settings.seed);
         cursor["path"]["accumulated"].setData(already);
-        cursor["path"]["chooseLights"].setData(uint32_t{frame.chooseLights ? 1u : 0u});
+        const bool tree = frame.chooseLights && frame.lightBvh && frame.lights != nullptr && frame.lights->hasBvh();
+        cursor["path"]["chooseLights"].setData(uint32_t{tree ? 2u : frame.chooseLights ? 1u : 0u});
     });
     accumulated_ = already + samples;
     lastErrorTarget_ = settings.errorTarget;

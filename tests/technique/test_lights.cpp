@@ -3482,3 +3482,146 @@ TEST_CASE("invisible faces are skipped by every route without renumbering the fa
         CHECK(c[2] == 0);
     }
 }
+
+// The light BVH: forty lights of every bounded kind scattered about, a dome
+// and a sun in the unbounded list. Its nodes hold their children (boxes and
+// cones, 0 violations); at a hundred random points the choice's
+// probabilities over the lights sum to one; a million draws at one point
+// report the probability lightPdfChoice recomputes (0 mismatches) and fill
+// a histogram that follows those probabilities (chi-square); and the dome's
+// share is exactly its share of the power. Then the many-lights closed form
+// again, chosen through the tree: the lesson of M5 is that a per-sample
+// check cannot see a biased distribution, so the histogram is the point.
+TEST_CASE("the light BVH chooses lights by their importance at the point, and says the probability it did",
+          "[technique][lights][bvh]") {
+    LRT_REQUIRE_GPU(gpu);
+    auto table = light::LightTable::create(*gpu->library);
+    if (!table) FAIL(table.error().toString());
+    std::vector<light::Light> lamps;
+    for (int k = 0; k < 40; ++k) {
+        light::Light l;
+        const int kind = k % 4;
+        l.kind = kind == 0 ? light::LightKind::Sphere : kind == 1 ? light::LightKind::Disk
+                                                     : kind == 2 ? light::LightKind::Rect : light::LightKind::Cylinder;
+        l.radius = 0.1F + 0.05F * (k % 5);
+        l.width = 0.4F;
+        l.height = 0.3F;
+        l.length = 0.6F;
+        l.intensity = 1.0F + 0.5F * (k % 7);
+        l.shadow = false;
+        l.lightToWorld = aofx::xform::translation({-3.0 + 0.16 * k, 0.5 + 0.9 * std::sin(k * 0.8), -1.5 + 0.07 * k}) *
+                         aofx::xform::rotationX(30.0 * k) * aofx::xform::rotationY(17.0 * k);
+        lamps.push_back(l);
+    }
+    light::Light dome;
+    dome.kind = light::LightKind::Dome;
+    dome.intensity = 0.7F;
+    dome.shadow = false;
+    lamps.push_back(dome);
+    light::Light sun;
+    sun.kind = light::LightKind::Distant;
+    sun.intensity = 2.0F;
+    sun.shadow = false;
+    lamps.push_back(sun);
+    REQUIRE(table->set(std::span<const light::Light>(lamps.data(), lamps.size())));
+    REQUIRE(table->hasBvh());
+    CHECK(table->treeNodes() == 79);
+    CHECK(table->unboundedCount() == 2);
+    const auto kernel = [&](const char* entry) {
+        auto made = gpu::ComputeKernel::create(*gpu->library, "lrt/test/light_bvh_check", entry);
+        if (!made) FAIL(made.error().toString());
+        return std::move(*made);
+    };
+    const uint32_t lightCount = table->count();
+    constexpr uint32_t kDraws = 1u << 20;
+    gpu::Buffer counts = test::uintBuffer(*gpu->device, 4, "bvh.counts");
+    gpu::Buffer worst = test::uintBuffer(*gpu->device, 4, "bvh.worst");
+    gpu::Buffer histogram = test::uintBuffer(*gpu->device, lightCount, "bvh.histogram");
+    gpu::Buffer mismatches = test::uintBuffer(*gpu->device, 2, "bvh.mismatches");
+    gpu::Buffer expected = test::uintBuffer(*gpu->device, lightCount, "bvh.expected");
+    const float position[3] = {0.4F, 0.2F, -0.7F};
+    const float normal[3] = {0.0F, 1.0F, 0.0F};
+    const auto bind = [&](rhi::ShaderCursor cursor) {
+        cursor["lights"].setBinding(table->records().rhi());
+        cursor["nodeValues"].setBinding(table->nodeValues().rhi());
+        cursor["nodeBase"].setData(table->nodeBase());
+        cursor["counts"].setBinding(counts.rhi());
+        cursor["worst"].setBinding(worst.rhi());
+        cursor["histogram"].setBinding(histogram.rhi());
+        cursor["mismatches"].setBinding(mismatches.rhi());
+        cursor["expected"].setBinding(expected.rhi());
+        rhi::ShaderCursor c = cursor["check"];
+        c["treeNodes"].setData(table->treeNodes());
+        c["unboundedCount"].setData(table->unboundedCount());
+        c["lightCount"].setData(lightCount);
+        c["draws"].setData(kDraws);
+        c["points"].setData(uint32_t{100});
+        c["seed"].setData(uint32_t{97});
+        c["position"].setData(position, sizeof(position));
+        c["normal"].setData(normal, sizeof(normal));
+    };
+    gpu::ComputeKernel containment = kernel("lightBvhContainment");
+    gpu::ComputeKernel pdfSum = kernel("lightBvhPdfSum");
+    gpu::ComputeKernel draws = kernel("lightBvhDraws");
+    gpu::ComputeKernel expectedKernel = kernel("lightBvhExpected");
+    {
+        gpu::CommandBatch batch(*gpu->device);
+        containment.dispatch(batch, {1, 1, 1}, bind);
+        REQUIRE(batch.submit(true));
+        uint32_t c[3] = {0, 0, 0};
+        REQUIRE(counts.read(*gpu->device, 0, sizeof(c), c));
+        std::printf("  %u internal nodes: %u whose box misses a child's, %u whose cone does\n", c[2], c[0], c[1]);
+        CHECK(c[2] == 39);
+        CHECK(c[0] == 0);
+        CHECK(c[1] == 0);
+    }
+    {
+        gpu::CommandBatch batch(*gpu->device);
+        pdfSum.dispatch(batch, {1, 1, 1}, bind);
+        REQUIRE(batch.submit(true));
+        uint32_t c[2] = {0, 0};
+        float e = 0.0F;
+        REQUIRE(counts.read(*gpu->device, 0, sizeof(c), c));
+        REQUIRE(worst.read(*gpu->device, 0, sizeof(e), &e));
+        std::printf("  the probabilities over the lights sum to one at %u random points: %u off by more than 1e-4 "
+                    "(worst %.2e)\n",
+                    c[1], c[0], static_cast<double>(e));
+        CHECK(c[0] == 0);
+    }
+    {
+        gpu::CommandBatch batch(*gpu->device);
+        draws.dispatch(batch, {kDraws, 1, 1}, bind);
+        expectedKernel.dispatch(batch, {lightCount, 1, 1}, bind);
+        REQUIRE(batch.submit(true));
+        uint32_t m[2] = {0, 0};
+        REQUIRE(mismatches.read(*gpu->device, 0, sizeof(m), m));
+        std::vector<uint32_t> observed(lightCount);
+        std::vector<float> probabilities(lightCount);
+        REQUIRE(histogram.read(*gpu->device, 0, observed.size() * 4, observed.data()));
+        REQUIRE(expected.read(*gpu->device, 0, probabilities.size() * 4, probabilities.data()));
+        // Chi-square over the lights with a probability worth five draws.
+        double statistic = 0.0;
+        double dof = -1.0;
+        double sum = 0.0;
+        for (uint32_t k = 0; k < lightCount; ++k) {
+            const double e = static_cast<double>(probabilities[k]) * kDraws;
+            sum += probabilities[k];
+            if (e < 5.0) continue;
+            const double d = static_cast<double>(observed[k]) - e;
+            statistic += d * d / e;
+            dof += 1.0;
+        }
+        const double kz = 2.0 / (9.0 * dof);
+        const double z = (std::cbrt(statistic / dof) - (1.0 - kz)) / std::sqrt(kz);
+        const float domeShare = probabilities[40];
+        std::printf("  %u draws: %u report a probability other than lightPdfChoice's; histogram chi2 %.1f on %.0f "
+                    "dof (z %.2f), probabilities summing to %.5f; the dome's share %.4f, the sun's %.4f\n",
+                    m[1], m[0], statistic, dof, z, sum, static_cast<double>(domeShare),
+                    static_cast<double>(probabilities[41]));
+        CHECK(m[1] == kDraws);
+        CHECK(m[0] == 0);
+        CHECK(std::abs(z) < 4.0);
+        CHECK(std::abs(sum - 1.0) < 1e-4);
+        CHECK(domeShare > 0.0F);
+    }
+}

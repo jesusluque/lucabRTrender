@@ -345,6 +345,12 @@ bool Engine::pathConverged() const noexcept {
     return pathState_.adaptive && pathProgress_.covered > 0 && pathProgress_.converged == pathProgress_.covered;
 }
 
+std::vector<CoordSysBinding> Engine::coordSysOf(const pxr::SdfPath& id) const {
+    const std::lock_guard<std::mutex> held(guard_);
+    const auto found = meshes_.find(id);
+    return found != meshes_.end() ? found->second.look.coordSys : std::vector<CoordSysBinding>{};
+}
+
 uint64_t Engine::meshGeneration() const noexcept {
     return scene_.has_value() ? scene_->generation() : 0;
 }

@@ -2078,7 +2078,7 @@ the two are not mixed, which is also how `lrt live` already worked: its
 `sched` clock decides when frame N is drawn, and `--start` what frame N
 is. Nothing here is measured beyond the frame times the panel shows.
 
-## Complete USD: the breadth of geometry (M8, in progress)
+## Complete USD: the breadth of geometry (M8)
 
 ### hdsi's conversions ahead of the delegate
 
@@ -2322,6 +2322,90 @@ normals are the refined surface's smooth ones, not limit normals; Storm
 was not used as an image oracle here -- the closed forms above are the
 checks, and Storm's own OpenSubdiv would have been checked against them
 the same way.
+
+### The light BVH
+
+With `lrt:chooseLights` a sample takes one light; it took it by power
+alone, which is exact and blind to where the point is. Now the frame's
+bounded lights (sphere, disk, rect, cylinder) sit in a BVH
+(`light_bvh.slang`), each node a box, an orientation cone (Conty and
+Kulla 2018's union of its children's) and the power under it, and a
+shading point descends it choosing each child by its importance there --
+power over distance squared, within what the cone allows, times the
+surface's own cosine with the box's angular uncertainty allowed for --
+so a light that cannot reach the point is rarely chosen and one beside it
+often. Dome and distant lights are unbounded and never enter the tree:
+they sit in a list after it in the same buffer, chosen against the tree
+by their share of the power, so a dome never vanishes in silence. The
+probability of the choice is the product of the branch fractions, and
+`lightPdfChoiceAny` recomputes it for any light by walking its leaf's
+parents; where neither child of a node can light the point by its bound
+(the parent's looser bound let the descent in) the choice falls back to
+power, so no probability is lost.
+
+The build (`light_bvh_build.slang`, `LightTable::buildBvh`) reuses the
+compute LBVH's own kernels over the lights' boxes -- Morton codes within
+bounds a kernel found, `bvh_hierarchy`, `bvh_refit` settling the boxes --
+then packs the hierarchy into nodes, links the parents and settles power
+and cones up the tree until nothing changes. The nodes are sixteen floats
+each **inside the IES values buffer**, after the profiles, and the shading
+kernels read them through `lightNodeBase`: a buffer of their own put the
+shading kernel at `buffer(38)` against Metal's thirty-one. And the build's
+kernels live in a module of their own because a Slang module's global
+parameters join every kernel that imports it -- with the build's buffers
+in `light_bvh.slang`, importing the tree to choose from it cost the
+shading kernels ten bindings they never used, and the same error came
+back with no new buffer in sight.
+
+**Checked** in `test_lights` with forty lights of the four bounded kinds
+scattered and turned, a dome and a sun: 0 of 39 internal nodes whose box
+or cone misses a child's; at a hundred random points and normals the
+choice's probabilities over the 42 lights sum to one (worst 3.6e-7 off);
+a million draws at one point all report the probability
+`lightPdfChoiceAny` recomputes for the light drawn (0 mismatches), and
+their histogram follows those probabilities -- chi-square z 0.62 on 29
+degrees of freedom, which is what a per-sample check cannot see and M5's
+lesson asked for; the dome's share is 0.0168, the sun's 0.0479. Then the
+many-lights closed form, chosen through the tree, holds as it did by
+power. A first cone union swapped the cones the wrong way round (13 of
+39 cones failed to hold their children) and a first descent returned
+nothing where both children's bounds gave zero, losing 2.2% of the
+probability (66 of 100 points summed short); both were found by these
+checks, not by an image.
+
+**Not done.** Light instancing's copies each take a leaf (a thousand
+copies are a thousand leaves); a light's cone ignores an IES profile's
+shape; the tree is rebuilt whenever the table is set, which is every
+frame the lights change and never when they do not. The table's tree
+uniforms are set only where a kernel declares them: the first `bind`
+that set them everywhere put a null cursor under two kernels that sample
+by power alone (the IES check, the dome's plane) and both crashed the
+host, which the suite found and a single test would not have.
+
+### Coordinate systems, resolved by the scene index's prim
+
+A material may name a coordinate system (`UsdShadeCoordSysAPI`: a name on
+the prim, bound to an xformable). `HdsiCoordSysPrimSceneIndex` makes a
+`coordSys` prim under the target with the target's transform, and the
+emulation gives the prim a name of the binding's (`__coordSys_paint`); the
+delegate accepts the `coordSys` sprim (`HdCoordSys`, whose Sync is hd's),
+and a mesh's Sync reads `GetCoordSysBindings` and each binding's transform
+into its `MeshLook` (`CoordSysBinding`: name, to-world), which the engine
+keeps beside the mesh and `StageRenderer::coordSysBindings` reads back.
+The name is what remains of the prim's past the scene index's prefix --
+the prefix is a known constant, not a parsed path -- and the transform is
+the prim's, so a target that moves moves its system with no code of ours
+computing it.
+
+**Checked** through Hydra: a square with `CoordSysAPI:paint` bound to an
+`Xform` translated to (1, 2, 3) reads back one system named `paint` at
+exactly that translation.
+
+**Not done.** No material reads a coordinate system yet: MaterialX's
+`position`/`normal`/`tangent` nodes with a `space` other than object or
+world would take the binding's matrix as a uniform of the compiled module,
+and that is the next step when a graph needs it -- the bookkeeping is what
+the plan asked M8.2 to settle, so that step is a uniform and not a search.
 
 ## Linux, on the 94 (M11's first half)
 

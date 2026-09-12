@@ -184,6 +184,12 @@ uint64_t StageRenderer::meshGeneration() const {
     return engine != nullptr ? engine->meshGeneration() : 0;
 }
 
+std::vector<CoordSysBinding> StageRenderer::coordSysBindings(const std::string& prim) const {
+    const auto* param = static_cast<const HdLrtRenderParam*>(impl_->delegate->GetRenderParam());
+    const Engine* engine = param != nullptr ? param->GetEngine() : nullptr;
+    return engine != nullptr ? engine->coordSysOf(SdfPath(prim)) : std::vector<CoordSysBinding>{};
+}
+
 uint64_t StageRenderer::meshPositionsRevision() const {
     auto* param = static_cast<HdLrtRenderParam*>(impl_->delegate->GetRenderParam());
     const Engine* engine = param != nullptr ? param->GetEngine() : nullptr;

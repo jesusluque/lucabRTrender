@@ -87,6 +87,10 @@ struct MaterialFrame {
     /// the loop it grows with the number of lights, with the choice it does
     /// not, at the price of noise a frame has to average away.
     bool                          chooseLights = false;
+    /// With `chooseLights`: choose through the light BVH -- by power over
+    /// distance within the lights' cones, at the shading point -- where the
+    /// table has one (any bounded light); by power alone otherwise.
+    bool                          lightBvh = true;
 
     [[nodiscard]] bool valid() const noexcept {
         return programs != nullptr && scene != nullptr && records != nullptr && records->valid() && blob != nullptr &&

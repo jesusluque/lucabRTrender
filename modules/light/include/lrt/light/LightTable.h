@@ -16,6 +16,7 @@
 #include "lrt/core/Result.h"
 #include "lrt/gpu/Buffer.h"
 #include "lrt/gpu/ComputeKernel.h"
+#include "lrt/gpu/algo/RadixSort.h"
 
 #include <memory>
 #include <optional>
@@ -150,8 +151,18 @@ public:
     [[nodiscard]] bool     anyDome() const noexcept { return domes_; }
     [[nodiscard]] const gpu::Buffer& records() const noexcept { return records_; }
 
-    /// `lights` and `lightCount`, by name.
+    /// `lights` and `lightCount`, by name; and the light BVH's `lightNodes`,
+    /// `lightTreeNodes` and `lightUnboundedCount`.
     void bind(rhi::ShaderCursor cursor) const;
+    /// Whether the frame's lights have a tree to choose from: any bounded
+    /// light at all. A frame of only domes and suns chooses by power.
+    [[nodiscard]] bool hasBvh() const noexcept { return treeNodes_ > 0; }
+    /// The tree's nodes live in the IES values buffer, sixteen floats each
+    /// from `nodeBase`: a kernel on Metal binds thirty-one buffers at most.
+    [[nodiscard]] const gpu::Buffer& nodeValues() const noexcept { return iesValues_; }
+    [[nodiscard]] uint32_t nodeBase() const noexcept { return nodeBase_; }
+    [[nodiscard]] uint32_t treeNodes() const noexcept { return treeNodes_; }
+    [[nodiscard]] uint32_t unboundedCount() const noexcept { return unbounded_; }
 
     /// The record a light becomes, for tests and for the table itself.
     [[nodiscard]] static LightRecord recordOf(const Light& light);
@@ -164,6 +175,16 @@ private:
     std::optional<gpu::ComputeKernel> instances_;    ///< light_instances: an instanced light's placements
     gpu::Buffer  iesRecords_;
     gpu::Buffer  iesValues_;
+    /// The light BVH (light_bvh.slang): built after the prefix, from the
+    /// bounded lights, with the compute LBVH's own hierarchy and refit
+    /// kernels; the unbounded lights follow the tree in the same buffer.
+    std::optional<gpu::ComputeKernel> bvhLeaves_, bvhPack_, bvhParents_, bvhSettle_, bvhUnbounded_, bvhLeafIndices_;
+    std::optional<gpu::ComputeKernel> hierarchy_, refit_, countNonzero_, boundsChunks_, boundsReduce_;
+    std::optional<gpu::RadixSort>     sort_;
+    uint32_t     nodeBase_ = 0;
+    uint32_t     treeNodes_ = 0;
+    uint32_t     unbounded_ = 0;
+    [[nodiscard]] Result<void> buildBvh(const std::vector<uint32_t>& bounded, const std::vector<uint32_t>& unbounded);
     uint32_t     iesCount_ = 0;
     uint32_t     count_ = 0;
     uint32_t     capacity_ = 0;

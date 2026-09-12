@@ -144,6 +144,14 @@ struct InstancerLink {
     pxr::VtArray<int> indices;
 };
 
+/// A coordinate system bound to a prim (UsdShadeCoordSysAPI), by the name a
+/// material refers to it by, with its transform to world -- resolved by the
+/// coordSys prim hdsi makes under the target, not by parsing paths.
+struct CoordSysBinding {
+    std::string  name;
+    render::Mat4 toWorld = render::Mat4::identity();
+};
+
 /// What a mesh looks like before materials: displayColor, displayOpacity.
 struct MeshLook {
     std::array<float, 3> displayColor{0.18F, 0.18F, 0.18F};
@@ -154,6 +162,7 @@ struct MeshLook {
     /// into: the categories a light's link is tested against. Empty: only an
     /// unlinked light reaches it.
     std::vector<pxr::TfToken> categories;
+    std::vector<CoordSysBinding> coordSys;   ///< the prim's bound coordinate systems
 };
 
 /// The bytes of a float array a VtValue holds (float or half, any tuple

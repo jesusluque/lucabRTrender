@@ -11,6 +11,7 @@ namespace {
 
 const char* kKernelPrelude = R"(
 import lrt.light.lights_image;
+import lrt.light.light_bvh;
 
 struct LightingParams {
     uint  samples;
@@ -24,6 +25,9 @@ RWStructuredBuffer<float4>    colour;
 RWStructuredBuffer<float>     depth;
 ConstantBuffer<CameraParams>  camera;
 StructuredBuffer<LightRecord> lights;
+uniform uint                  lightNodeBase;
+uniform uint                  lightTreeNodes;
+uniform uint                  lightUnboundedCount;
 uniform uint                  lightCount;
 ConstantBuffer<LightingParams> lighting;
 
@@ -151,7 +155,11 @@ void shadeMaterials(uint3 group: SV_GroupID, uint index: SV_GroupIndex) {
         for (uint i = 0; i < samples; ++i) {
             const float2 u = sampleAt(tid, 0, i);
             const float pick = sampleAt(tid, 1, i).x;
-            const LightChoice choice = chooseLight(lights, lightCount, pick);
+            const LightChoice choice =
+                lighting.chooseLights == 2
+                    ? chooseLightAny(iesValues, lightNodeBase, lightTreeNodes, lightUnboundedCount,
+                                     inputs.positionWorld, inputs.normalWorld, pick)
+                    : chooseLight(lights, lightCount, pick);
             if (!choice.valid) {
                 continue;
             }
@@ -270,7 +278,8 @@ Result<void> MaterialShading::shade(gpu::CommandBatch& batch, const VisibilityTa
         if (frame.lights != nullptr) {
             frame.lights->bind(cursor);
             cursor["lighting"]["samples"].setData(frame.samples);
-            cursor["lighting"]["chooseLights"].setData(uint32_t{frame.chooseLights ? 1u : 0u});
+            const bool tree = frame.chooseLights && frame.lightBvh && frame.lights->hasBvh();
+            cursor["lighting"]["chooseLights"].setData(uint32_t{tree ? 2u : frame.chooseLights ? 1u : 0u});
         }
         if (frame.shadows != nullptr) {
             cursor["shadowScene"].setBinding(frame.shadows);

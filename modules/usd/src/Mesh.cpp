@@ -2,6 +2,7 @@
 #include "Mesh.h"
 
 #include <algorithm>
+#include <cstring>
 
 #include <pxr/base/gf/vec3f.h>
 #include <pxr/imaging/hd/changeTracker.h>
@@ -225,6 +226,25 @@ void HdLrtMesh::Sync(HdSceneDelegate* delegate, HdRenderParam* renderParam, HdDi
         // into. Empty unless something links to it.
         const VtArray<TfToken> categories = delegate->GetCategories(id);
         l.categories.assign(categories.begin(), categories.end());
+        // The coordinate systems bound to it: each a coordSys prim (hdsi's,
+        // "<target>.__coordSys:NAME" -- "__coordSys_NAME" once the emulation
+        // has made a prim name of it -- or a host's "<prim>.coordSys:NAME"),
+        // its name the id's last part past that prefix, its transform the
+        // prim's.
+        if (const HdIdVectorSharedPtr bindings = delegate->GetCoordSysBindings(id)) {
+            for (const SdfPath& coordSys : *bindings) {
+                std::string name = coordSys.GetName();
+                for (const char* prefix : {"__coordSys", "coordSys"}) {
+                    const size_t length = std::strlen(prefix);
+                    if (name.rfind(prefix, 0) == 0 && name.size() > length + 1 &&
+                        (name[length] == ':' || name[length] == '_')) {
+                        name = name.substr(length + 1);
+                        break;
+                    }
+                }
+                l.coordSys.push_back({name, lrt::usd::fromUsd(delegate->GetTransform(coordSys))});
+            }
+        }
         look = l;
     }
     lrt::render::Mat4 transform;
