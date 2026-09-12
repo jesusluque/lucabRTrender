@@ -18,6 +18,7 @@
 #include "lrt/gpu/RayTracingKernel.h"
 #include "lrt/gpu/Texture.h"
 #include "lrt/gpu/algo/Mips.h"
+#include "lrt/core/Platform.h"
 #include "lrt/render/ReferenceRenderer.h"
 
 using namespace lrt;
@@ -579,3 +580,129 @@ TEST_CASE("an eight-bit texture read back through the same uint view holds what 
     std::printf("  packed round trip through the uint view: %u of %u texels differ\n", out[0], out[1]);
     CHECK(out[0] == 0u);
 }
+
+// A Metal buffer the platform makes with hazard tracking -- what OIDN will
+// share and slang-rhi will not make -- wrapped for slang-rhi, written and read
+// by kernels, and blitted. The denoiser's staging, checked on its own so an
+// OIDN result can be told from a copy that never happened. What it found:
+// slang-rhi's Metal copyBuffer does nothing, silently, with a wrapped buffer
+// on either side (4095 of 4096 words untouched both ways), while kernels read
+// and write the same buffer exactly. The kernel path is what is asserted; the
+// blit numbers are printed as the record of the defect.
+TEST_CASE("a tracked Metal buffer is read and written by kernels, and not by slang-rhi's blit",
+          "[gpu][platform][metal]") {
+    LRT_REQUIRE_GPU(gpu);
+    if (gpu->device->backend() != gpu::Backend::Metal) {
+        SKIP("Metal only: the tracked buffer is a Metal object");
+    }
+    const uint32_t count = 4096;
+    std::vector<uint32_t> values(count);
+    for (uint32_t i = 0; i < count; ++i) {
+        values[i] = i * 2654435761u;
+    }
+    auto source = gpu::Buffer::fromSpan<uint32_t>(*gpu->device, values, "tracked.source");
+    REQUIRE(source);
+    gpu::Buffer back = test::uintBuffer(*gpu->device, count, "tracked.back");
+    void* native = platform::newTrackedMetalBuffer(reinterpret_cast<void*>(gpu->device->native().device.value),
+                                                   uint64_t{count} * sizeof(uint32_t));
+    REQUIRE(native != nullptr);
+    rhi::NativeHandle handle;
+    handle.type = rhi::NativeHandleType::MTLBuffer;
+    handle.value = reinterpret_cast<uint64_t>(native);
+    gpu::BufferDesc desc;
+    desc.bytes = uint64_t{count} * sizeof(uint32_t);
+    desc.elementBytes = sizeof(uint32_t);
+    desc.label = "tracked.staging";
+    auto staging = gpu::Buffer::wrap(*gpu->device, handle, desc);
+    REQUIRE(staging);
+    {
+        gpu::CommandBatch batch(*gpu->device);
+        batch.encoder()->copyBuffer(staging->rhi(), 0, source->rhi(), 0, desc.bytes);
+        REQUIRE(batch.submit(true));
+    }
+    // Which half: the wrapped buffer read straight from a kernel after the
+    // copy in, before the copy out.
+    auto afterIn = render::countDifferent(*gpu->library, *source, *staging, count);
+    REQUIRE(afterIn);
+    std::printf("  %llu of %u words differ between the source and the tracked buffer after the copy in\n",
+                static_cast<unsigned long long>(*afterIn), count);
+    {
+        gpu::CommandBatch batch(*gpu->device);
+        batch.encoder()->copyBuffer(back.rhi(), 0, staging->rhi(), 0, desc.bytes);
+        REQUIRE(batch.submit(true));
+    }
+    auto differing = render::countDifferent(*gpu->library, *source, back, count);
+    REQUIRE(differing);
+    std::printf("  %llu of %u words differ after a copy in and a copy out of a tracked buffer\n",
+                static_cast<unsigned long long>(*differing), count);
+
+    // Which operation: a kernel writes the tracked buffer (rngFingerprint
+    // writes values[at] = at), a kernel reads it back against the pattern,
+    // and a blit copies it out.
+    std::vector<uint32_t> ramp(count);
+    for (uint32_t i = 0; i < count; ++i) {
+        ramp[i] = i;
+    }
+    auto pattern = gpu::Buffer::fromSpan<uint32_t>(*gpu->device, ramp, "tracked.ramp");
+    REQUIRE(pattern);
+    gpu::Buffer scratchLo = test::uintBuffer(*gpu->device, count, "tracked.lo");
+    gpu::Buffer scratchHi = test::uintBuffer(*gpu->device, count, "tracked.hi");
+    gpu::Buffer scratchCounts = test::uintBuffer(*gpu->device, 2, "tracked.counts");
+    auto writer = gpu::ComputeKernel::create(*gpu->library, "lrt/test/rng_probe", "rngFingerprint");
+    if (!writer) FAIL(writer.error().toString());
+    {
+        gpu::CommandBatch batch(*gpu->device);
+        writer->dispatch(batch, {count, 1, 1}, [&](rhi::ShaderCursor cursor) {
+            cursor["keysLo"].setBinding(scratchLo.rhi());
+            cursor["keysHi"].setBinding(scratchHi.rhi());
+            cursor["values"].setBinding(staging->rhi());
+            cursor["counts"].setBinding(scratchCounts.rhi());
+            cursor["probe"]["width"].setData(uint32_t{64});
+            cursor["probe"]["height"].setData(uint32_t{64});
+            cursor["probe"]["seed"].setData(uint32_t{1});
+            cursor["probe"]["draws"].setData(uint32_t{1});
+        });
+        REQUIRE(batch.submit(true));
+    }
+    auto kernelRead = render::countDifferent(*gpu->library, *pattern, *staging, count);
+    REQUIRE(kernelRead);
+    std::printf("  kernel write then kernel read of the tracked buffer: %llu of %u differ\n",
+                static_cast<unsigned long long>(*kernelRead), count);
+    {
+        gpu::CommandBatch batch(*gpu->device);
+        batch.encoder()->copyBuffer(back.rhi(), 0, staging->rhi(), 0, desc.bytes);
+        REQUIRE(batch.submit(true));
+    }
+    auto blitOut = render::countDifferent(*gpu->library, *pattern, back, count);
+    REQUIRE(blitOut);
+    std::printf("  kernel write then blit out of the tracked buffer: %llu of %u differ\n",
+                static_cast<unsigned long long>(*blitOut), count);
+    CHECK(*kernelRead == 0);
+
+    // And the copy the denoiser actually uses: buffer_copy's kernel, in and
+    // out of the tracked buffer.
+    auto copier = gpu::ComputeKernel::create(*gpu->library, "lrt/technique/buffer_copy", "copyWords");
+    if (!copier) FAIL(copier.error().toString());
+    const auto copyWords = [&](const gpu::Buffer& from, const gpu::Buffer& to) {
+        gpu::CommandBatch batch(*gpu->device);
+        copier->dispatch(batch, {count, 1, 1}, [&](rhi::ShaderCursor cursor) {
+            cursor["src"].setBinding(from.rhi());
+            cursor["dst"].setBinding(to.rhi());
+            cursor["copy"]["words"].setData(count);
+        });
+        REQUIRE(batch.submit(true));
+    };
+    copyWords(*source, *staging);
+    auto kernelIn = render::countDifferent(*gpu->library, *source, *staging, count);
+    REQUIRE(kernelIn);
+    copyWords(*staging, back);
+    auto kernelOut = render::countDifferent(*gpu->library, *source, back, count);
+    REQUIRE(kernelOut);
+    std::printf("  buffer_copy in then out of the tracked buffer: %llu in, %llu out of %u differ\n",
+                static_cast<unsigned long long>(*kernelIn), static_cast<unsigned long long>(*kernelOut), count);
+    CHECK(*kernelIn == 0);
+    CHECK(*kernelOut == 0);
+    staging = gpu::Buffer();
+    platform::releaseMetalBuffer(native);
+}
+

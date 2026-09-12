@@ -1533,6 +1533,44 @@ bounce fixed the same ladder fits **-0.499**. The 3.4x spread was four draws
 of a heavy-tailed statistic read as a switch; the window is calibrated to the
 measured scatter and still rejects no convergence, a floor and a linear law.
 
+### The denoiser, and what it took to hand OIDN a buffer
+
+`technique::Denoiser` denoises now. OIDN's `RT` filter runs on the engine's
+own Metal queue, over the engine's own buffers, and nothing crosses to the
+host. What that took, in the order it was found:
+
+- **OIDN shares only Metal buffers with hazard tracking**, and slang-rhi makes
+  none: its Metal backend forbids `MTLHazardTrackingModeTracked` on every
+  resource and orders its own work. So each image goes through a staging
+  buffer the platform makes tracked -- `platform::newTrackedMetalBuffer`, one
+  Objective-C call in `core/Platform`, beside `matchLayerToBacking`, which is
+  the precedent and the rule -- wrapped for slang-rhi with `Buffer::wrap` and
+  shared with OIDN once.
+- **slang-rhi's Metal `copyBuffer` does nothing with a wrapped buffer on
+  either side.** Silently: 4095 of 4096 words untouched both ways, while a
+  kernel reads and writes the same buffer exactly (0 of 4096). Measured by a
+  test that stays in the tree (`a tracked Metal buffer is read and written by
+  kernels, and not by slang-rhi's blit`). The staging copies are therefore a
+  kernel, `buffer_copy.slang`, word by word.
+- **OIDN writes three of a pixel's four floats.** The alpha in a fresh private
+  buffer is whatever was there, and `compareHdr` compares four channels: the
+  first working run read relMSE 0.15 against a reference at 3.7e-4 for the
+  noisy input, which is what garbage alpha looks like. The output staging is
+  seeded from the input, so the alpha that comes back is the input's.
+- On CUDA the engine's buffers are shared directly (`oidnNewSharedBuffer` on
+  the pointer); no staging, no copies.
+
+**Checked**: sixteen paths against a 4096-path reference, relMSE 3.65e-4
+noisy, **7.17e-5** denoised with the first hit's albedo and normal, 6.27e-5
+without. The plan's fifth check. On a flat Lambert plane with one wall the
+unguided filter does a little better; that is printed, not asserted, since
+nothing says the guides must win on such a scene. The test skips where OIDN is
+not built or the device will not open it -- never a CPU fallback.
+
+Not done here: un-premultiplying the colour before the filter and
+re-premultiplying after (the scene's opacity is 1 everywhere a test looks);
+denoising from the engine on convergence (`lrt:denoise`).
+
 ### Three things the ground did not turn out to be
 
 Measured while surveying, and worth writing down because each one changes what
@@ -1556,7 +1594,7 @@ the rest of M6 has to build:
   `draw` until `pathConverged`, which the tests do and the CLI does not. There
   is no `HdRenderThread` here either: the pass still draws on the thread that
   executes it.
-- Albedo and normal AOVs, adaptive sampling, and the denoiser itself.
+- Adaptive sampling, and the denoiser run from the engine on convergence.
 - Splats in rays, points as spheres, depth of field, lens distortion and
   exposure.
 - **Real MIS**, for when the two strategies overlap: mesh lights. It needs a

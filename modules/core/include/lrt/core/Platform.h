@@ -75,4 +75,11 @@ void sleepPrecisely(std::chrono::nanoseconds duration);
 /// `nsWindow` is an NSWindow*; a no-op elsewhere.
 void matchLayerToBacking(void* nsWindow);
 
+/// A Metal buffer with private storage and hazard tracking, on `mtlDevice`:
+/// what OIDN will share, and what slang-rhi -- which tracks nothing and
+/// orders its own work -- will not make. Null off macOS or on failure. The
+/// caller releases it with releaseMetalBuffer.
+[[nodiscard]] void* newTrackedMetalBuffer(void* mtlDevice, uint64_t bytes);
+void releaseMetalBuffer(void* mtlBuffer);
+
 }   // namespace lrt::platform

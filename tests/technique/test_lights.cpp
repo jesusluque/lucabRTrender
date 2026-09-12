@@ -24,6 +24,7 @@
 #include "lrt/render/ReferenceRenderer.h"
 #include "lrt/material/TextureStore.h"
 #include "lrt/technique/MaterialShading.h"
+#include "lrt/technique/Denoiser.h"
 #include "lrt/technique/PathTracer.h"
 #include "lrt/technique/Visibility.h"
 #include "lrt/world/GpuScene.h"
@@ -2268,5 +2269,158 @@ TEST_CASE("the path tracer's first hit reports its albedo and shading normal", "
     CHECK(c[1] == 0);
     CHECK(c[2] == 0);
     CHECK(c[3] == 0);
+}
+
+// OIDN reduces the error: the plan's fifth check. A noisy frame of sixteen
+// paths, denoised on the device with the engine's own buffers shared -- no
+// copy to the host -- against a 4096-path reference. Guided by the first
+// hit's albedo and normal, and unguided. The reduction is asserted; which of
+// the two guides better is printed, since on a flat Lambert scene there is no
+// reason it must be the guided one.
+TEST_CASE("the denoiser lowers a path traced frame's error against a deep reference",
+          "[technique][path][denoise]") {
+    LRT_REQUIRE_GPU(gpu);
+    const gpu::Caps& caps = gpu->device->caps();
+    if (!caps.rasterization) {
+        SKIP("no rasterisation on this device");
+    }
+    if (!caps.rayQuery || !caps.accelerationStructure) {
+        SKIP("no ray queries on this device");
+    }
+    if (!technique::denoiserBuilt()) {
+        SKIP("built without OIDN");
+    }
+    auto denoiser = technique::Denoiser::create(*gpu->library);
+    if (!denoiser) {
+        SKIP(std::string("no denoiser here: ") + denoiser.error().toString());
+    }
+    std::vector<std::filesystem::path> shaderPaths;
+    for (const std::string& path : gpu->device->shaderSearchPaths()) {
+        shaderPaths.emplace_back(path);
+    }
+    auto compiler = material::MaterialCompiler::create({LRT_MATERIALX_ROOT}, shaderPaths);
+    auto textures = material::TextureStore::create(*gpu->library);
+    auto builder = geom::MeshBuilder::create(*gpu->library);
+    auto scene = world::GpuScene::create(*gpu->library);
+    auto accel = world::RayTracingScene::create(*gpu->library);
+    auto raster = technique::VisibilityRaster::create(*gpu->library);
+    auto programs = technique::MaterialPrograms::create(*gpu->library);
+    auto tracer = technique::PathTracer::create(*gpu->library);
+    auto table = light::LightTable::create(*gpu->device);
+    if (!compiler) FAIL(compiler.error().toString());
+    if (!textures) FAIL(textures.error().toString());
+    if (!builder) FAIL(builder.error().toString());
+    if (!scene) FAIL(scene.error().toString());
+    if (!accel) FAIL(accel.error().toString());
+    if (!raster) FAIL(raster.error().toString());
+    if (!programs) FAIL(programs.error().toString());
+    if (!tracer) FAIL(tracer.error().toString());
+    if (!table) FAIL(table.error().toString());
+    auto lambert = (*compiler)->compileXml(
+        "<?xml version=\"1.0\"?>\n<materialx version=\"1.39\">\n"
+        "  <oren_nayar_diffuse_bsdf name=\"d\" type=\"BSDF\">\n"
+        "    <input name=\"color\" type=\"color3\" value=\"0.8, 0.8, 0.8\" />\n"
+        "    <input name=\"roughness\" type=\"float\" value=\"0\" />\n"
+        "  </oren_nayar_diffuse_bsdf>\n"
+        "  <surface name=\"shader\" type=\"surfaceshader\"><input name=\"bsdf\" type=\"BSDF\" nodename=\"d\" /></surface>\n"
+        "  <surfacematerial name=\"material\" type=\"material\">\n"
+        "    <input name=\"surfaceshader\" type=\"surfaceshader\" nodename=\"shader\" />\n"
+        "  </surfacematerial>\n</materialx>\n");
+    if (!lambert) FAIL(lambert.error().toString());
+    REQUIRE(programs->setModules(std::span<const material::CompiledMaterial>(&*lambert, 1)));
+    REQUIRE(tracer->setPrograms(*programs));
+    const std::vector<float> blob = material::MaterialCompiler::parameters(
+        *lambert, **textures, [](const std::string&) { return 0xFFFFFFFFu; });
+    REQUIRE((*textures)->commit());
+    const std::vector<technique::MaterialRecord> rows{{0, 0, 0, 0}, {1, 0, 0, 0}};
+    auto records = gpu::Buffer::fromSpan<technique::MaterialRecord>(*gpu->device, rows, "materials.records");
+    auto blobBuffer = gpu::Buffer::fromSpan<float>(*gpu->device, blob, "materials.blob");
+    REQUIRE(records);
+    REQUIRE(blobBuffer);
+
+    const uint32_t w = 96;
+    const uint32_t h = 72;
+    render::Camera camera = render::Camera::lookingAt({0.0, 0.0, 0.0}, {0.0, 0.0, -1.0});
+    camera.lens.focal = 35.0;
+    const render::Projection projection = render::projectionFor(camera, w, h);
+    std::array<world::MeshInstance, 2> both;
+    both[0].mesh = lambertSquare(*builder, 1.0F);
+    both[0].objectToWorld = aofx::xform::translation({0.0, 0.0, -5.0});
+    both[0].material = 1;
+    both[1].mesh = lambertSquare(*builder, 1.0F);
+    both[1].objectToWorld = aofx::xform::translation({1.0, 0.0, -4.0}) * aofx::xform::rotationY(-90.0);
+    both[1].material = 1;
+    REQUIRE(scene->update(std::span<const world::MeshInstance>(both.data(), both.size()), projection));
+    REQUIRE(accel->build(*scene));
+    light::Light lamp;
+    lamp.kind = light::LightKind::Sphere;
+    lamp.lightToWorld = aofx::xform::translation({0.0, 0.0, -3.0});
+    lamp.radius = 0.4F;
+    lamp.shadow = false;
+    REQUIRE(table->set(std::span<const light::Light>(&lamp, 1)));
+
+    technique::VisibilityTargets visibility;
+    technique::MaterialFrame frame;
+    frame.programs = &*programs;
+    frame.scene = &*scene;
+    frame.records = &*records;
+    frame.blob = &*blobBuffer;
+    frame.textures = &**textures;
+    frame.lights = &*table;
+    frame.shadows = accel->topLevel();
+    frame.samples = 1;
+    {
+        gpu::CommandBatch batch(*gpu->device);
+        REQUIRE(raster->render(batch, *scene, projection, w, h, visibility));
+        REQUIRE(batch.submit(true));
+    }
+    const auto gather = [&](uint32_t total, uint32_t perPass, uint32_t seed, render::RenderTargets& out,
+                            technique::PathAux* aux) {
+        tracer->restart();
+        technique::PathSettings paths;
+        paths.samples = perPass;
+        paths.bounces = 1;
+        paths.accumulate = true;
+        paths.seed = seed;
+        for (uint32_t taken = 0; taken < total; taken += perPass) {
+            gpu::CommandBatch batch(*gpu->device);
+            REQUIRE(tracer->trace(batch, visibility, projection, frame, paths, out, aux));
+            REQUIRE(batch.submit(true));
+        }
+    };
+    render::RenderTargets reference;
+    render::RenderTargets noisy;
+    technique::PathAux aux;
+    gather(4096, 512, 1000000u, reference, nullptr);
+    gather(16, 16, 1u, noisy, &aux);
+
+    gpu::BufferDesc desc;
+    desc.bytes = uint64_t{w} * h * 16;
+    desc.elementBytes = 16;
+    desc.label = "denoised";
+    auto guided = gpu::Buffer::create(*gpu->device, desc);
+    auto unguided = gpu::Buffer::create(*gpu->device, desc);
+    REQUIRE(guided);
+    REQUIRE(unguided);
+    if (auto r = denoiser->denoise(noisy.colour, &aux.albedo, &aux.normal, *guided, w, h); !r) {
+        FAIL(r.error().toString());
+    }
+    if (auto r = denoiser->denoise(noisy.colour, nullptr, nullptr, *unguided, w, h); !r) {
+        FAIL(r.error().toString());
+    }
+
+    auto before = render::compareHdr(*gpu->library, noisy.colour, reference.colour, w, h);
+    auto withGuides = render::compareHdr(*gpu->library, *guided, reference.colour, w, h);
+    auto without = render::compareHdr(*gpu->library, *unguided, reference.colour, w, h);
+    REQUIRE(before);
+    REQUIRE(withGuides);
+    REQUIRE(without);
+    std::printf("  %s\n", denoiser->description().c_str());
+    std::printf("  16 paths against 4096: relMSE %.4e noisy, %.4e denoised with albedo and normal, %.4e without\n",
+                before->relMse, withGuides->relMse, without->relMse);
+    std::printf("  max relative: %.4f noisy, %.4f with guides, %.4f without (1.0000 would be an output of zeros)\n",
+                before->maxRelative, withGuides->maxRelative, without->maxRelative);
+    CHECK(withGuides->relMse < 0.5 * before->relMse);
+    CHECK(without->relMse < 0.5 * before->relMse);
 }
 

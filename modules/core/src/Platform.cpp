@@ -192,4 +192,30 @@ void matchLayerToBacking(void* nsWindow) {
 #endif
 }
 
+void* newTrackedMetalBuffer(void* mtlDevice, uint64_t bytes) {
+#if defined(__APPLE__)
+    if (mtlDevice == nullptr || bytes == 0) {
+        return nullptr;
+    }
+    // MTLResourceStorageModePrivate (2 << 4) | MTLResourceHazardTrackingModeTracked (2 << 8).
+    const unsigned long options = (2UL << 4) | (2UL << 8);
+    return reinterpret_cast<void* (*)(void*, SEL, unsigned long, unsigned long)>(objc_msgSend)(
+        mtlDevice, sel_registerName("newBufferWithLength:options:"), static_cast<unsigned long>(bytes), options);
+#else
+    (void)mtlDevice;
+    (void)bytes;
+    return nullptr;
+#endif
+}
+
+void releaseMetalBuffer(void* mtlBuffer) {
+#if defined(__APPLE__)
+    if (mtlBuffer != nullptr) {
+        reinterpret_cast<void (*)(void*, SEL)>(objc_msgSend)(mtlBuffer, sel_registerName("release"));
+    }
+#else
+    (void)mtlBuffer;
+#endif
+}
+
 }   // namespace lrt::platform

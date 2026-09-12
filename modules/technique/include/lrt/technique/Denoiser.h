@@ -9,20 +9,36 @@
 #include <memory>
 #include <string>
 
+#include <cstdint>
+
 #include "lrt/core/Result.h"
 
 namespace lrt::gpu {
+class Buffer;
 class Device;
+class ShaderLibrary;
 }
 
 namespace lrt::technique {
 
 class Denoiser {
 public:
+    /// With a library, a denoiser that can run: on Metal its staging copies
+    /// are a kernel. With a device alone, enough to say what it is (lrt info).
+    [[nodiscard]] static Result<Denoiser> create(gpu::ShaderLibrary& library);
     [[nodiscard]] static Result<Denoiser> create(gpu::Device& device);
 
     /// "OIDN 2.5.1 on Metal", for `lrt info` and logs.
     [[nodiscard]] const std::string& description() const noexcept;
+
+    /// Denoises `colour` (float4 a pixel, linear radiance) into `out` on the
+    /// device, guided by `albedo` and `normal` where given (float4 a pixel,
+    /// the path tracer's PathAux). The images are the engine's own buffers,
+    /// shared with OIDN rather than copied; nothing touches the host. Waits
+    /// for the filter, so the caller's earlier work must be submitted.
+    [[nodiscard]] Result<void> denoise(const gpu::Buffer& colour, const gpu::Buffer* albedo,
+                                       const gpu::Buffer* normal, gpu::Buffer& out, uint32_t width,
+                                       uint32_t height);
 
 private:
     struct Impl;
