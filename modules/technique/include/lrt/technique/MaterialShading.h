@@ -3,9 +3,11 @@
 // A visibility buffer shaded by its instances' MaterialX materials: one
 // kernel over MaterialPrograms' generated dispatch that reconstructs each
 // pixel's surface (material_surface.slang), evaluates its material into a
-// lobe stack, and lights it. Until scene lights arrive (M5) the light is the
-// headlight: a unit light from the eye, as HeadlightShading draws unshaded
-// meshes.
+// lobe stack, and lights it -- by the frame's lights, with shadows where the
+// device traces rays, linking, and either every light at every pixel or one
+// chosen a sample by its power. A frame with no lights at all falls back to
+// the headlight, a unit light from the eye, as HeadlightShading draws
+// unshaded meshes.
 #pragma once
 
 #include <optional>

@@ -1344,3 +1344,59 @@ enough that what is left is the light and not the noise.
 - **Contact shadows** closer than the ray's offset are missed, and a cutout
   material still stops a shadow ray where its opacity would have let it
   through.
+
+## Complete USD: the path tracer (M6, in progress)
+
+One bounce, over the same visibility buffer the raster shading reads, so the
+two can be told apart by exactly one thing: the bounce.
+
+### What it does
+
+- **The same surface, the same material, the same light.** A hit is rebuilt by
+  `material_surface.slang`, its material evaluated into the same lobe stack,
+  and its direct light gathered by next event estimation with the light chosen
+  by power -- all of it the machinery M5 left behind.
+- **MIS** by the power heuristic between sampling a light and sampling the
+  material, so the two strategies do not double count. A delta light takes the
+  whole weight, since no sampled direction can find it.
+- **The bounce** samples the material (`stackSample`), traces where it points,
+  shades what it lands on, and carries that surface's emission and direct
+  light back through the path's throughput.
+- **Accumulation** is a running mean: a call adds its samples to a sum and
+  says how many the frame holds, which is what a progressive render needs.
+- **Where the device does not trace**, there is no bounce to trace: the kernel
+  is generated without one and gathers direct light alone.
+
+### How it is checked
+
+- **One bounce against the raster's direct light**, in a scene with nothing
+  for a bounce to find: p99 1 and max 1, with no pixel beyond 2, over 4096
+  accumulated paths. That is the plan's check, and it holds the two
+  estimators to each other rather than to a tolerance of their own.
+
+### Three things the ground did not turn out to be
+
+Measured while surveying, and worth writing down because each one changes what
+the rest of M6 has to build:
+
+- **`technique::Denoiser` is a presence check, not a denoiser.** It has
+  `create` and `description` and nothing else: OIDN is available, not applied.
+  Denoising is to be written, not wired.
+- **`ReferenceRenderer` is a reference for splats**, projecting and blending
+  clouds and points. The plan's "error against a 64k spp GPU reference falls
+  as 1/sqrt(N)" cannot lean on it: the path tracer will have to accumulate its
+  own reference.
+- **`rt_integrate.slang` is a splat integrator**, with an ordered record per
+  ray and overlap windows. It is what "splats in rays" will reuse, and it is
+  not a skeleton for a surface path tracer.
+
+### Not done
+
+- Progressive rendering through `HdRenderThread` and `IsConverged`, and the
+  `rt` technique still takes a shortcut in the engine: it traces splats and
+  returns, leaving meshes and materials out.
+- Albedo and normal AOVs, adaptive sampling, and the denoiser itself.
+- Splats in rays, points as spheres, depth of field, lens distortion and
+  exposure.
+- More than one bounce is a parameter away (`PathSettings::bounces`) and has
+  no check of its own yet.

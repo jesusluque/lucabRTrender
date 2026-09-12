@@ -20,8 +20,10 @@
 #include "lrt/material/TextureStore.h"
 #include "lrt/light/LightTable.h"
 #include "lrt/material/MaterialCompiler.h"
+#include "lrt/render/ReferenceRenderer.h"
 #include "lrt/material/TextureStore.h"
 #include "lrt/technique/MaterialShading.h"
+#include "lrt/technique/PathTracer.h"
 #include "lrt/technique/Visibility.h"
 #include "lrt/world/GpuScene.h"
 #include "lrt/world/RayTracingScene.h"
@@ -951,4 +953,114 @@ TEST_CASE("many lights are lit as one light of their total power", "[technique][
         CHECK(c[0] > 8000);
         CHECK(c[1] == 0);
     }
+}
+
+TEST_CASE("a path traced frame of one bounce agrees with the raster's direct light",
+          "[technique][path]") {
+    LRT_REQUIRE_GPU(gpu);
+    const gpu::Caps& caps = gpu->device->caps();
+    if (!caps.rasterization) {
+        SKIP("no rasterisation on this device");
+    }
+    std::vector<std::filesystem::path> shaderPaths;
+    for (const std::string& path : gpu->device->shaderSearchPaths()) {
+        shaderPaths.emplace_back(path);
+    }
+    auto compiler = material::MaterialCompiler::create({LRT_MATERIALX_ROOT}, shaderPaths);
+    auto textures = material::TextureStore::create(*gpu->library);
+    auto builder = geom::MeshBuilder::create(*gpu->library);
+    auto scene = world::GpuScene::create(*gpu->library);
+    auto raster = technique::VisibilityRaster::create(*gpu->library);
+    auto programs = technique::MaterialPrograms::create(*gpu->library);
+    auto shading = technique::MaterialShading::create(*gpu->library);
+    auto tracer = technique::PathTracer::create(*gpu->library);
+    auto table = light::LightTable::create(*gpu->device);
+    if (!compiler) FAIL(compiler.error().toString());
+    if (!textures) FAIL(textures.error().toString());
+    if (!builder) FAIL(builder.error().toString());
+    if (!scene) FAIL(scene.error().toString());
+    if (!raster) FAIL(raster.error().toString());
+    if (!programs) FAIL(programs.error().toString());
+    if (!shading) FAIL(shading.error().toString());
+    if (!tracer) FAIL(tracer.error().toString());
+    if (!table) FAIL(table.error().toString());
+    auto lambert = (*compiler)->compileXml(
+        "<?xml version=\"1.0\"?>\n<materialx version=\"1.39\">\n"
+        "  <oren_nayar_diffuse_bsdf name=\"d\" type=\"BSDF\">\n"
+        "    <input name=\"color\" type=\"color3\" value=\"0.8, 0.8, 0.8\" />\n"
+        "    <input name=\"roughness\" type=\"float\" value=\"0\" />\n"
+        "  </oren_nayar_diffuse_bsdf>\n"
+        "  <surface name=\"shader\" type=\"surfaceshader\"><input name=\"bsdf\" type=\"BSDF\" nodename=\"d\" /></surface>\n"
+        "  <surfacematerial name=\"material\" type=\"material\">\n"
+        "    <input name=\"surfaceshader\" type=\"surfaceshader\" nodename=\"shader\" />\n"
+        "  </surfacematerial>\n</materialx>\n");
+    if (!lambert) FAIL(lambert.error().toString());
+    REQUIRE(programs->setModules(std::span<const material::CompiledMaterial>(&*lambert, 1)));
+    REQUIRE(shading->setPrograms(*programs));
+    REQUIRE(tracer->setPrograms(*programs));
+    const std::vector<float> blob = material::MaterialCompiler::parameters(
+        *lambert, **textures, [](const std::string&) { return 0xFFFFFFFFu; });
+    REQUIRE((*textures)->commit());
+    const std::vector<technique::MaterialRecord> rows{{0, 0, 0, 0}, {1, 0, 0, 0}};
+    auto records = gpu::Buffer::fromSpan<technique::MaterialRecord>(*gpu->device, rows, "materials.records");
+    auto blobBuffer = gpu::Buffer::fromSpan<float>(*gpu->device, blob, "materials.blob");
+    REQUIRE(records);
+    REQUIRE(blobBuffer);
+
+    const uint32_t w = 161;
+    const uint32_t h = 121;
+    render::Camera camera = render::Camera::lookingAt({0.0, 0.0, 0.0}, {0.0, 0.0, -1.0});
+    camera.lens.focal = 35.0;
+    const render::Projection projection = render::projectionFor(camera, w, h);
+    // One plane and one sphere light: nothing for a bounce to find, so the
+    // bounce must contribute nothing and the two frames must agree.
+    world::MeshInstance instance;
+    instance.mesh = lambertSquare(*builder, 1.0F);
+    instance.objectToWorld = aofx::xform::translation({0.0, 0.0, -5.0});
+    instance.material = 1;
+    REQUIRE(scene->update(std::span<const world::MeshInstance>(&instance, 1), projection));
+    light::Light lamp;
+    lamp.kind = light::LightKind::Sphere;
+    lamp.lightToWorld = aofx::xform::translation({0.0, 0.0, -3.0});
+    lamp.radius = 0.4F;
+    lamp.shadow = false;
+    REQUIRE(table->set(std::span<const light::Light>(&lamp, 1)));
+
+    technique::VisibilityTargets visibility;
+    render::RenderTargets direct;
+    render::RenderTargets traced;
+    technique::MaterialFrame frame;
+    frame.programs = &*programs;
+    frame.scene = &*scene;
+    frame.records = &*records;
+    frame.blob = &*blobBuffer;
+    frame.textures = &**textures;
+    frame.lights = &*table;
+    frame.samples = 4096;
+    {
+        gpu::CommandBatch batch(*gpu->device);
+        REQUIRE(raster->render(batch, *scene, projection, w, h, visibility));
+        REQUIRE(shading->shade(batch, visibility, projection, frame, direct));
+        REQUIRE(batch.submit(true));
+    }
+    // The same light, gathered by paths: many samples, accumulated, so what is
+    // left between them is the estimator and not the noise.
+    technique::PathSettings paths;
+    paths.samples = 256;
+    paths.bounces = 1;
+    paths.accumulate = true;
+    for (uint32_t pass = 0; pass < 16; ++pass) {
+        paths.seed = pass * 7919u;
+        gpu::CommandBatch batch(*gpu->device);
+        REQUIRE(tracer->trace(batch, visibility, projection, frame, paths, traced));
+        REQUIRE(batch.submit(true));
+    }
+    CHECK(tracer->accumulated() == 16u * 256u);
+    auto diff = render::compareImages(*gpu->library, direct.colour, traced.colour, w, h);
+    REQUIRE(diff);
+    std::printf("  one bounce against the raster's direct light: p99 %u, max %u, %llu pixels beyond 2 (%u paths)\n",
+                diff->p99, diff->max, static_cast<unsigned long long>(diff->over2), tracer->accumulated());
+    // A scene with nothing for a bounce to find: the two must agree to within
+    // the noise both estimators still carry.
+    CHECK(diff->p99 <= 2);
 }

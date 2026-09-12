@@ -6,6 +6,7 @@ lrt_add_module(technique
         src/DisplayTransform.cpp
         src/MaterialPrograms.cpp
         src/MaterialShading.cpp
+        src/PathTracer.cpp
         src/Visibility.cpp
     PUBLIC_LIBS
         lrt::core
