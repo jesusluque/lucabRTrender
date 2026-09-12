@@ -7,5 +7,5 @@ find_package(Threads REQUIRED)
 target_link_libraries(lrt_core PUBLIC Threads::Threads)
 if(APPLE)
     # Platform reaches a window's Metal layer through the Objective-C runtime.
-    target_link_libraries(lrt_core PUBLIC objc)
+    target_link_libraries(lrt_core PUBLIC objc "-framework CoreFoundation" "-framework CoreGraphics")
 endif()

@@ -133,11 +133,13 @@ struct AovLayout {
 };
 
 /// Which image an AOV reads.
-enum class AovKind { Colour, Depth, PrimId, InstanceId, ElementId, EyeNormal, WorldNormal, Primvar, Albedo, ShadingNormal };
+enum class AovKind {
+    Colour, Depth, PrimId, InstanceId, ElementId, EyeNormal, WorldNormal, Primvar, Albedo, ShadingNormal, LightGroup
+};
 
 struct AovSource {
     AovKind  kind = AovKind::Colour;
-    uint32_t primvar = 0;   ///< AovKind::Primvar: its index in AovRequest::primvars
+    uint32_t primvar = 0;   ///< AovKind::Primvar: its index in AovRequest::primvars; LightGroup: in lightGroups
 };
 
 /// Where an AOV lives on the device, as shaders/lrt/usd/aov_convert.slang
@@ -155,6 +157,9 @@ struct AovRequest {
     bool                     ids = false;       ///< primId, instanceId, elementId
     bool                     normals = false;   ///< Neye, normal
     std::vector<std::string> primvars;          ///< "primvars:NAME" outputs, by NAME
+    /// "lightGroup:NAME" outputs, by NAME: each light's direct contribution
+    /// under its group (`lrt:lightGroup`). At most technique::kMaxLightGroups.
+    std::vector<std::string> lightGroups;
 };
 
 /// How the engine draws a frame.
@@ -325,6 +330,12 @@ private:
     std::optional<technique::PathTracer>      pathTracer_;   ///< made on first use
     technique::PathAux                        pathAux_;      ///< the last path traced frame's albedo and normal
     bool                                      pathAuxValid_ = false;
+    /// The last frame's light groups: `lightGroupCount_` planes of float4,
+    /// a pixel each, the means in `colour` and the path tracer's sums in
+    /// `sum`; sized for `lightGroupPixels_`.
+    gpu::Buffer                               lightGroupColour_;
+    uint32_t                                  lightGroupCount_ = 0;
+    uint64_t                                  lightGroupPixels_ = 0;
     std::optional<technique::Denoiser>        denoiser_;     ///< made on first use
     std::atomic<bool>                         denoise_{false};
     bool                                      denoiserFailed_ = false;   ///< said once
@@ -381,6 +392,7 @@ private:
         bool         adaptive = false;
         float        error = 0.0F;
         uint64_t     revision = 0;
+        uint64_t     tags = 0;         ///< a hash of the render tags drawn: purposes that change start the mean again
         bool         traced = false;   ///< the last frame was path traced at all
         /// Mat4 has no comparison of its own, so the camera is compared
         /// element by element: identical bits are what "has not moved" means.
@@ -397,7 +409,7 @@ private:
                    lensRadius == o.lensRadius && focusDistance == o.focusDistance &&
                    distortionK1 == o.distortionK1 && distortionK2 == o.distortionK2 && width == o.width &&
                    height == o.height && samples == o.samples && bounces == o.bounces && adaptive == o.adaptive &&
-                   error == o.error && revision == o.revision && traced == o.traced;
+                   error == o.error && revision == o.revision && tags == o.tags && traced == o.traced;
         }
     };
     PathState                                 pathState_;

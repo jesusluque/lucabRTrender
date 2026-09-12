@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <filesystem>
 #include <memory>
 #include <string>
 #include <vector>
@@ -95,7 +96,7 @@ void addConvert(CLI::App& app) {
 void addStage(CLI::App& app) {
     struct Options {
         std::string stage, camera, output = "out.exr", size = "1920x1080", technique = "raster",
-                    visibility = "automatic";
+                    visibility = "automatic", renderSettings;
         double time = 0.0;
         std::vector<double> eye, target, up{0.0, 1.0, 0.0};
         double focal = 35.0, nearZ = 0.1, farZ = 100000.0;
@@ -125,6 +126,8 @@ void addStage(CLI::App& app) {
     cmd->add_option("--near", o->nearZ, "its near clipping distance");
     cmd->add_option("--far", o->farZ, "its far clipping distance");
     cmd->add_option("-o,--output", o->output, "EXR path");
+    cmd->add_option("--render-settings", o->renderSettings,
+                    "a UsdRenderSettings prim: render its products, each var a layer of its EXR, and stop");
     cmd->add_option("--frames", o->frames,
                     "render this many times and print the time a frame takes (Hydra sync, drawing and the readback)");
     cmd->callback([o] {
@@ -148,6 +151,19 @@ void addStage(CLI::App& app) {
         (*renderer)->setDenoise(o->denoise);
         (*renderer)->setMotionBuckets(o->motionBuckets);
         (*renderer)->setRefineLevel(o->refine);
+        if (!o->renderSettings.empty()) {
+            const std::filesystem::path directory =
+                o->output.empty() ? std::filesystem::path() : std::filesystem::path(o->output).parent_path();
+            auto written = (*renderer)->renderProducts(o->renderSettings, o->time, directory);
+            if (!written) {
+                std::fprintf(stderr, "%s\n", written.error().toString().c_str());
+                throw CLI::RuntimeError(1);
+            }
+            for (const std::filesystem::path& file : *written) {
+                std::printf("wrote %s\n", file.string().c_str());
+            }
+            return;
+        }
         Result<usd::StageImage> image = Error(ErrorCode::InvalidArgument, "no image");
         std::vector<double> ms;
         for (uint32_t frame = 0; frame < std::max(o->frames, uint32_t{1}); ++frame) {

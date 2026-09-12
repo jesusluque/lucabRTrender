@@ -9,6 +9,7 @@
 #include <pxr/imaging/hdsi/pinnedCurveExpandingSceneIndex.h>
 #include <pxr/imaging/hdsi/tetMeshConversionSceneIndex.h>
 #include <pxr/imaging/hdsi/lightLinkingSceneIndex.h>
+#include <pxr/imaging/hdsi/renderSettingsFilteringSceneIndex.h>
 #include <pxr/imaging/hdsi/velocityMotionResolvingSceneIndex.h>
 
 #include "RenderDelegate.h"
@@ -28,6 +29,7 @@
 #include "Points.h"
 #include "RenderBuffer.h"
 #include "RenderPass.h"
+#include "RenderSettings.h"
 #include "lrt/core/Log.h"
 
 PXR_NAMESPACE_OPEN_SCOPE
@@ -49,6 +51,13 @@ static HdContainerDataSourceHandle _lightLinkingArgs() {
         HdRetainedTypedSampledDataSource<VtArray<TfToken>>::New(lights),
         HdsiLightLinkingSceneIndexTokens->geometryPrimTypes,
         HdRetainedTypedSampledDataSource<VtArray<TfToken>>::New(geometry));
+}
+
+static HdContainerDataSourceHandle _renderSettingsArgs() {
+    static const VtArray<TfToken> prefixes{TfToken("lrt")};
+    return HdRetainedContainerDataSource::New(
+        HdsiRenderSettingsFilteringSceneIndexTokens->namespacePrefixes,
+        HdRetainedTypedSampledDataSource<VtArray<TfToken>>::New(prefixes));
 }
 
 static HdContainerDataSourceHandle _implicitSurfaceArgs() {
@@ -133,6 +142,15 @@ void HdLrtRegisterSceneIndices() {
                 return HdsiLightLinkingSceneIndex::New(inputScene, inputArgs);
             },
             _lightLinkingArgs(), 3, HdSceneIndexPluginRegistry::InsertionOrderAtEnd);
+        // Render settings prims keep the `lrt:` namespaced settings and
+        // their products reach the bprim; the other renderers' are dropped.
+        HdSceneIndexPluginRegistry::GetInstance().RegisterSceneIndexForRenderer(
+            "lucabRTrender",
+            [](const std::string&, const HdSceneIndexBaseRefPtr& inputScene,
+               const HdContainerDataSourceHandle& inputArgs) -> HdSceneIndexBaseRefPtr {
+                return HdsiRenderSettingsFilteringSceneIndex::New(inputScene, inputArgs);
+            },
+            _renderSettingsArgs(), 3, HdSceneIndexPluginRegistry::InsertionOrderAtEnd);
         return true;
     }();
     (void)once;
@@ -182,8 +200,15 @@ TfTokenVector HdLrtRenderDelegate::GetMaterialRenderContexts() const {
 }
 
 TfTokenVector const& HdLrtRenderDelegate::GetSupportedBprimTypes() const {
-    static const TfTokenVector types{HdPrimTypeTokens->renderBuffer};
+    static const TfTokenVector types{HdPrimTypeTokens->renderBuffer, HdPrimTypeTokens->renderSettings};
     return types;
+}
+
+TfTokenVector HdLrtRenderDelegate::GetRenderSettingsNamespaces() const {
+    // The namespaced settings a render settings prim keeps for this
+    // renderer: `lrt:pathTotal` and the rest, as the delegate's own settings.
+    static const TfTokenVector namespaces{TfToken("lrt")};
+    return namespaces;
 }
 
 HdRenderPassSharedPtr HdLrtRenderDelegate::CreateRenderPass(HdRenderIndex* index,
@@ -405,10 +430,16 @@ HdSprim* HdLrtRenderDelegate::CreateFallbackSprim(TfToken const& typeId) {
 void HdLrtRenderDelegate::DestroySprim(HdSprim* sprim) { delete sprim; }
 
 HdBprim* HdLrtRenderDelegate::CreateBprim(TfToken const& typeId, SdfPath const& id) {
+    if (typeId == HdPrimTypeTokens->renderSettings) {
+        return new HdLrtRenderSettings(id);
+    }
     return typeId == HdPrimTypeTokens->renderBuffer ? new HdLrtRenderBuffer(id, _engine.get()) : nullptr;
 }
 
 HdBprim* HdLrtRenderDelegate::CreateFallbackBprim(TfToken const& typeId) {
+    if (typeId == HdPrimTypeTokens->renderSettings) {
+        return new HdLrtRenderSettings(SdfPath::EmptyPath());
+    }
     return typeId == HdPrimTypeTokens->renderBuffer ? new HdLrtRenderBuffer(SdfPath::EmptyPath(), _engine.get())
                                                     : nullptr;
 }
@@ -416,7 +447,7 @@ HdBprim* HdLrtRenderDelegate::CreateFallbackBprim(TfToken const& typeId) {
 void HdLrtRenderDelegate::DestroyBprim(HdBprim* bprim) { delete bprim; }
 
 HdAovDescriptor HdLrtRenderDelegate::GetDefaultAovDescriptor(TfToken const& name) const {
-    if (name == HdAovTokens->color) {
+    if (name == HdAovTokens->color || name.GetString().rfind("lightGroup:", 0) == 0) {
         return HdAovDescriptor(HdFormatFloat32Vec4, false, VtValue(GfVec4f(0.0F)));
     }
     if (name == HdAovTokens->depth) {

@@ -116,6 +116,11 @@ void HdLrtLight::Sync(HdSceneDelegate* sceneDelegate, HdRenderParam* renderParam
     };
     lamp.lightLink = tokenOf(HdTokens->lightLink);
     lamp.shadowLink = tokenOf(HdTokens->shadowLink);
+    // Its light group: ours, or RenderMan's, as authored on the prim.
+    lamp.group = tokenOf(TfToken("lrt:lightGroup"));
+    if (lamp.group.empty()) {
+        lamp.group = tokenOf(TfToken("ri:light:lightGroup"));
+    }
     if (lamp.kind == lrt::light::LightKind::Dome) {
         const VtValue file = sceneDelegate->GetLightParamValue(id, HdLightTokens->textureFile);
         if (file.IsHolding<SdfAssetPath>()) {

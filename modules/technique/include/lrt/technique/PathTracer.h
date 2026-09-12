@@ -71,6 +71,9 @@ public:
 
     /// The kernel is rebuilt when `programs` dispatches to a different set.
     [[nodiscard]] Result<void> setPrograms(const MaterialPrograms& programs);
+    /// The same, for a frame with light groups (their buffers declared) or
+    /// without; `trace` switches as the frame asks.
+    [[nodiscard]] Result<void> setPrograms(const MaterialPrograms& programs, bool groups);
 
     /// Traces `settings.samples` paths a pixel into `out`, as a running mean
     /// over everything accumulated so far.
@@ -95,6 +98,14 @@ public:
     /// sum of colour times opacity (float4 a pixel, its w the paths' opacity
     /// summed), the luminance's second moment, and the adaptive stop flags.
     [[nodiscard]] const gpu::Buffer& sum() const noexcept { return sum_; }
+    /// With light groups: where group `g`'s mean plane starts in `sum`, in
+    /// float4 entries (its sum plane is at 1 + g planes; the means follow
+    /// the sums).
+    [[nodiscard]] uint64_t lightGroupMeanOffset(uint32_t g) const noexcept {
+        const uint32_t groups = (sumPlanes_ - 1) / 2;
+        return (uint64_t{1} + groups + g) * width_ * height_;
+    }
+    [[nodiscard]] uint32_t lightGroups() const noexcept { return (sumPlanes_ - 1) / 2; }
     [[nodiscard]] const gpu::Buffer& sumSquares() const noexcept { return sumSquares_; }
     [[nodiscard]] const gpu::Buffer& done() const noexcept { return done_; }
 
@@ -103,6 +114,8 @@ private:
     gpu::Device*                      device_ = nullptr;
     std::optional<gpu::ComputeKernel> kernel_;
     std::string                       module_;
+    bool                              groups_ = false;
+    uint32_t                          sumPlanes_ = 1;   ///< 1 + 2 * light groups
     gpu::Buffer                       sum_;           ///< float4 a pixel: the paths added so far
     gpu::Buffer                       sumSquares_;    ///< float a pixel: the luminance's second moment
     gpu::Buffer                       done_;          ///< uint a pixel: 1 once adaptive sampling stopped it

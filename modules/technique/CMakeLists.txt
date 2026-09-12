@@ -4,6 +4,7 @@ lrt_add_module(technique
     SOURCES
         src/Denoiser.cpp
         src/DisplayTransform.cpp
+        src/Aces2.cpp
         src/MaterialPrograms.cpp
         src/MaterialShading.cpp
         src/PathTracer.cpp

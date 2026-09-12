@@ -25,11 +25,18 @@
 #include <pxr/usdImaging/usdImaging/sceneIndices.h>
 
 #include <pxr/imaging/hd/sceneIndexPluginRegistry.h>
+#include <pxr/imaging/hd/renderSettings.h>
+#include <pxr/imaging/hd/dependencyForwardingSceneIndex.h>
 #include <pxr/imaging/hdsi/legacyDisplayStyleOverrideSceneIndex.h>
+#include <pxr/imaging/hdsi/sceneGlobalsSceneIndex.h>
+#include <pxr/base/tf/stringUtils.h>
+
+#include "lrt/io/Exr.h"
 #include <pxr/usdImaging/usdImaging/stageSceneIndex.h>
 
 #include "RenderDelegate.h"
 #include "RenderParam.h"
+#include "RenderSettings.h"
 
 PXR_NAMESPACE_USING_DIRECTIVE
 
@@ -39,6 +46,7 @@ struct StageRenderer::Impl {
     UsdStageRefPtr                         stage;
     std::unique_ptr<HdLrtRenderDelegate>   delegate;
     HdsiLegacyDisplayStyleOverrideSceneIndexRefPtr displayStyle;
+    HdsiSceneGlobalsSceneIndexRefPtr       globals;   ///< the active render settings prim, the frame
     HdRenderIndex*                         index = nullptr;
     UsdImagingSceneIndices                 sceneIndices;
     std::unique_ptr<HdxTaskController>     controller;
@@ -80,8 +88,14 @@ Result<std::unique_ptr<StageRenderer>> StageRenderer::open(const std::filesystem
     // The display style's fallback refine level, for setRefineLevel: what
     // usdview's complexity sets, the same way.
     impl.displayStyle = HdsiLegacyDisplayStyleOverrideSceneIndex::New(impl.sceneIndices.finalSceneIndex);
-    const HdSceneIndexBaseRefPtr scene =
-        HdSceneIndexPluginRegistry::GetInstance().AppendSceneIndicesForRenderer("lucabRTrender", impl.displayStyle);
+    // The scene's globals -- which render settings prim is active, which
+    // frame -- are what a settings prim's `IsActive` and the products read.
+    impl.globals = HdsiSceneGlobalsSceneIndex::New(impl.displayStyle);
+    // The dependencies the scene indices declare (a settings prim's
+    // `active` on the globals) become dirty notices only through a
+    // forwarding scene index at the end of the chain.
+    const HdSceneIndexBaseRefPtr scene = HdDependencyForwardingSceneIndex::New(
+        HdSceneIndexPluginRegistry::GetInstance().AppendSceneIndicesForRenderer("lucabRTrender", impl.globals));
     impl.index->InsertSceneIndex(scene, SdfPath::AbsoluteRootPath());
 
     impl.controller = std::make_unique<HdxTaskController>(
@@ -101,6 +115,222 @@ std::vector<std::string> StageRenderer::cameras() const {
         }
     }
     return out;
+}
+
+namespace {
+
+/// A UsdRender purpose as Hydra's render tag.
+TfToken tagOfPurpose(const std::string& purpose) {
+    if (purpose == "default" || purpose.empty()) return HdRenderTagTokens->geometry;
+    if (purpose == "render") return HdRenderTagTokens->render;
+    if (purpose == "proxy") return HdRenderTagTokens->proxy;
+    if (purpose == "guide") return HdRenderTagTokens->guide;
+    return TfToken(purpose);
+}
+
+/// A var's source as the delegate's AOV: hd's names as they are, RenderMan's
+/// "Ci" and "z" as colour and depth, and of light path expressions the one
+/// that names a light group -- C.*<L.'NAME'> -- as "lightGroup:NAME".
+Result<std::string> aovOfVar(const RenderVarInfo& var) {
+    if (var.sourceType == "lpe") {
+        const size_t open = var.sourceName.find("<L.'");
+        const size_t close = open != std::string::npos ? var.sourceName.find("'>", open + 4) : std::string::npos;
+        if (open != std::string::npos && close != std::string::npos && close > open + 4) {
+            return "lightGroup:" + var.sourceName.substr(open + 4, close - open - 4);
+        }
+        return Error::make(ErrorCode::Unsupported,
+                           "render var '{}': of light path expressions only a light group's (C.*<L.'NAME'>) is read",
+                           var.name);
+    }
+    if (var.sourceType == "primvar") {
+        return "primvars:" + var.sourceName;
+    }
+    if (var.sourceName == "Ci") return std::string("color");
+    if (var.sourceName == "z") return std::string("depth");
+    return var.sourceName;
+}
+
+std::string textOf(const VtValue& value) {
+    if (value.IsHolding<std::string>()) return value.UncheckedGet<std::string>();
+    if (value.IsHolding<TfToken>()) return value.UncheckedGet<TfToken>().GetString();
+    if (value.IsHolding<bool>()) return value.UncheckedGet<bool>() ? "true" : "false";
+    if (value.IsHolding<int>()) return std::to_string(value.UncheckedGet<int>());
+    if (value.IsHolding<float>()) return TfStringify(value.UncheckedGet<float>());
+    if (value.IsHolding<double>()) return TfStringify(value.UncheckedGet<double>());
+    return TfStringify(value);
+}
+
+}   // namespace
+
+void StageRenderer::setIncludedPurposes(const std::vector<std::string>& purposes) {
+    TfTokenVector tags;
+    if (purposes.empty()) {
+        tags = {HdRenderTagTokens->geometry, HdRenderTagTokens->render};
+    }
+    for (const std::string& purpose : purposes) {
+        const TfToken tag = tagOfPurpose(purpose);
+        if (std::find(tags.begin(), tags.end(), tag) == tags.end()) {
+            tags.push_back(tag);
+        }
+    }
+    impl_->controller->SetRenderTags(tags);
+}
+
+Result<RenderSettingsInfo> StageRenderer::renderSettings(const std::string& path) {
+    Impl& impl = *impl_;
+    const SdfPath id(path);
+    if (!impl.stage->GetPrimAtPath(id).IsValid()) {
+        return Error::make(ErrorCode::NotFound, "no prim at '{}'", path);
+    }
+    // Made the scene's active settings prim, then synced -- with no tasks,
+    // so only the prims themselves, not a frame -- and read from the bprim.
+    impl.globals->SetActiveRenderSettingsPrimPath(id);
+    impl.sceneIndices.stageSceneIndex->ApplyPendingUpdates();
+    // Made active, the prim's `active` is dirtied through its dependency on
+    // the globals (the filtering scene index declares it, the dependency
+    // forwarding one turns it into a notice, the emulation into a dirty
+    // bit) and read again at Sync: with no tasks, only the prims sync.
+    {
+        HdTaskSharedPtrVector none;
+        HdTaskContext context;
+        impl.index->SyncAll(&none, &context);
+    }
+    const auto* prim = dynamic_cast<const HdLrtRenderSettings*>(impl.index->GetBprim(HdPrimTypeTokens->renderSettings, id));
+    if (prim == nullptr) {
+        return Error::make(ErrorCode::NotFound, "'{}' is not a render settings prim Hydra delivered", path);
+    }
+    RenderSettingsInfo info;
+    info.path = path;
+    info.active = prim->IsActive();
+    info.syncs = prim->GetSyncCount();
+    for (const TfToken& purpose : prim->GetIncludedPurposes()) info.includedPurposes.push_back(purpose.GetString());
+    for (const TfToken& purpose : prim->GetMaterialBindingPurposes()) {
+        info.materialBindingPurposes.push_back(purpose.GetString());
+    }
+    info.renderingColorSpace = prim->GetRenderingColorSpace().GetString();
+    if (prim->GetCamera().IsHolding<SdfPath>()) {
+        info.camera = prim->GetCamera().UncheckedGet<SdfPath>().GetString();
+    }
+    info.disableMotionBlur = prim->GetDisableMotionBlur();
+    info.disableDepthOfField = prim->GetDisableDepthOfField();
+    for (const auto& [key, value] : prim->GetNamespacedSettings()) {
+        info.settings[key] = textOf(value);
+    }
+    for (const HdRenderSettings::RenderProduct& product : prim->GetRenderProducts()) {
+        RenderProductInfo p;
+        p.path = product.productPath.GetString();
+        p.name = product.name.GetString();
+        p.type = product.type.GetString();
+        p.width = static_cast<uint32_t>(std::max(product.resolution[0], 0));
+        p.height = static_cast<uint32_t>(std::max(product.resolution[1], 0));
+        p.camera = product.cameraPath.GetString();
+        p.disableMotionBlur = product.disableMotionBlur;
+        p.disableDepthOfField = product.disableDepthOfField;
+        for (const HdRenderSettings::RenderProduct::RenderVar& var : product.renderVars) {
+            p.vars.push_back({var.varPath.GetName(), var.sourceName, var.sourceType.GetString(), var.dataType.GetString()});
+        }
+        info.products.push_back(std::move(p));
+    }
+    return info;
+}
+
+Result<std::vector<std::filesystem::path>> StageRenderer::renderProducts(const std::string& path, double time,
+                                                                         const std::filesystem::path& directory) {
+    Impl& impl = *impl_;
+    auto info = renderSettings(path);
+    if (!info) return std::move(info).error();
+    if (info->products.empty()) {
+        return Error::make(ErrorCode::InvalidArgument, "'{}' names no render products", path);
+    }
+    // The prim's own settings for this renderer, as the delegate's.
+    const auto* prim =
+        static_cast<const HdRenderSettings*>(impl.index->GetBprim(HdPrimTypeTokens->renderSettings, SdfPath(path)));
+    std::string technique = "raster";
+    bool half = false;
+    for (const auto& [key, value] : prim->GetNamespacedSettings()) {
+        if (key == "lrt:technique" && !textOf(value).empty()) {
+            technique = textOf(value);
+        } else if (key == "lrt:exrHalf") {
+            half = value.IsHolding<bool>() && value.UncheckedGet<bool>();
+        } else if (key.rfind("lrt:", 0) == 0) {
+            impl.delegate->SetRenderSetting(TfToken(key), value);
+        }
+    }
+    setIncludedPurposes(info->includedPurposes);
+    std::vector<std::filesystem::path> written;
+    for (const RenderProductInfo& product : info->products) {
+        if (product.width == 0 || product.height == 0) {
+            return Error::make(ErrorCode::InvalidArgument, "render product '{}' has no resolution", product.path);
+        }
+        if (product.vars.empty()) {
+            return Error::make(ErrorCode::InvalidArgument, "render product '{}' has no vars", product.path);
+        }
+        std::vector<std::string> aovs;
+        for (const RenderVarInfo& var : product.vars) {
+            auto aov = aovOfVar(var);
+            if (!aov) return std::move(aov).error();
+            aovs.push_back(*aov);
+        }
+        requestOutputs(aovs);
+        const std::string camera = !product.camera.empty() ? product.camera : info->camera;
+        auto image = render(camera, time, product.width, product.height, technique);
+        if (!image) return std::move(image).error();
+        // Each var's layer, from the same Hydra buffer a host maps -- depth
+        // as the view z the engine's own image carries, as `lrt stage -o`.
+        std::vector<std::vector<uint32_t>> planes;
+        std::vector<io::ExrChannel> channels;
+        const size_t pixels = size_t{product.width} * product.height;
+        for (size_t k = 0; k < product.vars.size(); ++k) {
+            const RenderVarInfo& var = product.vars[k];
+            const std::string& aov = aovs[k];
+            if (aov == "depth") {
+                planes.emplace_back(pixels);
+                std::memcpy(planes.back().data(), image->depth.data(), pixels * 4);
+                channels.push_back({var.name == "depth" ? "Z" : var.name, io::ExrChannelType::Float, {}});
+                continue;
+            }
+            HdRenderBuffer* buffer = impl.controller->GetRenderOutput(TfToken(aov));
+            if (buffer == nullptr) {
+                return Error::make(ErrorCode::NotFound, "render var '{}': no output '{}'", var.name, aov);
+            }
+            auto bytes = mappedOutput(aov);
+            if (!bytes) return std::move(bytes).error();
+            const HdFormat format = buffer->GetFormat();
+            const size_t components = HdGetComponentCount(format);
+            const bool integer = HdGetComponentFormat(format) == HdFormatInt32;
+            if (HdDataSizeOfFormat(format) != components * 4 || bytes->size() < pixels * components * 4) {
+                return Error::make(ErrorCode::Unsupported, "render var '{}': output '{}' is not 32-bit", var.name, aov);
+            }
+            static constexpr const char* kColour[4] = {"R", "G", "B", "A"};
+            static constexpr const char* kVector[4] = {"x", "y", "z", "w"};
+            for (size_t c = 0; c < components; ++c) {
+                planes.emplace_back(pixels);
+                for (size_t p = 0; p < pixels; ++p) {
+                    std::memcpy(&planes.back()[p], bytes->data() + (p * components + c) * 4, 4);
+                }
+                std::string name = var.name;
+                if (components == 4) {
+                    name = var.name == "color" ? std::string(kColour[c]) : var.name + "." + kColour[c];
+                } else if (components > 1) {
+                    name = var.name + "." + kVector[c];
+                }
+                channels.push_back({name, integer ? io::ExrChannelType::Uint
+                                          : half ? io::ExrChannelType::Half
+                                                 : io::ExrChannelType::Float,
+                                    {}});
+            }
+        }
+        for (size_t k = 0; k < channels.size(); ++k) {
+            channels[k].words = planes[k];
+        }
+        std::filesystem::path file(product.name.empty() ? product.path.substr(1) + ".exr" : product.name);
+        if (file.is_relative() && !directory.empty()) {
+            file = directory / file;
+        }
+        LRT_TRY(io::writeExrChannels(file, product.width, product.height, channels));
+        written.push_back(file);
+    }
+    return written;
 }
 
 void StageRenderer::requestOutputs(const std::vector<std::string>& aovs) {

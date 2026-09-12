@@ -1,17 +1,23 @@
 include(Catch)
 
-# lrt_test(<name> SOURCES ... LIBS ...)
+# lrt_test(<name> SOURCES ... LIBS ... [LABELS ...])
 #
 # A Catch2 executable, registered with ctest case by case. GPU tests skip when
-# the machine has no device; they never fall back to anything else.
+# the machine has no device; they never fall back to anything else. Every
+# case carries the label `gpu`; a binary that needs a window carries
+# `display`, one that needs gpe's device `gpe` -- so a machine without
+# either excludes them by label (`ctest -LE display`) rather than reading
+# their skips as passes. What a case skips for a capability the device lacks
+# (rasterisation, ray queries) it says in its skip message, which
+# scripts/remote-test.sh tabulates.
 function(lrt_test name)
-    cmake_parse_arguments(ARG "" "" "SOURCES;LIBS;ENVIRONMENT_MODIFICATION" ${ARGN})
+    cmake_parse_arguments(ARG "" "" "SOURCES;LIBS;ENVIRONMENT_MODIFICATION;LABELS" ${ARGN})
     add_executable(${name} ${ARG_SOURCES})
     target_link_libraries(${name} PRIVATE Catch2::Catch2WithMain ${ARG_LIBS})
     lrt_set_target_defaults(${name})
     set_target_properties(${name} PROPERTIES BUILD_RPATH "${SLANG_ROOT}/lib")
     add_dependencies(${name} lrt_shaders_copy)
-    set(properties ENVIRONMENT "LRT_SHADER_DIR=${LRT_SHADER_OUTPUT_DIR}")
+    set(properties ENVIRONMENT "LRT_SHADER_DIR=${LRT_SHADER_OUTPUT_DIR}" LABELS "gpu;${ARG_LABELS}")
     if(ARG_ENVIRONMENT_MODIFICATION)
         list(APPEND properties ENVIRONMENT_MODIFICATION "${ARG_ENVIRONMENT_MODIFICATION}")
     endif()
@@ -94,7 +100,8 @@ set_target_properties(lrt_storm_oracle_tests PROPERTIES CXX_VISIBILITY_PRESET de
 if(LRT_BUILD_VIEW)
     lrt_test(lrt_view_tests
         SOURCES view/test_view.cpp
-        LIBS lrt::view)
+        LIBS lrt::view
+        LABELS display)
     add_dependencies(lrt_view_tests hdLrt)
     target_compile_options(lrt_view_tests PRIVATE -Wno-old-style-cast -Wno-shadow -Wno-deprecated-declarations)
     set_target_properties(lrt_view_tests PROPERTIES CXX_VISIBILITY_PRESET default VISIBILITY_INLINES_HIDDEN OFF
@@ -103,12 +110,14 @@ endif()
 
 lrt_test(lrt_gpu_host_tests
     SOURCES gpu_host/test_shared_device.cpp
-    LIBS lrt::gpu_host)
+    LIBS lrt::gpu_host
+    LABELS gpe)
 
 add_subdirectory(aofx/bundles)
 lrt_test(lrt_aofx_tests
     SOURCES aofx/test_aofx.cpp
-    LIBS lrt::aofx_host)
+    LIBS lrt::aofx_host
+    LABELS gpe)
 add_dependencies(lrt_aofx_tests aofx_test_bundles)
 target_compile_definitions(lrt_aofx_tests PRIVATE
     LRT_AOFX_TEST_BUNDLES="${LRT_AOFX_TEST_BUNDLES}"

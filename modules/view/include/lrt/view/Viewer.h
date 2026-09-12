@@ -24,6 +24,9 @@ struct ViewOptions {
     uint32_t              frames = 0;               ///< stop after this many; 0, when the window closes
     uint32_t              lightSamples = 1;         ///< samples per light per pixel
     bool                  chooseLights = false;     ///< one light a sample, by power
+    /// Extended dynamic range: a float surface in linear P3, ACES 2.0 with
+    /// the screen's peak as its peak. On a standard display the same as off.
+    bool                  edr = false;
     bool                  visible = true;
     /// Where the last frame goes as it was shown, panels included: an EXR of
     /// display-encoded values. Empty, nowhere.

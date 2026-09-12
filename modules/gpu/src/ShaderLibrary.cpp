@@ -1,10 +1,13 @@
 // Copyright (c) 2026 lucabRTrender contributors.
 #include "lrt/gpu/ShaderLibrary.h"
 
+#include <filesystem>
+#include <fstream>
 #include <functional>
 #include <string_view>
 
 #include "lrt/core/Log.h"
+#include "lrt/core/Platform.h"
 #include "lrt/gpu/Device.h"
 
 namespace lrt::gpu {
@@ -74,6 +77,13 @@ Result<std::shared_ptr<const Program>> ShaderLibrary::loadSource(const std::stri
                            diagnostics(diag.get()));
     }
     sources_.emplace(name, source);
+    // LRT_SHADER_DUMP=<dir>: every generated module's source, as a file a
+    // slangc can compile alone -- for timing a kernel's compile outside the
+    // process, or reading what a frame generated.
+    if (const std::string dump = platform::env("LRT_SHADER_DUMP"); !dump.empty()) {
+        std::ofstream out(std::filesystem::path(dump) / (name + ".slang"));
+        out << source;
+    }
     return link(key, loaded, name, entries, constants);
 }
 

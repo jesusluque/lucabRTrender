@@ -44,8 +44,8 @@ public struct LightRecord {
     public float  cumulative;       // its share of the frame's power, accumulated
     public uint   ies;              // its IES profile's row; 0xFFFFFFFF: none
     public float  iesAngleScale;    // UsdLux: > 0 divides theta, < 0 scales from 180, 0 none
-    public uint   pad0;
-    public uint   pad1;
+    public uint   pad0;          // the light BVH: its node's index
+    public uint   group;         // 0: in no light group; else 1 + its index among the frame's groups
     public float4 row0;          // light to world, rows of a 3x4
     public float4 row1;
     public float4 row2;

@@ -33,6 +33,10 @@ public:
     [[nodiscard]] rhi::WindowHandle handle() const;
     /// Once the surface is made: its layer at the window's backing scale.
     void matchSurfaceToBacking() const;
+    /// The screen's extended range headroom (1 on a standard display), and
+    /// the surface asked to show it -- linear P3 in a float format.
+    [[nodiscard]] double extendedRangeHeadroom() const;
+    [[nodiscard]] bool enableExtendedRange() const;
     /// The drawable's size, in pixels.
     [[nodiscard]] std::pair<uint32_t, uint32_t> framebufferSize() const;
     [[nodiscard]] bool shouldClose() const;

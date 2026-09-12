@@ -16,6 +16,7 @@
 #include "lrt/core/Result.h"
 #include "lrt/render/Camera.h"
 #include "lrt/usd/PrimData.h"
+#include "lrt/usd/RenderSettings.h"
 #include "lrt/render/TileRasterizer.h"
 #include "lrt/scene/GpuClouds.h"
 #include "lrt/technique/DisplayTransform.h"
@@ -154,6 +155,21 @@ public:
 
     /// Every camera prim on the stage.
     [[nodiscard]] std::vector<std::string> cameras() const;
+
+    /// A UsdRender settings prim, as Hydra's renderSettings bprim holds it
+    /// once it is made the scene's active one and synced: its products and
+    /// vars, purposes, colour space and `lrt:` settings.
+    [[nodiscard]] Result<RenderSettingsInfo> renderSettings(const std::string& path);
+    /// Renders every product of that settings prim -- each at its own
+    /// resolution from its own camera, its vars as the layers of one OpenEXR
+    /// written where `productName` says (relative to `directory`), 32-bit
+    /// floats unless `lrt:exrHalf` is set -- with `includedPurposes` as the
+    /// render tags and its `lrt:` settings applied. Returns the files written.
+    [[nodiscard]] Result<std::vector<std::filesystem::path>> renderProducts(const std::string& path, double time,
+                                                                            const std::filesystem::path& directory = {});
+    /// The purposes the next renders draw ("default", "render", "proxy",
+    /// "guide"): Hydra's render tags. Empty: default and render.
+    void setIncludedPurposes(const std::vector<std::string>& purposes);
 
     /// The stage's timeCodesPerSecond and startTimeCode: how a frame on a
     /// clock maps to a USD time.

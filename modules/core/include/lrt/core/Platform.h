@@ -75,6 +75,17 @@ void sleepPrecisely(std::chrono::nanoseconds duration);
 /// `nsWindow` is an NSWindow*; a no-op elsewhere.
 void matchLayerToBacking(void* nsWindow);
 
+/// The extended dynamic range a window's screen offers: its peak over its
+/// reference white (1.0 on a standard display; 2 to 16 on an HDR one, as
+/// its brightness stands). `nsWindow` is an NSWindow*; 1.0 elsewhere.
+[[nodiscard]] double extendedRangeHeadroom(void* nsWindow);
+
+/// A window's Metal layer asked for extended range content in linear
+/// Display P3 (1.0 the reference white, values above it the headroom):
+/// what a float surface shows as HDR. Returns whether it was set;
+/// false elsewhere.
+bool enableExtendedRange(void* nsWindow);
+
 /// A Metal buffer with private storage and hazard tracking, on `mtlDevice`:
 /// what OIDN will share, and what slang-rhi -- which tracks nothing and
 /// orders its own work -- will not make. Null off macOS or on failure. The

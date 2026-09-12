@@ -64,6 +64,17 @@ private:
     std::string         signature_ = "unset";
 };
 
+/// Where a frame's light groups go: `count` planes of float4, a pixel each,
+/// one after another in `colour` (the mean, as the frame's colour) for the
+/// material shading; the path tracer keeps them in its own accumulation
+/// (PathTracer::lightGroupMeanOffset). A frame with none compiles the
+/// kernels without them. At most kMaxLightGroups.
+struct LightGroupTargets {
+    const gpu::Buffer* colour = nullptr;
+    uint32_t           count = 0;
+};
+constexpr uint32_t kMaxLightGroups = 8;
+
 /// What generated material code reads: the scene a visibility sample is
 /// rebuilt from, the material rows and the blob their values live in, the
 /// textures, and the frame's time.
@@ -91,6 +102,10 @@ struct MaterialFrame {
     /// distance within the lights' cones, at the shading point -- where the
     /// table has one (any bounded light); by power alone otherwise.
     bool                          lightBvh = true;
+    /// The light groups the frame writes beside its colour: a light's direct
+    /// contribution, at every bounce, under its group. Emission and the
+    /// background are in no group.
+    LightGroupTargets             groups;
 
     [[nodiscard]] bool valid() const noexcept {
         return programs != nullptr && scene != nullptr && records != nullptr && records->valid() && blob != nullptr &&

@@ -1,6 +1,8 @@
 // Copyright (c) 2026 lucabRTrender contributors.
 #include "lrt/technique/PathTracer.h"
 
+#include <algorithm>
+
 #include "lrt/gpu/CommandBatch.h"
 #include "lrt/gpu/Device.h"
 #include "lrt/gpu/ShaderLibrary.h"
@@ -198,6 +200,59 @@ static const bool kTraces = false;
 /// The surface a hit lands on, its material evaluated, and the light it
 /// gathers: shared by the camera's hit and the bounce's, so the two are shaded
 /// by the same rules.
+/// The light groups: declared only in the kernel of a frame that has them.
+/// Their planes live in `sum` after the colour's -- the sums at planes
+/// 1..groupCount, the means after those -- since a Metal kernel binds at
+/// most 31 buffers and this one is at the limit: two more put it at
+/// buffer(32), which the compiler in the process never returned from.
+const char* kGroups = R"(
+static const bool kLightGroups = true;
+uniform uint                   groupCount;
+// Eight registers and a select each, never an array indexed by the group
+// nor a buffer written inside the bounce loop: either made the Metal
+// compiler take longer than ten minutes over this kernel.
+struct Groups {
+    float3 g0; float3 g1; float3 g2; float3 g3; float3 g4; float3 g5; float3 g6; float3 g7;
+};
+Groups groupsZero() {
+    Groups g;
+    g.g0 = float3(0.0); g.g1 = float3(0.0); g.g2 = float3(0.0); g.g3 = float3(0.0);
+    g.g4 = float3(0.0); g.g5 = float3(0.0); g.g6 = float3(0.0); g.g7 = float3(0.0);
+    return g;
+}
+void addGroup(inout Groups g, uint group, float3 c) {
+    g.g0 += group == 1u ? c : float3(0.0);
+    g.g1 += group == 2u ? c : float3(0.0);
+    g.g2 += group == 3u ? c : float3(0.0);
+    g.g3 += group == 4u ? c : float3(0.0);
+    g.g4 += group == 5u ? c : float3(0.0);
+    g.g5 += group == 6u ? c : float3(0.0);
+    g.g6 += group == 7u ? c : float3(0.0);
+    g.g7 += group == 8u ? c : float3(0.0);
+}
+float3 groupOf(Groups g, uint k) {
+    return k == 0u ? g.g0 : k == 1u ? g.g1 : k == 2u ? g.g2 : k == 3u ? g.g3
+         : k == 4u ? g.g4 : k == 5u ? g.g5 : k == 6u ? g.g6 : g.g7;
+}
+void endGroups(uint at, uint pixels, Groups g, float alpha, float totalSamples) {
+    for (uint k = 0; k < groupCount && k < 8; ++k) {
+        const uint slot = (1u + k) * pixels + at;
+        const float4 kept = path.accumulated != 0 ? sum[slot] : float4(0.0);
+        const float4 now = kept + float4(groupOf(g, k), alpha);
+        sum[slot] = now;
+        sum[(1u + groupCount + k) * pixels + at] = totalSamples > 0.0 ? now / totalSamples : float4(0.0);
+    }
+}
+)";
+
+const char* kNoGroups = R"(
+static const bool kLightGroups = false;
+struct Groups { float3 g0; };
+Groups groupsZero() { Groups g; g.g0 = float3(0.0); return g; }
+void addGroup(inout Groups g, uint group, float3 c) {}
+void endGroups(uint at, uint pixels, Groups g, float alpha, float totalSamples) {}
+)";
+
 const char* kBody = R"(
 struct Shaded {
     LobeStack      stack;
@@ -322,7 +377,8 @@ Shaded shadeLensSample(uint2 pixel, uint sample, uint mask) {
 /// One light, sampled and weighed: next event estimation, with the density of
 /// the material's own sampling folded in by the power heuristic so the two
 /// strategies do not double count.
-float3 gatherLight(Shaded sh, uint2 pixel, uint sample, uint bounce, uint mask) {
+float3 gatherLight(Shaded sh, uint2 pixel, uint sample, uint bounce, uint mask, out uint group) {
+    group = 0;
     if (lightCount == 0) {
         return float3(0.0);
     }
@@ -335,6 +391,7 @@ float3 gatherLight(Shaded sh, uint2 pixel, uint sample, uint bounce, uint mask) 
         return float3(0.0);
     }
     const LightRecord light = lights[choice.index];
+    group = light.group;
     if (!lightLinked(light.lightCategory, sh.categoriesLo, sh.categoriesHi)) {
         return float3(0.0);
     }
@@ -400,6 +457,9 @@ void tracePaths(uint3 group: SV_GroupID, uint index: SV_GroupIndex) {
     float  alpha = 0.0;
     float  hitDepth = 0.0;
     float  squares = 0.0;   // sum of each sample's luminance squared
+    const uint pixels = camera.width * camera.height;
+    uint group = 0;
+    Groups groups = groupsZero();
     for (uint sample = 0; sample < samples && (first.valid || ownRays); ++sample) {
         const uint mask = sampleMask(tid, sample);
         Shaded sh = ownRays && sample > 0 ? shadeLensSample(tid, sample, mask) : first;
@@ -411,7 +471,11 @@ void tracePaths(uint3 group: SV_GroupID, uint index: SV_GroupIndex) {
         // the path finds, and it is this surface's opacity the pixel carries.
         const float opacity = sh.stack.opacity;
         alpha += opacity;
-        float3 carried = sh.stack.emission + gatherLight(sh, tid, sample, 0u, mask);
+        const float3 direct = gatherLight(sh, tid, sample, 0u, mask, group);
+        float3 carried = sh.stack.emission + direct;
+        if (kLightGroups) {
+            addGroup(groups, group, direct * opacity);
+        }
         float3 throughput = float3(1.0);
         // The bounces. Each one samples the material, traces where it points,
         // and gathers that surface's light through what the path has kept.
@@ -444,7 +508,11 @@ void tracePaths(uint3 group: SV_GroupID, uint index: SV_GroupIndex) {
             // What the bounce found: its own emission weighed against the
             // light sampling that could have found it, and its direct light.
             carried += throughput * next.stack.emission;
-            carried += throughput * gatherLight(next, tid, sample, bounce + 1u, mask);
+            const float3 bounced = gatherLight(next, tid, sample, bounce + 1u, mask, group);
+            carried += throughput * bounced;
+            if (kLightGroups) {
+                addGroup(groups, group, throughput * bounced * opacity);
+            }
             sh = next;
         }
         total += carried * opacity;
@@ -465,6 +533,7 @@ void tracePaths(uint3 group: SV_GroupID, uint index: SV_GroupIndex) {
     const float total_samples = before + float(samples);
     colour[at] = total_samples > 0.0 ? now / total_samples : float4(0.0);
     depth[at] = hitDepth;
+    endGroups(at, pixels, groups, alpha, total_samples);
     // The luminance's second moment. Whether the pixel stops is decided by
     // pathDecide, after the pass, where its neighbours' spread can be read
     // without a race.
@@ -556,13 +625,18 @@ Result<PathTracer> PathTracer::create(gpu::ShaderLibrary& library) {
 }
 
 Result<void> PathTracer::setPrograms(const MaterialPrograms& programs) {
-    if (programs.module() == module_ && kernel_.has_value()) {
+    return setPrograms(programs, groups_);
+}
+
+Result<void> PathTracer::setPrograms(const MaterialPrograms& programs, bool groups) {
+    if (programs.module() == module_ && groups == groups_ && kernel_.has_value()) {
         return ok();
     }
     const bool traces = device_->caps().rayQuery && device_->caps().accelerationStructure;
-    const std::string name = programs.module() + (traces ? "_path_traced" : "_path_direct");
-    const std::string source =
-        "import " + programs.module() + ";\n" + kPrelude + (traces ? kRays : kNoRays) + kBody;
+    const std::string name =
+        programs.module() + (traces ? "_path_traced" : "_path_direct") + (groups ? "_groups" : "");
+    const std::string source = "import " + programs.module() + ";\n" + kPrelude + (groups ? kGroups : kNoGroups) +
+                               (traces ? kRays : kNoRays) + kBody;
     auto program = library_->loadSource(name, source, {"tracePaths", "pathDecide"});
     if (!program) return std::move(program).error();
     auto kernel = gpu::ComputeKernel::create(*library_, name, "tracePaths");
@@ -572,6 +646,7 @@ Result<void> PathTracer::setPrograms(const MaterialPrograms& programs) {
     if (!progressKernel) return std::move(progressKernel).error();
     progressKernel_.emplace(std::move(*progressKernel));
     module_ = programs.module();
+    groups_ = groups;
     accumulated_ = 0;
     return ok();
 }
@@ -582,6 +657,11 @@ Result<void> PathTracer::trace(gpu::CommandBatch& batch, const VisibilityTargets
     if (!kernel_.has_value()) {
         return Error(ErrorCode::InvalidArgument, "path tracer: no materials set");
     }
+    const bool groups = frame.groups.count > 0;
+    if (groups != groups_ && frame.programs != nullptr) {
+        LRT_TRY(setPrograms(*frame.programs, groups));
+    }
+    const uint32_t groupCount = std::min(frame.groups.count, kMaxLightGroups);
     const uint64_t pixels = uint64_t{targets.width} * targets.height;
     const bool resized = out.width != targets.width || out.height != targets.height || !out.colour.valid();
     if (resized) {
@@ -602,14 +682,18 @@ Result<void> PathTracer::trace(gpu::CommandBatch& batch, const VisibilityTargets
         out.width = targets.width;
         out.height = targets.height;
     }
-    if (resized || width_ != targets.width || height_ != targets.height || !sum_.valid()) {
+    // The sum holds the colour's plane and, with light groups, their sums
+    // and their means after it.
+    const uint32_t planes = 1 + 2 * groupCount;
+    if (resized || width_ != targets.width || height_ != targets.height || !sum_.valid() || planes != sumPlanes_) {
         gpu::BufferDesc sum;
-        sum.bytes = pixels * 16;
+                sum.bytes = pixels * 16 * planes;
         sum.elementBytes = 16;
         sum.label = "path.sum";
         auto made = gpu::Buffer::create(*device_, sum);
         if (!made) return std::move(made).error();
         sum_ = std::move(*made);
+        sumPlanes_ = planes;
         gpu::BufferDesc squares;
         squares.bytes = pixels * 4;
         squares.elementBytes = 4;
@@ -678,6 +762,9 @@ Result<void> PathTracer::trace(gpu::CommandBatch& batch, const VisibilityTargets
         cursor["path"]["writeAux"].setData(uint32_t{aux != nullptr ? 1u : 0u});
         cursor["sumSquares"].setBinding(sumSquares_.rhi());
         cursor["done"].setBinding(done_.rhi());
+        if (groups) {
+            cursor["groupCount"].setData(groupCount);
+        }
         cursor["path"]["adaptive"].setData(uint32_t{settings.adaptive ? 1u : 0u});
         cursor["path"]["errorTarget"].setData(settings.errorTarget);
         cursor["path"]["minSamples"].setData(settings.minSamples);

@@ -87,6 +87,13 @@ struct Light {
     /// Filled in by whoever owns the texture store, before the table is set.
     uint32_t     textureId = 0xFFFFFFFFU;
     uint32_t     sampler = 0;
+    /// The light group it belongs to (`lrt:lightGroup`, or RenderMan's
+    /// `ri:light:lightGroup`); empty for none. Whoever renders the frame
+    /// numbers the groups a frame asks for into `groupIndex`: 0 none, else
+    /// 1 + the group's index, which a kernel accumulates the light's direct
+    /// contribution under.
+    std::string  group;
+    uint32_t     groupIndex = 0;
 };
 
 /// What shaders/lrt/light/lights.slang reads.
@@ -110,7 +117,7 @@ struct LightRecord {
     uint32_t ies = 0xFFFFFFFFU;       ///< its IES profile's row; none: no profile
     float    iesAngleScale = 0.0F;
     uint32_t pad0 = 0;
-    uint32_t pad1 = 0;
+    uint32_t group = 0;   ///< 0: no light group; else 1 + its index among the frame's
     float    rows[12] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0};   ///< light to world, rows of a 3x4
 };
 

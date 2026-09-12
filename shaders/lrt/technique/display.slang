@@ -18,14 +18,16 @@
 // P3 (P3-D65 primaries, sRGB's transfer).
 module display;
 
+import lrt.technique.aces2;
+
 struct DisplayParams {
     uint  width;
     uint  height;
     uint  mode;          // 0 colour, 1 depth, 2 ids, 3 vector, 4 nothing (the background)
     uint  stride;        // entries per pixel in the source
     uint  offset;        // which entry
-    uint  view;          // 0 Standard, 1 AgX
-    uint  display;       // 0 sRGB, 1 Rec.709 (BT.1886), 2 Display P3
+    uint  view;          // 0 Standard, 1 AgX, 2 ACES 2.0
+    uint  display;       // 0 sRGB, 1 Rec.709 (BT.1886), 2 Display P3, 3 linear P3 with extended range
     uint  flipRows;      // 1: the output's row 0 is the source's top row
     float exposure;      // stops
     float nearZ;         // depth: white at this view z
@@ -35,9 +37,12 @@ struct DisplayParams {
     float backgroundR; float backgroundG; float backgroundB;   // display-referred linear
     uint  outputWidth;   // the output's size: each output pixel shows the source pixel under it
     uint  outputHeight;
-    uint  pad0; uint pad1; uint pad2;
+    float peakScale;     // display 3: the headroom, peak luminance over reference white, values are clamped to it
+    uint  pad1; uint pad2;
 };
 
+StructuredBuffer<Aces2Params> acesParams;   // view 2: one, built by aces2_prepare
+StructuredBuffer<float>       acesTables;   // and its tables
 StructuredBuffer<float4>     colour;   // modes 0 and 3
 StructuredBuffer<float>      depth;    // mode 1
 StructuredBuffer<uint>       ids;      // mode 2
@@ -49,6 +54,9 @@ float srgbEncode(float x) {
 }
 
 public float3 transferEncode(float3 c, uint display) {
+    if (display == 3) {
+        return clamp(c, float3(0.0), float3(params.peakScale));   // linear, the headroom kept, as ACES clamps at its peak
+    }
     c = saturate(c);
     if (display == 1) {
         return pow(c, float3(1.0 / 2.4));
@@ -94,7 +102,13 @@ public float3 displayColour(float4 premultiplied, float3 background, float expos
     if (view == 1) {
         c = agx(c);
     }
-    if (display == 2) {
+    if (view == 2) {
+        // The output transform limits to the display's primaries itself
+        // (its tables were built for them), so P3 needs no matrix here.
+        const Aces2Params p = acesParams[0];
+        return transferEncode(outputTransformFwd(mul(c, p.sceneToAP0), p, acesTables), display);
+    }
+    if (display == 2 || display == 3) {
         c = mul(kRec709ToP3, c);
     }
     return transferEncode(c, display);

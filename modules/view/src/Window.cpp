@@ -72,6 +72,22 @@ void Window::matchSurfaceToBacking() const {
 #endif
 }
 
+double Window::extendedRangeHeadroom() const {
+#if defined(__APPLE__)
+    return platform::extendedRangeHeadroom(glfwGetCocoaWindow(window_));
+#else
+    return 1.0;
+#endif
+}
+
+bool Window::enableExtendedRange() const {
+#if defined(__APPLE__)
+    return platform::enableExtendedRange(glfwGetCocoaWindow(window_));
+#else
+    return false;
+#endif
+}
+
 std::pair<uint32_t, uint32_t> Window::framebufferSize() const {
     int w = 0;
     int h = 0;

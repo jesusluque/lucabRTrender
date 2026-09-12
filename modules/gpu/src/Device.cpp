@@ -75,6 +75,28 @@ std::filesystem::path shaderDirectory() {
 
 Result<std::shared_ptr<Device>> Device::create(const DeviceDesc& desc) {
     std::vector<Backend> order = desc.backends.empty() ? platformPreference() : desc.backends;
+    // LRT_BACKEND=cuda|vulkan|metal|d3d12 (a comma-separated order) chooses
+    // for a whole run what a caller left to the platform: how one suite is
+    // run once a backend at a time.
+    if (desc.backends.empty()) {
+        const std::string fromEnv = platform::env("LRT_BACKEND");
+        std::vector<Backend> named;
+        size_t start = 0;
+        while (start <= fromEnv.size() && !fromEnv.empty()) {
+            const size_t comma = fromEnv.find(',', start);
+            const std::string word = fromEnv.substr(start, comma == std::string::npos ? std::string::npos : comma - start);
+            if (word == "metal") named.push_back(Backend::Metal);
+            else if (word == "cuda") named.push_back(Backend::CUDA);
+            else if (word == "vulkan") named.push_back(Backend::Vulkan);
+            else if (word == "d3d12") named.push_back(Backend::D3D12);
+            else if (!word.empty()) log::warn("LRT_BACKEND: '{}' is not a backend (metal, cuda, vulkan, d3d12)", word);
+            if (comma == std::string::npos) break;
+            start = comma + 1;
+        }
+        if (!named.empty()) {
+            order = named;
+        }
+    }
 
     auto device = std::shared_ptr<Device>(new Device());
     device->searchPaths_.push_back(shaderDirectory().string());

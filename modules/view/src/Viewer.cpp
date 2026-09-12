@@ -198,11 +198,20 @@ Result<ViewStats> runViewer(const ViewOptions& options) {
         return Error(ErrorCode::DeviceFailure, "cannot make a surface for the window");
     }
     (*window)->matchSurfaceToBacking();
+    // Extended range: the surface in floats, linear P3 with 1.0 at the
+    // reference white, and ACES 2.0 filling the headroom the screen has.
+    rhi::Format surfaceFormat = kSurfaceFormat;
+    double headroom = 1.0;
+    if (options.edr && (*window)->enableExtendedRange()) {
+        surfaceFormat = rhi::Format::RGBA16Float;
+        headroom = (*window)->extendedRangeHeadroom();
+        lrt::log::info("lrt view: extended range on, headroom {:.2f}", headroom);
+    }
     uint32_t surfaceWidth = 0;
     uint32_t surfaceHeight = 0;
     const auto configure = [&](uint32_t w, uint32_t h) -> Result<void> {
         rhi::SurfaceConfig config;
-        config.format = kSurfaceFormat;
+        config.format = surfaceFormat;
         config.usage = rhi::TextureUsage::Present | rhi::TextureUsage::RenderTarget |
                        rhi::TextureUsage::UnorderedAccess | rhi::TextureUsage::ShaderResource;
         config.width = w;
@@ -244,8 +253,8 @@ Result<ViewStats> runViewer(const ViewOptions& options) {
     int technique = indexOf(kTechniques, options.technique);
     int visibility = indexOf(kVisibility, options.visibility);
     int aov = 0;
-    int viewTransform = 1;   // AgX
-    int displayEncoding = 0;
+    int viewTransform = surfaceFormat == rhi::Format::RGBA16Float ? 2 : 1;   // ACES 2.0 for extended range, AgX otherwise
+    int displayEncoding = surfaceFormat == rhi::Format::RGBA16Float ? 3 : 0;
     float exposure = 0.0F;
     float renderScale = 1.0F;
     double time = stage.startTimeCode();
@@ -277,6 +286,7 @@ Result<ViewStats> runViewer(const ViewOptions& options) {
         technique::DisplaySettings settings;
         settings.view = static_cast<technique::ViewTransform>(viewTransform);
         settings.display = static_cast<technique::DisplayEncoding>(displayEncoding);
+        settings.peakLuminance = static_cast<float>(100.0 * headroom);
         settings.exposure = exposure;
         settings.background = kBackground;
         settings.nearZ = static_cast<float>(std::max(orbit.distance - orbit.radius, orbit.distance * 1e-2));
@@ -391,10 +401,10 @@ Result<ViewStats> runViewer(const ViewOptions& options) {
                 request();
             }
             ImGui::Separator();
-            const char* views[] = {"Standard", "AgX"};
-            ImGui::Combo("View transform", &viewTransform, views, 2);
-            const char* displays[] = {"sRGB", "Rec.709 (BT.1886)", "Display P3"};
-            ImGui::Combo("Display", &displayEncoding, displays, 3);
+            const char* views[] = {"Standard", "AgX", "ACES 2.0"};
+            ImGui::Combo("View transform", &viewTransform, views, 3);
+            const char* displays[] = {"sRGB", "Rec.709 (BT.1886)", "Display P3", "Linear P3 (extended range)"};
+            ImGui::Combo("Display", &displayEncoding, displays, surfaceFormat == rhi::Format::RGBA16Float ? 4 : 3);
             ImGui::SliderFloat("Exposure", &exposure, -8.0F, 8.0F, "%.1f stops");
             ImGui::SliderFloat("Render scale", &renderScale, 0.25F, 1.0F, "%.2f");
             const double start = stage.startTimeCode();
@@ -505,7 +515,7 @@ Result<ViewStats> runViewer(const ViewOptions& options) {
                 LRT_TRY(display->run(batch, *source, displaySettings(), image.get(), fbw, fbh));
             }
         }
-        LRT_TRY((*ui)->render(batch, ImGui::GetDrawData(), image->getDefaultView(), kSurfaceFormat, fbw, fbh));
+        LRT_TRY((*ui)->render(batch, ImGui::GetDrawData(), image->getDefaultView(), surfaceFormat, fbw, fbh));
         LRT_TRY(batch.submit(false));
         const bool last = options.frames != 0 && frames + 1 == options.frames;
         if (last && !options.snapshot.empty() && drawn) {

@@ -97,6 +97,7 @@ LightRecord LightTable::recordOf(const Light& light) {
     record.coneSoftness = light.coneSoftness;
     record.texture = light.textureId;
     record.sampler = light.sampler;
+    record.group = light.groupIndex;
     record.lightCategory = light.lightCategory;
     record.shadowCategory = light.shadowCategory;
     const std::array<float, 12> rows = light.lightToWorld.rows3x4();

@@ -33,6 +33,9 @@ public:
 
     /// The kernel is rebuilt when `programs` dispatches to a different set.
     [[nodiscard]] Result<void> setPrograms(const MaterialPrograms& programs);
+    /// The same, for a frame with light groups (their buffers declared) or
+    /// without; `shade` switches as the frame asks.
+    [[nodiscard]] Result<void> setPrograms(const MaterialPrograms& programs, bool groups);
 
     [[nodiscard]] Result<void> shade(gpu::CommandBatch& batch, const VisibilityTargets& targets,
                                      const render::Projection& projection, const MaterialFrame& frame,
@@ -43,6 +46,7 @@ private:
     gpu::Device*                     device_ = nullptr;
     std::optional<gpu::ComputeKernel> kernel_;
     std::string                      module_;
+    bool                             groups_ = false;
 };
 
 }   // namespace lrt::technique

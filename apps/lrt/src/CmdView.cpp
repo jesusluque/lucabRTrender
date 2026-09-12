@@ -22,6 +22,7 @@ void addView(CLI::App& app) {
     cmd->add_option("--frames", options->frames, "close after this many frames and print their timings");
     cmd->add_option("--light-samples", options->lightSamples, "samples per light per pixel (1 is interactive)");
     cmd->add_flag("--choose-lights", options->chooseLights, "one light a sample, chosen by power");
+    cmd->add_flag("--edr", options->edr, "extended dynamic range: a float surface and ACES 2.0 up to the screen's peak");
     cmd->add_option("--snapshot", options->snapshot, "with --frames: the last frame as shown, to this EXR");
     cmd->callback([options, size] {
         if (std::sscanf(size->c_str(), "%ux%u", &options->width, &options->height) != 2) {

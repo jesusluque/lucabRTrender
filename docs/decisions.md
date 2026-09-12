@@ -2407,6 +2407,153 @@ world would take the binding's matrix as a uniform of the compiled module,
 and that is the next step when a graph needs it -- the bookkeeping is what
 the plan asked M8.2 to settle, so that step is a uniform and not a search.
 
+## Complete USD: render settings and outputs (M10)
+
+### Render settings prims, products and vars
+
+A `UsdRenderSettings` prim reaches the delegate as Hydra's `renderSettings`
+bprim (`HdLrtRenderSettings`, hd's `HdRenderSettings` with a sync counter),
+through `HdsiRenderSettingsFilteringSceneIndex` registered with the `lrt`
+namespace prefix so `lrt:pathSamples`, `lrt:technique` and the rest arrive
+as its namespaced settings, and `HdsiSceneGlobalsSceneIndex`, which is
+where the active settings prim is named. `StageRenderer::renderSettings`
+makes a prim active, syncs the prims (no tasks, so no frame) and reads the
+bprim back: products, vars, purposes, colour space, camera, its settings.
+`renderProducts` renders each product at its own resolution from its own
+camera with `includedPurposes` as the render tags (default: geometry,
+render: render, proxy, guide as themselves) and the `lrt:` settings applied,
+and writes its vars as the layers of one OpenEXR (`io::writeExrChannels`:
+named channels, half, float or uint, sorted as the format wants; `readExrChannels`
+reads any file's channels back). A var names its AOV by `sourceName` (hd's
+names; RenderMan's `Ci` and `z` read as colour and depth; `primvar` sources
+as `primvars:NAME`; of light path expressions, `C.*<L.'NAME'>` as the light
+group NAME). Layers are `NAME.R/G/B/A`, `NAME.x/y/z`, `Z` for a var named
+depth, a bare `NAME` for an id plane (uint, so -1 stays 0xFFFFFFFF); 32-bit
+floats unless `lrt:exrHalf` is set. `lrt stage --render-settings /Render/X`
+renders the products and stops.
+
+**Two things the plumbing needed that the reference host does not say.** A
+settings prim's `active` is a dependency the filtering scene index
+declares on the scene globals, and dependencies become dirty notices only
+through `HdDependencyForwardingSceneIndex`, which the renderer's chain now
+ends in; without it the second prim made active synced never and read
+inactive. And marking the bprim dirty through the change tracker is a
+no-op for a prim the emulation delivered: it dirties the legacy prim scene
+index, which does not hold it.
+
+**Checked** through Hydra: a settings prim with two squares (one a guide),
+a product of four vars (beauty from `Ci`, depth from `z`, primId, Neye) at
+96x64 -- the prim reads back active, synced once, with its purposes and
+`lrt:` settings; the product's nine channels, read back from the file and
+uploaded, are bit for bit the AOVs rendered one at a time (`countDifferent`
+0 words for every layer); a second settings prim that includes guides
+covers 3812 pixels against 2916, and reads active once asked, the first
+one again after. The rays' render tags are part of the path tracer's frame
+key, as the plan asked: a purpose that changes starts the mean again.
+
+### Light groups
+
+A light's `lrt:lightGroup` (or RenderMan's `ri:light:lightGroup`) names its
+group; a frame asks for a group as the `lightGroup:NAME` output, and the
+engine numbers the groups asked for (1 + index; 0 for a light in none, or
+in one nobody asked for) into `LightRecord.group`. Both shading kernels
+accumulate each light's direct contribution under its group -- the raster's
+per light, the path tracer's at every bounce through the path's throughput
+-- and a frame without groups compiles exactly the kernel it always did:
+the groups' code is a variant of the generated source, not a branch.
+Emission and the background are in no group. At most eight.
+
+**Where the planes live** is a lesson twice over. The raster's go to a
+buffer of their own. The path tracer's go into its accumulation buffer after
+the colour's plane (sums, then means), because the traced kernel stands at
+Metal's limit of 31 buffers: two more put it at `buffer(32)`, and the Metal
+compiler in the process did not fail -- it never returned, ten minutes and
+counting, while the same source through `xcrun metal` fails in a tenth of
+a second with the error. `LRT_SHADER_DUMP=<dir>` now writes every generated
+module, which is how that was found. And accumulating the groups in a local
+array indexed by the light's group, or writing the buffer inside the bounce
+loop, were both tried first; eight registers and a select each is what the
+kernel has.
+
+**Checked** through Hydra with a floor under two lights in `key`, one in
+`fill` and a var for an empty `rim`: at every pixel the groups summed are
+the beauty (worst 1.8e-7 relative raster, 2.4e-7 path traced, over 4292
+covered pixels) and the empty group is zero exactly; the same through a
+render product whose vars are the light path expressions.
+
+**A Metal problem this found.** The raster technique with any shadow ray
+through Hydra wrote rows of garbage in blocks of half a threadgroup,
+nondeterministic, on an Apple M5 Pro: clean under Metal shader validation,
+clean without the trace, clean with the structure bound but unused -- and
+clean once the kernel stopped copying the material's lobe stack into a
+local and read it in thread memory where the material left it. The path
+tracer, which keeps its stack in a struct it passes on, never showed it.
+Live state across the intersector call is the reading that fits; it is
+measured, not understood. Every Hydra light test had shadows off, which is
+why nothing had caught it; the regression that does compares shadows on
+against off over an unoccluded floor, three times, 0 words apart.
+
+### ACES 2.0, on the device, tables and all
+
+`aces2.slang` is the Academy's ACES 2.0 output transform ported function
+for function from the reference CTL (aces-core `Lib.Academy.OutputTransform`
+and `Lib.Academy.Tonescale`): Hellwig 2022's appearance model to J, M, h;
+the tonescale on J; the in-gamut compression of M; the compression towards
+the display cube's boundary; and its inverse. What the reference computes
+once at init -- the reach of AP1 at every hue, the display gamut's cusp at
+every hue with the hue table it samples, the upper hull's gamma -- are
+tables of 362 entries built by three kernels (`aces2_prepare.slang`: the
+parameters and the hue table on one thread, since the hue table follows
+the sorted corner hues in order; then a thread a hue; then the wrap
+entries) into one float buffer, `technique::Aces2Tables`, rebuilt when the
+peak luminance or the limiting primaries change. The renderer's linear
+Rec.709 goes to ACES2065-1 by a Bradford adaptation computed on the device
+from the chromaticities. The display transform's third view, limited to
+Rec.709 or to P3 as the display is; `lrt view` lists it.
+
+**Checked** in `aces2_check.slang`, at 100 nits limited to Rec.709 and at
+1000 nits limited to P3: 256 scene greys over sixteen stops come out
+neutral (spread 5e-6), on the tonescale written a second time in the check
+from the published constants in its own form (7e-6 relative), rising every
+step; 18% grey shows 0.10000 of reference white at 100 nits (the
+reference's 10.013 nits less its flare term); inverse then forward over
+8192 display colours returns them to 6e-6 of the peak. The gamut
+compression approximates the cube's boundary (a smooth cusp, a hull gamma
+fitted at five points), so 4.7% of scene colours of any saturation and
+exposure land a little outside it at 100 nits (worst 0.11 over), 0.45% at
+1000 nits: the reference clamps at the display encoding, and so does the
+display kernel; the check bounds the count and the worst.
+
+### Extended range, and what OCIO is not
+
+`DisplayEncoding::LinearP3` leaves linear P3 with 1.0 at the reference
+white and the headroom above it, clamped at ACES's peak; `lrt view --edr`
+asks the window's Metal layer for extended range content in
+`kCGColorSpaceExtendedLinearDisplayP3` (`platform::enableExtendedRange`,
+through the Objective-C runtime and CoreGraphics, in Platform where the
+rule puts OS calls), takes an `RGBA16Float` surface, and shows ACES 2.0 with
+the screen's headroom times 100 nits as its peak
+(`platform::extendedRangeHeadroom`, the screen's
+`maximumExtendedDynamicRangeColorComponentValue`). Measured here on a
+screen reporting a headroom of 1.00: the pipeline runs (draw 12.6 ms
+medians at 640x400, snapshot written), which shows the plumbing and not the
+range; a screen with headroom is what would.
+
+**OCIO is not built.** The USD prefix carries no OpenColorIO, so the
+optional route the plan described -- OCIO as a compiler whose shader text
+and LUTs become a generated Slang module and textures, the LUT values the
+one thing the host would compute -- is not in the tree; ACES 2.0 analytic
+is the default and the only colour management, and `renderingColorSpace`
+is read from the settings prim and reported, not acted on.
+
+**Not done.** Light groups collect direct light only: emission seen by the
+camera or a bounce, and the background, are in no group, so a frame with
+emissive geometry sums its groups short of the beauty by exactly those.
+`materialBindingPurposes` is read and not applied (one purpose, `full`, is
+what the delegate binds). Products' `disableMotionBlur` and
+`disableDepthOfField` are read and not applied. A render var of any other
+light path expression is refused with a message.
+
 ## Linux, on the 94 (M11's first half)
 
 ### The first table, after the port was reconciled with engine
@@ -2659,6 +2806,42 @@ manifest hash, the whole sort, and gpe sharing the device. What is left is the
 texture surface write (#46, #48, and the ray tracer and USD tests that shade
 through it), the hole flags (#43, fixed after this reading), and the two
 measured above.
+
+### The second half's tools: a backend by environment, labels, the remote run
+
+- **`LRT_BACKEND=cuda|vulkan|metal|d3d12`** (an order, comma-separated)
+  chooses the backend for a whole run where a caller left it to the
+  platform, so one suite runs once a backend at a time; `lrt info` shows
+  which was taken.
+- **ctest labels.** Every case carries `gpu`; `lrt_view_tests` carries
+  `display` and the gpe-backed binaries (`lrt_gpu_host_tests`,
+  `lrt_aofx_tests`) `gpe`, so a machine without a window or without gpe
+  excludes them by label (`ctest -LE display`) instead of reading their
+  skips as passes. A case that skips for a capability the device lacks --
+  rasterisation, ray queries, a uint view of an 8-bit texture -- says so in
+  its skip message; that is per case, where a label is per binary.
+- **`scripts/remote-test.sh [user@host] [preset] [branch]`** checks the
+  branch out on the machine, builds the preset, runs ctest and prints the
+  table -- passed, failed, and every skip with the reason it gave -- from
+  the remote's `LastTest.log`, which it brings back to
+  `build/remote/<preset>/`. A skip is not a pass, and the table says which is
+  which.
+- **A test's counters start from zero on purpose.** `test::uintBuffer` now
+  writes zeros: the light BVH's draws test read back 1053144244 draws of a
+  million on the L4, the counter having started from what the device last
+  left there -- the same lesson the engine's hole flags taught, arriving in
+  the tests.
+
+### A note on WebGPU
+
+Everything a frame does is Slang, and Slang emits WGSL, so the shading,
+the materials, the lights and the compute BVH route would port. What would
+not, without work: there are no ray queries, so the path tracer would trace
+over `BvhScene` alone; buffers bind through bind groups with a small limit
+per stage and no bindless textures, which the texture table and the
+kernels at Metal's 31-buffer limit would both have to be reshaped for; no
+fp64, no OIDN, no OpenUSD in a browser -- so the delegate stays native and
+a WebGPU build would take the engine's records, not Hydra's prims.
 
 ### Not done
 

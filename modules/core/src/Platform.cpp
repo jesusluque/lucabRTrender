@@ -17,6 +17,8 @@
 #include <mach-o/dyld.h>
 #include <objc/message.h>
 #include <objc/runtime.h>
+#include <CoreFoundation/CoreFoundation.h>
+#include <CoreGraphics/CoreGraphics.h>
 #include <mach/mach.h>
 #include <mach/mach_time.h>
 #include <mach/thread_policy.h>
@@ -189,6 +191,62 @@ void matchLayerToBacking(void* nsWindow) {
     }
 #else
     (void)nsWindow;
+#endif
+}
+
+double extendedRangeHeadroom(void* nsWindow) {
+#if defined(__APPLE__)
+    if (nsWindow == nullptr) {
+        return 1.0;
+    }
+    const auto send = [](void* receiver, const char* selector) {
+        return reinterpret_cast<void* (*)(void*, SEL)>(objc_msgSend)(receiver, sel_registerName(selector));
+    };
+    void* screen = send(nsWindow, "screen");
+    if (screen == nullptr) {
+        return 1.0;
+    }
+    const double headroom = reinterpret_cast<double (*)(void*, SEL)>(objc_msgSend)(
+        screen, sel_registerName("maximumExtendedDynamicRangeColorComponentValue"));
+    return headroom > 1.0 ? headroom : 1.0;
+#else
+    (void)nsWindow;
+    return 1.0;
+#endif
+}
+
+bool enableExtendedRange(void* nsWindow) {
+#if defined(__APPLE__)
+    if (nsWindow == nullptr) {
+        return false;
+    }
+    const auto send = [](void* receiver, const char* selector) {
+        return reinterpret_cast<void* (*)(void*, SEL)>(objc_msgSend)(receiver, sel_registerName(selector));
+    };
+    void* view = send(nsWindow, "contentView");
+    void* layer = view != nullptr ? send(view, "layer") : nullptr;
+    if (layer == nullptr) {
+        return false;
+    }
+    // CAMetalLayer: wantsExtendedDynamicRangeContent, and a colour space
+    // whose 1.0 is the reference white with the range beyond it kept. The
+    // colour space's name is the constant's own string.
+    reinterpret_cast<void (*)(void*, SEL, BOOL)>(objc_msgSend)(
+        layer, sel_registerName("setWantsExtendedDynamicRangeContent:"), YES);
+    CFStringRef name = CFStringCreateWithCString(nullptr, "kCGColorSpaceExtendedLinearDisplayP3",
+                                                 kCFStringEncodingUTF8);
+    CGColorSpaceRef space = CGColorSpaceCreateWithName(name);
+    CFRelease(name);
+    if (space == nullptr) {
+        return false;
+    }
+    reinterpret_cast<void (*)(void*, SEL, CGColorSpaceRef)>(objc_msgSend)(layer, sel_registerName("setColorspace:"),
+                                                                          space);
+    CGColorSpaceRelease(space);
+    return true;
+#else
+    (void)nsWindow;
+    return false;
 #endif
 }
 

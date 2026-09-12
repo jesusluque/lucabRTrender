@@ -54,12 +54,17 @@ inline Gpu* gpuOrNull() {
         SKIP("no GPU device");                         \
     }
 
+/// A buffer of `count` zeroed words: a counter a kernel adds to, a worst
+/// case it maxes. Zeroed on purpose -- a buffer nobody wrote is not a
+/// buffer of zeros on CUDA, and a counter that starts from what the device
+/// last left there reads as garbage (the light BVH's draws did, on the L4).
 inline gpu::Buffer uintBuffer(gpu::Device& device, uint64_t count, const char* label) {
     gpu::BufferDesc desc;
     desc.bytes = std::max<uint64_t>(count, 1) * sizeof(uint32_t);
     desc.elementBytes = sizeof(uint32_t);
     desc.label = label;
-    auto made = gpu::Buffer::create(device, desc);
+    const std::vector<uint32_t> zeros(std::max<uint64_t>(count, 1), 0u);
+    auto made = gpu::Buffer::create(device, desc, zeros.data());
     REQUIRE(made);
     return *made;
 }

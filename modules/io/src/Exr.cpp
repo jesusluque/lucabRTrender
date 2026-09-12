@@ -48,31 +48,31 @@ ExrAttribute ExrAttribute::float64(std::string name, double value) {
     return a;
 }
 
-Result<void> writeExr(const std::filesystem::path& path, uint32_t width, uint32_t height,
-                      std::span<const float> rgba, std::span<const float> depth, bool half,
-                      std::span<const ExrAttribute> attributes) {
+Result<void> writeExrChannels(const std::filesystem::path& path, uint32_t width, uint32_t height,
+                              std::span<const ExrChannel> channels, std::span<const ExrAttribute> attributes) {
     const size_t pixels = size_t{width} * height;
-    if (rgba.size() < pixels * 4) {
-        return Error(ErrorCode::InvalidArgument, "not enough pixels to write");
+    if (channels.empty()) {
+        return Error(ErrorCode::InvalidArgument, "no channels to write");
     }
-    const bool withDepth = depth.size() >= pixels;
-    // EXR stores the top row first; the engine renders the bottom row first.
-    // Channels are stored in alphabetical order: A B G R (Z).
-    const int channels = withDepth ? 5 : 4;
-    std::vector<std::vector<float>> planes(static_cast<size_t>(channels),
-                                           std::vector<float>(pixels));
-    for (uint32_t y = 0; y < height; ++y) {
-        const size_t from = size_t{height - 1 - y} * width;
-        const size_t to = size_t{y} * width;
-        for (uint32_t x = 0; x < width; ++x) {
-            const float* const p = rgba.data() + (from + x) * 4;
-            planes[0][to + x] = p[3];
-            planes[1][to + x] = p[2];
-            planes[2][to + x] = p[1];
-            planes[3][to + x] = p[0];
-            if (withDepth) {
-                planes[4][to + x] = depth[from + x];
-            }
+    for (const ExrChannel& channel : channels) {
+        if (channel.words.size() < pixels) {
+            return Error::make(ErrorCode::InvalidArgument, "channel '{}': not enough pixels to write", channel.name);
+        }
+        if (channel.name.empty() || channel.name.size() > 255) {
+            return Error(ErrorCode::InvalidArgument, "a channel's name is empty or longer than 255");
+        }
+    }
+    // The format stores channels by name; the file's rows run top first and
+    // the engine's bottom first.
+    std::vector<size_t> order(channels.size());
+    for (size_t k = 0; k < order.size(); ++k) order[k] = k;
+    std::sort(order.begin(), order.end(), [&](size_t a, size_t b) { return channels[a].name < channels[b].name; });
+    std::vector<std::vector<uint32_t>> planes(channels.size(), std::vector<uint32_t>(pixels));
+    for (size_t k = 0; k < order.size(); ++k) {
+        const ExrChannel& channel = channels[order[k]];
+        for (uint32_t y = 0; y < height; ++y) {
+            std::memcpy(planes[k].data() + size_t{y} * width, channel.words.data() + size_t{height - 1 - y} * width,
+                        size_t{width} * 4);
         }
     }
 
@@ -80,27 +80,28 @@ Result<void> writeExr(const std::filesystem::path& path, uint32_t width, uint32_
     InitEXRHeader(&header);
     EXRImage image;
     InitEXRImage(&image);
-    std::vector<float*> pointers;
+    std::vector<unsigned char*> pointers;
     for (auto& plane : planes) {
-        pointers.push_back(plane.data());
+        pointers.push_back(reinterpret_cast<unsigned char*>(plane.data()));
     }
-    image.num_channels = channels;
-    image.images = reinterpret_cast<unsigned char**>(pointers.data());
+    image.num_channels = static_cast<int>(channels.size());
+    image.images = pointers.data();
     image.width = static_cast<int>(width);
     image.height = static_cast<int>(height);
 
-    std::array<EXRChannelInfo, 5> info{};
-    static constexpr const char* kNames[5] = {"A", "B", "G", "R", "Z"};
-    std::array<int, 5> pixelTypes{};
-    std::array<int, 5> requested{};
-    for (int c = 0; c < channels; ++c) {
-        std::strncpy(info[static_cast<size_t>(c)].name, kNames[c], 255);
-        pixelTypes[static_cast<size_t>(c)] = TINYEXR_PIXELTYPE_FLOAT;
-        // Depth stays float: half would step at a few metres.
-        requested[static_cast<size_t>(c)] =
-            (half && c < 4) ? TINYEXR_PIXELTYPE_HALF : TINYEXR_PIXELTYPE_FLOAT;
+    std::vector<EXRChannelInfo> info(channels.size());
+    std::vector<int> pixelTypes(channels.size());
+    std::vector<int> requested(channels.size());
+    for (size_t k = 0; k < order.size(); ++k) {
+        const ExrChannel& channel = channels[order[k]];
+        std::memset(&info[k], 0, sizeof(EXRChannelInfo));
+        std::strncpy(info[k].name, channel.name.c_str(), 255);
+        pixelTypes[k] = channel.type == ExrChannelType::Uint ? TINYEXR_PIXELTYPE_UINT : TINYEXR_PIXELTYPE_FLOAT;
+        requested[k] = channel.type == ExrChannelType::Uint   ? TINYEXR_PIXELTYPE_UINT
+                       : channel.type == ExrChannelType::Half ? TINYEXR_PIXELTYPE_HALF
+                                                              : TINYEXR_PIXELTYPE_FLOAT;
     }
-    header.num_channels = channels;
+    header.num_channels = static_cast<int>(channels.size());
     header.channels = info.data();
     header.pixel_types = pixelTypes.data();
     header.requested_pixel_types = requested.data();
@@ -124,6 +125,89 @@ Result<void> writeExr(const std::filesystem::path& path, uint32_t width, uint32_
         return Error::make(ErrorCode::IoFailure, "cannot write '{}': {}", path.string(), why);
     }
     return ok();
+}
+
+Result<void> writeExr(const std::filesystem::path& path, uint32_t width, uint32_t height,
+                      std::span<const float> rgba, std::span<const float> depth, bool half,
+                      std::span<const ExrAttribute> attributes) {
+    const size_t pixels = size_t{width} * height;
+    if (rgba.size() < pixels * 4) {
+        return Error(ErrorCode::InvalidArgument, "not enough pixels to write");
+    }
+    const bool withDepth = depth.size() >= pixels;
+    // R, G, B, A as planes of words, and Z. Depth stays float: half would
+    // step at a few metres.
+    std::array<std::vector<uint32_t>, 4> planes;
+    for (auto& plane : planes) plane.resize(pixels);
+    for (size_t p = 0; p < pixels; ++p) {
+        for (size_t c = 0; c < 4; ++c) {
+            std::memcpy(&planes[c][p], rgba.data() + p * 4 + c, 4);
+        }
+    }
+    const ExrChannelType colourType = half ? ExrChannelType::Half : ExrChannelType::Float;
+    std::vector<ExrChannel> channels{{"R", colourType, planes[0]},
+                                     {"G", colourType, planes[1]},
+                                     {"B", colourType, planes[2]},
+                                     {"A", colourType, planes[3]}};
+    if (withDepth) {
+        channels.push_back({"Z", ExrChannelType::Float,
+                            std::span<const uint32_t>(reinterpret_cast<const uint32_t*>(depth.data()), pixels)});
+    }
+    return writeExrChannels(path, width, height, channels, attributes);
+}
+
+Result<ExrChannels> readExrChannels(const std::filesystem::path& path) {
+    EXRVersion version;
+    const char* message = nullptr;
+    if (ParseEXRVersionFromFile(&version, path.string().c_str()) != TINYEXR_SUCCESS) {
+        return Error::make(ErrorCode::IoFailure, "cannot read '{}': not an OpenEXR file", path.string());
+    }
+    EXRHeader header;
+    InitEXRHeader(&header);
+    if (ParseEXRHeaderFromFile(&header, &version, path.string().c_str(), &message) != TINYEXR_SUCCESS) {
+        std::string why = message != nullptr ? message : "unknown";
+        FreeEXRErrorMessage(message);
+        return Error::make(ErrorCode::IoFailure, "cannot read '{}': {}", path.string(), why);
+    }
+    // Half channels are asked for as float; the others as they are stored.
+    for (int c = 0; c < header.num_channels; ++c) {
+        if (header.pixel_types[c] == TINYEXR_PIXELTYPE_HALF) {
+            header.requested_pixel_types[c] = TINYEXR_PIXELTYPE_FLOAT;
+        }
+    }
+    EXRImage image;
+    InitEXRImage(&image);
+    if (LoadEXRImageFromFile(&image, &header, path.string().c_str(), &message) != TINYEXR_SUCCESS) {
+        std::string why = message != nullptr ? message : "unknown";
+        FreeEXRErrorMessage(message);
+        FreeEXRHeader(&header);
+        return Error::make(ErrorCode::IoFailure, "cannot read '{}': {}", path.string(), why);
+    }
+    ExrChannels out;
+    out.width = static_cast<uint32_t>(image.width);
+    out.height = static_cast<uint32_t>(image.height);
+    const size_t pixels = size_t{out.width} * out.height;
+    if (image.images == nullptr) {
+        FreeEXRImage(&image);
+        FreeEXRHeader(&header);
+        return Error::make(ErrorCode::IoFailure, "cannot read '{}': tiled images are not read", path.string());
+    }
+    for (int c = 0; c < image.num_channels; ++c) {
+        ExrChannelData channel;
+        channel.name = header.channels[c].name;
+        channel.type = header.pixel_types[c] == TINYEXR_PIXELTYPE_UINT   ? ExrChannelType::Uint
+                       : header.pixel_types[c] == TINYEXR_PIXELTYPE_HALF ? ExrChannelType::Half
+                                                                          : ExrChannelType::Float;
+        channel.words.resize(pixels);
+        for (uint32_t y = 0; y < out.height; ++y) {
+            std::memcpy(channel.words.data() + size_t{y} * out.width,
+                        image.images[c] + size_t{out.height - 1 - y} * out.width * 4, size_t{out.width} * 4);
+        }
+        out.channels.push_back(std::move(channel));
+    }
+    FreeEXRImage(&image);
+    FreeEXRHeader(&header);
+    return out;
 }
 
 Result<ExrPixels> readExr(const std::filesystem::path& path) {

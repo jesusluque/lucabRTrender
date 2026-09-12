@@ -23,6 +23,9 @@ cmake --build build/macos-arm64-debug --target lrt_render_tests   # one test bin
   (release preset), recorded in `docs/decisions.md` where there is something
   to compare against. `lrt bench` times splat files only; a per-milestone
   bench requirement was retired for that reason (see the M6 section).
+- **Generated shaders** (materials, the shading and path tracing kernels)
+  are written by `LRT_SHADER_DUMP=<dir>` as files `slangc -I shaders -I <dir>`
+  compiles alone, to time a kernel's compile outside the process.
 - **Checking a shader compiles** without a build:
   `~/tools/slang/bin/slangc shaders/lrt/<dir>/<file>.slang -I shaders -target metal -entry <entry> -stage compute -o /dev/null`.
   Shaders are copied to `build/<preset>/shaders` by the build and compiled at

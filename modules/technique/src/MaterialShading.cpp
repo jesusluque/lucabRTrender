@@ -1,6 +1,8 @@
 // Copyright (c) 2026 lucabRTrender contributors.
 #include "lrt/technique/MaterialShading.h"
 
+#include <algorithm>
+
 #include "lrt/gpu/CommandBatch.h"
 #include "lrt/gpu/Device.h"
 #include "lrt/gpu/ShaderLibrary.h"
@@ -56,6 +58,24 @@ float2 sampleAt(uint2 pixel, uint light, uint index) {
 /// Where the device traces rays, a light is occluded by anything between the
 /// shading point and the sample. Cutouts do not open a shadow yet: a sample
 /// cut out of visibility still stops a shadow ray.
+/// The light groups: declared only in the kernel of a frame that has them,
+/// so a frame without compiles exactly the kernel it always did.
+const char* kGroups = R"(
+static const bool kLightGroups = true;
+RWStructuredBuffer<float4>    groupColour;   // groupCount planes, a pixel each
+uniform uint                  groupCount;
+void writeGroups(uint at, uint pixels, float3 groups[8], float opacity) {
+    for (uint g = 0; g < groupCount && g < 8; ++g) {
+        groupColour[g * pixels + at] = float4(groups[g] * opacity, opacity);
+    }
+}
+)";
+
+const char* kNoGroups = R"(
+static const bool kLightGroups = false;
+void writeGroups(uint at, uint pixels, float3 groups[8], float opacity) {}
+)";
+
 const char* kShadowRay = R"(
 uniform RaytracingAccelerationStructure shadowScene;
 
@@ -129,16 +149,28 @@ void shadeMaterials(uint3 group: SV_GroupID, uint index: SV_GroupIndex) {
     }
     const uint at = tid.y * camera.width + tid.x;
     const uint4 seen = visibility.Load(int3(int(tid.x), int(camera.height - 1 - tid.y), 0));
+    const uint pixels = camera.width * camera.height;
+    float3 groups[8];
+    for (uint g = 0; g < 8; ++g) groups[g] = float3(0.0);
     if (seen.x == 0) {
         colour[at] = float4(0.0);
         depth[at] = 0.0;
+        writeGroups(at, pixels, groups, 0.0);
         return;
     }
     const Surface s = surfaceAt(camera, tid.x, tid.y, seen);
     const MaterialInputs inputs = materialInputsAt(camera, toWorld, tid.x, tid.y, s, lookup.time);
     const MaterialRecord m = materials[materialRowOf(s)];
     evaluateMaterial(m.function, inputs, m.blob);
-    const LobeStack stack = gLrtResult;
+    // The lobe stack is read where the material left it, in thread memory,
+    // and never copied into a local: with a local copy live across the
+    // shadow ray's intersector call, this kernel wrote rows of garbage in
+    // blocks of half a threadgroup on an Apple M5 Pro -- clean under Metal
+    // shader validation, clean without the trace, clean with the copy gone.
+    // The path tracer, which keeps its stack in a struct it passes on, never
+    // showed it. Measured, not understood: a live-state problem across the
+    // intersector in the Metal compiler is the reading that fits.
+#define stack gLrtResult
     const float3 toEye = normalize(inputs.viewPosition - inputs.positionWorld);
     float3 radiance = stack.emission;
     if (lightCount == 0) {
@@ -179,7 +211,11 @@ void shadeMaterials(uint3 group: SV_GroupID, uint index: SV_GroupIndex) {
                 occluded(inputs.positionWorld, inputs.normalWorld, ls.wi, ls.distance, light.shadowCategory)) {
                 continue;
             }
-            sum += f * ls.radiance / (ls.pdf * choice.probability);
+            const float3 arrived = f * ls.radiance / (ls.pdf * choice.probability);
+            sum += arrived;
+            if (kLightGroups && light.group != 0 && light.group <= 8) {
+                groups[light.group - 1] += arrived / float(samples);
+            }
         }
         radiance += sum / float(samples);
     } else {
@@ -212,10 +248,14 @@ void shadeMaterials(uint3 group: SV_GroupID, uint index: SV_GroupIndex) {
                 sum += f * ls.radiance / ls.pdf;
             }
             radiance += sum / float(samples);
+            if (kLightGroups && light.group != 0 && light.group <= 8) {
+                groups[light.group - 1] += sum / float(samples);
+            }
         }
     }
     colour[at] = float4(radiance * stack.opacity, stack.opacity);
     depth[at] = s.depth;
+    writeGroups(at, pixels, groups, stack.opacity);
 }
 )";
 
@@ -229,19 +269,25 @@ Result<MaterialShading> MaterialShading::create(gpu::ShaderLibrary& library) {
 }
 
 Result<void> MaterialShading::setPrograms(const MaterialPrograms& programs) {
-    if (programs.module() == module_ && kernel_.has_value()) {
+    return setPrograms(programs, groups_);
+}
+
+Result<void> MaterialShading::setPrograms(const MaterialPrograms& programs, bool groups) {
+    if (programs.module() == module_ && groups == groups_ && kernel_.has_value()) {
         return ok();
     }
     const bool shadows = device_->caps().rayQuery && device_->caps().accelerationStructure;
-    const std::string name = programs.module() + (shadows ? "_shade_shadowed" : "_shade");
+    const std::string name =
+        programs.module() + (shadows ? "_shade_shadowed" : "_shade") + (groups ? "_groups" : "");
     const std::string source = "import " + programs.module() + ";\n" + kKernelPrelude +
-                               (shadows ? kShadowRay : kNoShadowRay) + kKernelBody;
+                               (groups ? kGroups : kNoGroups) + (shadows ? kShadowRay : kNoShadowRay) + kKernelBody;
     auto program = library_->loadSource(name, source, {"shadeMaterials"});
     if (!program) return std::move(program).error();
     auto kernel = gpu::ComputeKernel::create(*library_, name, "shadeMaterials");
     if (!kernel) return std::move(kernel).error();
     kernel_.emplace(std::move(*kernel));
     module_ = programs.module();
+    groups_ = groups;
     return ok();
 }
 
@@ -250,6 +296,13 @@ Result<void> MaterialShading::shade(gpu::CommandBatch& batch, const VisibilityTa
                                     render::RenderTargets& out) {
     if (!kernel_.has_value()) {
         return Error(ErrorCode::InvalidArgument, "material shading: no materials set");
+    }
+    const bool groups = frame.groups.count > 0;
+    if (groups && (frame.groups.colour == nullptr || !frame.groups.colour->valid())) {
+        return Error(ErrorCode::InvalidArgument, "material shading: light groups asked for without their buffer");
+    }
+    if (groups != groups_ && frame.programs != nullptr) {
+        LRT_TRY(setPrograms(*frame.programs, groups));
     }
     const uint64_t pixels = uint64_t{targets.width} * targets.height;
     if (out.width != targets.width || out.height != targets.height || !out.colour.valid()) {
@@ -287,6 +340,10 @@ Result<void> MaterialShading::shade(gpu::CommandBatch& batch, const VisibilityTa
         cursor["visibility"].setBinding((*ids).get());
         cursor["colour"].setBinding(out.colour.rhi());
         cursor["depth"].setBinding(out.depth.rhi());
+        if (groups) {
+            cursor["groupColour"].setBinding(frame.groups.colour->rhi());
+            cursor["groupCount"].setData(std::min(frame.groups.count, kMaxLightGroups));
+        }
         setCamera(cursor["camera"], projection, targets.width, targets.height);
     });
     return ok();

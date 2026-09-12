@@ -122,6 +122,10 @@ void HdLrtRenderPass::_Execute(HdRenderPassStateSharedPtr const& state, TfTokenV
             source.kind = lrt::usd::AovKind::Primvar;
             source.primvar = static_cast<uint32_t>(request.primvars.size());
             request.primvars.push_back(name.substr(9));
+        } else if (name.rfind("lightGroup:", 0) == 0) {
+            source.kind = lrt::usd::AovKind::LightGroup;
+            source.primvar = static_cast<uint32_t>(request.lightGroups.size());
+            request.lightGroups.push_back(name.substr(11));
         } else {
             continue;
         }

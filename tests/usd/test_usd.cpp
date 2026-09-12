@@ -32,6 +32,7 @@
 #include <cstdio>
 
 #include "lrt/technique/Visibility.h"
+#include "lrt/io/Exr.h"
 #include "lrt/io/Readers.h"
 #include "lrt/lod/Lod.h"
 #include "lrt/lod/Lrtc.h"
@@ -3525,4 +3526,473 @@ TEST_CASE("a coordinate system bound to a mesh resolves to its target's transfor
     CHECK(t.x == 1.0);
     CHECK(t.y == 2.0);
     CHECK(t.z == 3.0);
+}
+
+// Render settings through Hydra (M10): a UsdRenderSettings prim with its
+// products and vars reaches the delegate's renderSettings bprim once it is
+// the scene's active one; `renderProducts` renders each product at its own
+// resolution with its vars as the layers of one EXR, `includedPurposes` as
+// the render tags. The check is the plan's, literal: every layer of the
+// file, read back and uploaded, is bit for bit the AOV rendered on its own
+// (countDifferent 0 words), and a second settings prim that includes guides
+// covers more pixels than the first, which is what proves the purposes
+// reached the tags and not a default.
+TEST_CASE("a render settings prim's products come out as the AOVs rendered one at a time, bit for bit",
+          "[usd][gpu][mesh][render-settings]") {
+    LRT_REQUIRE_GPU(gpu);
+    const fs::path path = scratch("render_settings.usda");
+    {
+        std::ofstream out(path);
+        out << "#usda 1.0\n(\n    upAxis = \"Y\"\n)\n"
+               "def Mesh \"Square\"\n{\n"
+               "    int[] faceVertexCounts = [4]\n"
+               "    int[] faceVertexIndices = [0, 1, 2, 3]\n"
+               "    point3f[] points = [(-1, -1, -5), (1, -1, -5), (1, 1, -5), (-1, 1, -5)]\n"
+               "    color3f[] primvars:displayColor = [(0.2, 0.7, 0.3)]\n"
+               "    uniform token subdivisionScheme = \"none\"\n}\n"
+               "def Mesh \"Guide\"\n{\n"
+               "    uniform token purpose = \"guide\"\n"
+               "    int[] faceVertexCounts = [4]\n"
+               "    int[] faceVertexIndices = [0, 1, 2, 3]\n"
+               "    point3f[] points = [(1, -2, -4), (3, -2, -4), (3, 2, -4), (1, 2, -4)]\n"
+               "    uniform token subdivisionScheme = \"none\"\n}\n"
+               "def Camera \"Camera\"\n{\n"
+               "    float focalLength = 35\n"
+               "    float horizontalAperture = 24.576\n    float verticalAperture = 16.384\n"
+               "    float2 clippingRange = (0.1, 1000)\n}\n"
+               "def Scope \"Render\"\n{\n"
+               "    def RenderSettings \"Settings\"\n    {\n"
+               "        rel camera = </Camera>\n"
+               "        uniform token[] includedPurposes = [\"default\"]\n"
+               "        rel products = </Render/Product>\n"
+               "        int2 resolution = (96, 64)\n"
+               "        int lrt:pathSamples = 3\n"
+               "        token lrt:technique = \"raster\"\n"
+               "    }\n"
+               "    def RenderSettings \"WithGuides\"\n    {\n"
+               "        rel camera = </Camera>\n"
+               "        uniform token[] includedPurposes = [\"default\", \"guide\"]\n"
+               "        rel products = </Render/GuideProduct>\n"
+               "        int2 resolution = (96, 64)\n"
+               "    }\n"
+               "    def RenderProduct \"Product\"\n    {\n"
+               "        token productName = \"product.exr\"\n"
+               "        rel orderedVars = [</Render/Vars/beauty>, </Render/Vars/depth>, </Render/Vars/primId>, </Render/Vars/Neye>]\n"
+               "        int2 resolution = (96, 64)\n"
+               "    }\n"
+               "    def RenderProduct \"GuideProduct\"\n    {\n"
+               "        token productName = \"guides.exr\"\n"
+               "        rel orderedVars = [</Render/Vars/primId>]\n"
+               "        int2 resolution = (96, 64)\n"
+               "    }\n"
+               "    def Scope \"Vars\"\n    {\n"
+               "        def RenderVar \"beauty\"\n        {\n            string sourceName = \"Ci\"\n            token dataType = \"color3f\"\n        }\n"
+               "        def RenderVar \"depth\"\n        {\n            string sourceName = \"z\"\n            token dataType = \"float\"\n        }\n"
+               "        def RenderVar \"primId\"\n        {\n            string sourceName = \"primId\"\n            token dataType = \"int\"\n        }\n"
+               "        def RenderVar \"Neye\"\n        {\n            string sourceName = \"Neye\"\n            token dataType = \"normal3f\"\n        }\n"
+               "    }\n}\n";
+    }
+    auto renderer = usd::StageRenderer::open(path);
+    if (!renderer) FAIL(renderer.error().toString());
+    auto info = (*renderer)->renderSettings("/Render/Settings");
+    if (!info) FAIL(info.error().toString());
+    std::printf("  /Render/Settings: %s, synced %u times, %zu products, purposes:", info->active ? "active" : "inactive",
+                info->syncs, info->products.size());
+    for (const std::string& p : info->includedPurposes) std::printf(" %s", p.c_str());
+    std::printf("; camera %s; settings:", info->camera.c_str());
+    for (const auto& [k, v] : info->settings) std::printf(" %s=%s", k.c_str(), v.c_str());
+    std::printf("\n");
+    REQUIRE(info->active);
+    REQUIRE(info->products.size() == 1);
+    CHECK(info->products[0].width == 96);
+    CHECK(info->products[0].height == 64);
+    CHECK(info->products[0].name == "product.exr");
+    REQUIRE(info->products[0].vars.size() == 4);
+    CHECK(info->products[0].vars[0].name == "beauty");
+    CHECK(info->products[0].vars[0].sourceName == "Ci");
+    CHECK(info->includedPurposes == std::vector<std::string>{"default"});
+    CHECK(info->settings["lrt:pathSamples"] == "3");
+    CHECK(info->settings["lrt:technique"] == "raster");
+
+    const fs::path directory = path.parent_path();
+    auto written = (*renderer)->renderProducts("/Render/Settings", 0.0, directory);
+    if (!written) FAIL(written.error().toString());
+    REQUIRE(written->size() == 1);
+    CHECK(written->front() == directory / "product.exr");
+    auto file = io::readExrChannels(written->front());
+    if (!file) FAIL(file.error().toString());
+    REQUIRE(file->width == 96);
+    REQUIRE(file->height == 64);
+    std::printf("  product.exr: %zu channels:", file->channels.size());
+    for (const io::ExrChannelData& c : file->channels) std::printf(" %s", c.name.c_str());
+    std::printf("\n");
+    REQUIRE(file->channels.size() == 4 + 1 + 1 + 3);
+    const auto channel = [&](const std::string& name) -> const io::ExrChannelData* {
+        for (const io::ExrChannelData& c : file->channels) {
+            if (c.name == name) return &c;
+        }
+        return nullptr;
+    };
+    for (const char* name : {"beauty.R", "beauty.G", "beauty.B", "beauty.A", "Z", "primId", "Neye.x", "Neye.y", "Neye.z"}) {
+        INFO(name);
+        REQUIRE(channel(name) != nullptr);
+    }
+    CHECK(channel("primId")->type == io::ExrChannelType::Uint);
+    CHECK(channel("Z")->type == io::ExrChannelType::Float);
+
+    // The same AOVs rendered one at a time, through the same Hydra buffers.
+    const uint32_t w = 96, h = 64;
+    const size_t pixels = size_t{w} * h;
+    const auto upload = [&](std::span<const uint32_t> words, const char* label) {
+        gpu::BufferDesc desc;
+        desc.bytes = words.size() * 4;
+        desc.elementBytes = 4;
+        desc.label = label;
+        auto made = gpu::Buffer::create(*gpu->device, desc, words.data());
+        REQUIRE(made);
+        return std::move(*made);
+    };
+    const auto differing = [&](const std::string& name, std::span<const uint32_t> expected) {
+        const io::ExrChannelData* c = channel(name);
+        REQUIRE(c != nullptr);
+        REQUIRE(c->words.size() == pixels);
+        gpu::Buffer a = upload(c->words, "exr.layer");
+        gpu::Buffer b = upload(expected, "exr.alone");
+        auto count = render::countDifferent(*gpu->library, a, b, static_cast<uint32_t>(pixels));
+        REQUIRE(count);
+        return *count;
+    };
+    const auto plane = [&](const std::vector<uint8_t>& bytes, size_t components, size_t c) {
+        std::vector<uint32_t> words(pixels);
+        for (size_t p = 0; p < pixels; ++p) {
+            std::memcpy(&words[p], bytes.data() + (p * components + c) * 4, 4);
+        }
+        return words;
+    };
+    (*renderer)->requestOutputs({"primId"});
+    auto alone = (*renderer)->render("/Camera", 0.0, w, h);
+    if (!alone) FAIL(alone.error().toString());
+    auto primId = (*renderer)->mappedOutput("primId");
+    REQUIRE(primId);
+    const std::vector<uint32_t> ids = plane(*primId, 1, 0);
+    std::vector<uint32_t> depth(pixels);
+    std::memcpy(depth.data(), alone->depth.data(), pixels * 4);
+    std::vector<uint32_t> colour[4];
+    for (size_t c = 0; c < 4; ++c) {
+        colour[c].resize(pixels);
+        for (size_t p = 0; p < pixels; ++p) std::memcpy(&colour[c][p], alone->rgba.data() + p * 4 + c, 4);
+    }
+    (*renderer)->requestOutputs({"Neye"});
+    REQUIRE((*renderer)->render("/Camera", 0.0, w, h));
+    auto eye = (*renderer)->mappedOutput("Neye");
+    REQUIRE(eye);
+    const uint64_t offId = differing("primId", ids);
+    const uint64_t offZ = differing("Z", depth);
+    const uint64_t offR = differing("beauty.R", colour[0]);
+    const uint64_t offG = differing("beauty.G", colour[1]);
+    const uint64_t offB = differing("beauty.B", colour[2]);
+    const uint64_t offA = differing("beauty.A", colour[3]);
+    const uint64_t offNx = differing("Neye.x", plane(*eye, 3, 0));
+    const uint64_t offNy = differing("Neye.y", plane(*eye, 3, 1));
+    const uint64_t offNz = differing("Neye.z", plane(*eye, 3, 2));
+    // Coverage of the ids plane: how many pixels the square took.
+    const std::vector<uint32_t> cleared(pixels, 0xFFFFFFFFu);
+    const uint64_t covered = differing("primId", cleared);
+    std::printf("  layers against the AOVs alone: primId %llu words off, Z %llu, beauty %llu %llu %llu %llu, Neye %llu %llu %llu;"
+                " %llu of %zu pixels covered\n",
+                static_cast<unsigned long long>(offId), static_cast<unsigned long long>(offZ),
+                static_cast<unsigned long long>(offR), static_cast<unsigned long long>(offG),
+                static_cast<unsigned long long>(offB), static_cast<unsigned long long>(offA),
+                static_cast<unsigned long long>(offNx), static_cast<unsigned long long>(offNy),
+                static_cast<unsigned long long>(offNz), static_cast<unsigned long long>(covered), pixels);
+    CHECK(offId == 0);
+    CHECK(offZ == 0);
+    CHECK(offR == 0);
+    CHECK(offG == 0);
+    CHECK(offB == 0);
+    CHECK(offA == 0);
+    CHECK(offNx == 0);
+    CHECK(offNy == 0);
+    CHECK(offNz == 0);
+    CHECK(covered > 500);
+
+    // The settings that include guides draw the guide square too.
+    auto guides = (*renderer)->renderProducts("/Render/WithGuides", 0.0, directory);
+    if (!guides) FAIL(guides.error().toString());
+    REQUIRE(guides->size() == 1);
+    auto guideFile = io::readExrChannels(guides->front());
+    if (!guideFile) FAIL(guideFile.error().toString());
+    REQUIRE(guideFile->channels.size() == 1);
+    REQUIRE(guideFile->channels[0].words.size() == pixels);
+    gpu::Buffer guideIds = upload(guideFile->channels[0].words, "exr.guides");
+    gpu::Buffer blank = upload(cleared, "exr.cleared");
+    auto guideCovered = render::countDifferent(*gpu->library, guideIds, blank, static_cast<uint32_t>(pixels));
+    REQUIRE(guideCovered);
+    auto second = (*renderer)->renderSettings("/Render/WithGuides");
+    REQUIRE(second);
+    std::printf("  with guides (%s): %llu pixels covered against %llu without\n", second->active ? "active" : "inactive",
+                static_cast<unsigned long long>(*guideCovered), static_cast<unsigned long long>(covered));
+    CHECK(second->active);
+    CHECK(*guideCovered > covered + 200);
+    // And the first is no longer the active one.
+    auto first = (*renderer)->renderSettings("/Render/Settings");
+    REQUIRE(first);
+    CHECK(first->active);   // asking makes it active again
+}
+
+// Light groups (M10): a light's `lrt:lightGroup` puts its direct light,
+// at every bounce, into a plane of its own beside the beauty, asked for as
+// the "lightGroup:NAME" output -- or, through a render product, as the var
+// with the light path expression C.*<L.'NAME'>. The plan's check: the
+// groups summed are the beauty, and a group no light belongs to is exactly
+// zero -- by a kernel over every pixel, for the raster's direct light and
+// the path tracer alike.
+TEST_CASE("light groups sum to the beauty and an empty group is zero, raster and path traced",
+          "[usd][gpu][mesh][lights][light-groups]") {
+    LRT_REQUIRE_GPU(gpu);
+    const fs::path path = scratch("light_groups.usda");
+    {
+        std::ofstream out(path);
+        out << "#usda 1.0\n(\n    upAxis = \"Y\"\n)\n"
+               "def Mesh \"Floor\"\n{\n"
+               "    int[] faceVertexCounts = [4]\n"
+               "    int[] faceVertexIndices = [0, 1, 2, 3]\n"
+               "    point3f[] points = [(-6, -1, -2), (6, -1, -2), (6, -1, -14), (-6, -1, -14)]\n"
+               "    color3f[] primvars:displayColor = [(0.8, 0.8, 0.8)]\n"
+               "    uniform token subdivisionScheme = \"none\"\n}\n"
+               "def SphereLight \"Key\"\n{\n"
+               "    float inputs:intensity = 40\n    float inputs:radius = 0.3\n"
+               "    string lrt:lightGroup = \"key\"\n"
+               "    double3 xformOp:translate = (-2, 2, -8)\n"
+               "    uniform token[] xformOpOrder = [\"xformOp:translate\"]\n}\n"
+               "def SphereLight \"Key2\"\n{\n"
+               "    float inputs:intensity = 20\n    float inputs:radius = 0.3\n"
+               "    color3f inputs:color = (1, 0.6, 0.3)\n"
+               "    string lrt:lightGroup = \"key\"\n"
+               "    double3 xformOp:translate = (3, 2.5, -9)\n"
+               "    uniform token[] xformOpOrder = [\"xformOp:translate\"]\n}\n"
+               "def SphereLight \"Fill\"\n{\n"
+               "    float inputs:intensity = 10\n    float inputs:radius = 0.5\n"
+               "    color3f inputs:color = (0.3, 0.5, 1)\n"
+               "    string ri:light:lightGroup = \"fill\"\n"
+               "    double3 xformOp:translate = (0, 3, -4)\n"
+               "    uniform token[] xformOpOrder = [\"xformOp:translate\"]\n}\n"
+               "def Camera \"Camera\"\n{\n"
+               "    float focalLength = 24\n"
+               "    float horizontalAperture = 24.576\n    float verticalAperture = 16.384\n"
+               "    float2 clippingRange = (0.1, 1000)\n"
+               "    double3 xformOp:translate = (0, 1.5, 0)\n"
+               "    double xformOp:rotateX = -18\n"
+               "    uniform token[] xformOpOrder = [\"xformOp:translate\", \"xformOp:rotateX\"]\n}\n"
+               "def Scope \"Render\"\n{\n"
+               "    def RenderSettings \"Traced\"\n    {\n"
+               "        rel camera = </Camera>\n"
+               "        rel products = </Render/Product>\n"
+               "        int2 resolution = (96, 64)\n"
+               "        token lrt:technique = \"rt\"\n"
+               "        int lrt:pathSamples = 4\n"
+               "        int lrt:pathTotal = 16\n"
+               "    }\n"
+               "    def RenderProduct \"Product\"\n    {\n"
+               "        token productName = \"groups.exr\"\n"
+               "        rel orderedVars = [</Render/Vars/beauty>, </Render/Vars/key>, </Render/Vars/fill>, </Render/Vars/rim>]\n"
+               "        int2 resolution = (96, 64)\n"
+               "    }\n"
+               "    def Scope \"Vars\"\n    {\n"
+               "        def RenderVar \"beauty\"\n        {\n            string sourceName = \"color\"\n        }\n"
+               "        def RenderVar \"key\"\n        {\n            string sourceName = \"C.*<L.'key'>\"\n            token sourceType = \"lpe\"\n        }\n"
+               "        def RenderVar \"fill\"\n        {\n            string sourceName = \"C.*<L.'fill'>\"\n            token sourceType = \"lpe\"\n        }\n"
+               "        def RenderVar \"rim\"\n        {\n            string sourceName = \"C.*<L.'rim'>\"\n            token sourceType = \"lpe\"\n        }\n"
+               "    }\n}\n";
+    }
+    auto renderer = usd::StageRenderer::open(path);
+    if (!renderer) FAIL(renderer.error().toString());
+    auto sumKernel = gpu::ComputeKernel::create(*gpu->library, "lrt/test/light_group_check", "lightGroupSum");
+    if (!sumKernel) FAIL(sumKernel.error().toString());
+    const uint32_t w = 96, h = 64;
+    const size_t pixels = size_t{w} * h;
+    const auto upload = [&](const void* bytes, size_t count, const char* label) {
+        gpu::BufferDesc desc;
+        desc.bytes = count * 16;
+        desc.elementBytes = 16;
+        desc.label = label;
+        auto made = gpu::Buffer::create(*gpu->device, desc, bytes);
+        REQUIRE(made);
+        return std::move(*made);
+    };
+    // The check over the beauty and three planes: key, fill, rim (empty).
+    struct Counts {
+        uint32_t off, emptyNonzero, covered, checked;
+        float    worst;
+    };
+    const auto check = [&](const std::vector<uint8_t>& beauty, const std::vector<uint8_t>& planes) {
+        REQUIRE(beauty.size() == pixels * 16);
+        REQUIRE(planes.size() == pixels * 16 * 3);
+        gpu::Buffer b = upload(beauty.data(), pixels, "groups.beauty");
+        gpu::Buffer p = upload(planes.data(), pixels * 3, "groups.planes");
+        gpu::Buffer counts = test::uintBuffer(*gpu->device, 4, "groups.counts");
+        gpu::Buffer worst = test::uintBuffer(*gpu->device, 1, "groups.worst");
+        gpu::CommandBatch batch(*gpu->device);
+        sumKernel->dispatch(batch, {static_cast<uint32_t>(pixels), 1, 1}, [&](rhi::ShaderCursor c) {
+            c["check"]["pixels"].setData(static_cast<uint32_t>(pixels));
+            c["check"]["groups"].setData(uint32_t{3});
+            c["check"]["empty"].setData(uint32_t{2});
+            c["check"]["tolerance"].setData(1.0e-4F);
+            c["beauty"].setBinding(b.rhi());
+            c["planes"].setBinding(p.rhi());
+            c["counts"].setBinding(counts.rhi());
+            c["worst"].setBinding(worst.rhi());
+        });
+        REQUIRE(batch.submit(true));
+        Counts out{};
+        REQUIRE(counts.read(*gpu->device, 0, 16, &out));
+        REQUIRE(worst.read(*gpu->device, 0, 4, &out.worst));
+        return out;
+    };
+    const auto planesOf = [&](const char* technique) {
+        (*renderer)->requestOutputs({"lightGroup:key", "lightGroup:fill", "lightGroup:rim"});
+        auto image = (*renderer)->render("/Camera", 0.0, w, h, technique);
+        if (!image) FAIL(image.error().toString());
+        auto beauty = (*renderer)->mappedOutput("color");
+        REQUIRE(beauty);
+        std::vector<uint8_t> planes;
+        for (const char* group : {"lightGroup:key", "lightGroup:fill", "lightGroup:rim"}) {
+            auto plane = (*renderer)->mappedOutput(group);
+            REQUIRE(plane);
+            planes.insert(planes.end(), plane->begin(), plane->end());
+        }
+        {
+            const std::string prefix = std::string("light_groups_") + technique;
+            test::dumpPpm((prefix + "_beauty").c_str(), image->rgba.data(), w, h);
+            std::vector<float> plane(pixels * 4);
+            for (size_t g = 0; g < 3; ++g) {
+                std::memcpy(plane.data(), planes.data() + g * pixels * 16, pixels * 16);
+                test::dumpPpm((prefix + "_" + std::to_string(g)).c_str(), plane.data(), w, h);
+            }
+        }
+        return check(*beauty, planes);
+    };
+    const Counts raster = planesOf("raster");
+    std::printf("  raster: %u of %u pixels covered; groups summed off the beauty at %u (worst %.2e relative); the empty "
+                "group nonzero at %u\n",
+                raster.covered, raster.checked, raster.off, static_cast<double>(raster.worst), raster.emptyNonzero);
+    CHECK(raster.covered > 1000);
+    CHECK(raster.off == 0);
+    CHECK(raster.emptyNonzero == 0);
+    (*renderer)->setPathSamples(4);
+    (*renderer)->setPathTotal(16);
+    const Counts traced = planesOf("rt");
+    std::printf("  path traced: %u of %u pixels covered; groups summed off the beauty at %u (worst %.2e relative); the "
+                "empty group nonzero at %u\n",
+                traced.covered, traced.checked, traced.off, static_cast<double>(traced.worst), traced.emptyNonzero);
+    CHECK(traced.covered > 1000);
+    CHECK(traced.off == 0);
+    CHECK(traced.emptyNonzero == 0);
+
+    // And through a render product: the light path expressions name the
+    // groups, and the file's layers are the same planes.
+    const fs::path directory = path.parent_path();
+    auto written = (*renderer)->renderProducts("/Render/Traced", 0.0, directory);
+    if (!written) FAIL(written.error().toString());
+    REQUIRE(written->size() == 1);
+    auto file = io::readExrChannels(written->front());
+    if (!file) FAIL(file.error().toString());
+    std::printf("  groups.exr: %zu channels:", file->channels.size());
+    for (const io::ExrChannelData& c : file->channels) std::printf(" %s", c.name.c_str());
+    std::printf("\n");
+    REQUIRE(file->channels.size() == 16);
+    const auto channel = [&](const std::string& name) -> const io::ExrChannelData* {
+        for (const io::ExrChannelData& c : file->channels) {
+            if (c.name == name) return &c;
+        }
+        return nullptr;
+    };
+    std::vector<uint8_t> beauty(pixels * 16);
+    std::vector<uint8_t> planes(pixels * 16 * 3);
+    const auto gather = [&](std::vector<uint8_t>& into, size_t plane, const std::string& prefix) {
+        for (size_t c = 0; c < 4; ++c) {
+            const io::ExrChannelData* data = channel(prefix + "." + "RGBA"[c]);
+            REQUIRE(data != nullptr);
+            for (size_t p = 0; p < pixels; ++p) {
+                std::memcpy(into.data() + (plane * pixels + p) * 16 + c * 4, &data->words[p], 4);
+            }
+        }
+    };
+    gather(beauty, 0, "beauty");
+    gather(planes, 0, "key");
+    gather(planes, 1, "fill");
+    gather(planes, 2, "rim");
+    const Counts product = check(beauty, planes);
+    std::printf("  the product's layers: %u of %u pixels covered; groups summed off the beauty at %u (worst %.2e); the "
+                "empty group nonzero at %u\n",
+                product.covered, product.checked, product.off, static_cast<double>(product.worst),
+                product.emptyNonzero);
+    CHECK(product.covered > 1000);
+    CHECK(product.off == 0);
+    CHECK(product.emptyNonzero == 0);
+}
+
+// Shadow rays over a floor nothing occludes must change nothing: the raster
+// technique's shading with the lights' shadows on is bit for bit the
+// shading with them off. This is the regression that caught a Metal
+// compiler problem: with a local copy of the lobe stack live across the
+// shadow ray's intersector call, the shadowed kernel wrote rows of garbage
+// in blocks of half a threadgroup (MaterialShading.cpp says the rest).
+TEST_CASE("shadow rays over an unoccluded floor change nothing through Hydra, raster technique",
+          "[usd][gpu][mesh][lights][shadows]") {
+    LRT_REQUIRE_GPU(gpu);
+    const auto stage = [&](bool shadows) {
+        const fs::path path = scratch(shadows ? "floor_shadows_on.usda" : "floor_shadows_off.usda");
+        std::ofstream out(path);
+        out << "#usda 1.0\n(\n    upAxis = \"Y\"\n)\n"
+               "def Mesh \"Floor\"\n{\n"
+               "    int[] faceVertexCounts = [4]\n"
+               "    int[] faceVertexIndices = [0, 1, 2, 3]\n"
+               "    point3f[] points = [(-6, -1, -2), (6, -1, -2), (6, -1, -14), (-6, -1, -14)]\n"
+               "    color3f[] primvars:displayColor = [(0.8, 0.8, 0.8)]\n"
+               "    uniform token subdivisionScheme = \"none\"\n}\n"
+               "def SphereLight \"Key\"\n{\n"
+               "    float inputs:intensity = 40\n    float inputs:radius = 0.3\n"
+            << (shadows ? "" : "    bool inputs:shadow:enable = 0\n")
+            << "    double3 xformOp:translate = (-2, 2, -8)\n"
+               "    uniform token[] xformOpOrder = [\"xformOp:translate\"]\n}\n"
+               "def SphereLight \"Fill\"\n{\n"
+               "    float inputs:intensity = 10\n    float inputs:radius = 0.5\n"
+               "    color3f inputs:color = (0.3, 0.5, 1)\n"
+            << (shadows ? "" : "    bool inputs:shadow:enable = 0\n")
+            << "    double3 xformOp:translate = (0, 3, -4)\n"
+               "    uniform token[] xformOpOrder = [\"xformOp:translate\"]\n}\n"
+               "def Camera \"Camera\"\n{\n"
+               "    float focalLength = 24\n"
+               "    float horizontalAperture = 24.576\n    float verticalAperture = 16.384\n"
+               "    float2 clippingRange = (0.1, 1000)\n"
+               "    double3 xformOp:translate = (0, 1.5, 0)\n"
+               "    double xformOp:rotateX = -18\n"
+               "    uniform token[] xformOpOrder = [\"xformOp:translate\", \"xformOp:rotateX\"]\n}\n";
+        return path;
+    };
+    const uint32_t w = 96, h = 64;
+    const auto render = [&](bool shadows) {
+        auto renderer = usd::StageRenderer::open(stage(shadows));
+        if (!renderer) FAIL(renderer.error().toString());
+        auto image = (*renderer)->render("/Camera", 0.0, w, h, "raster");
+        if (!image) FAIL(image.error().toString());
+        gpu::BufferDesc desc;
+        desc.bytes = image->rgba.size() * 4;
+        desc.elementBytes = 16;
+        auto made = gpu::Buffer::create(*gpu->device, desc, image->rgba.data());
+        REQUIRE(made);
+        return std::move(*made);
+    };
+    // Three shadowed renders: the corruption was nondeterministic, and one
+    // clean frame proved nothing.
+    gpu::Buffer off = render(false);
+    for (int k = 0; k < 3; ++k) {
+        gpu::Buffer on = render(true);
+        auto words = render::countDifferent(*gpu->library, on, off, w * h * 4);
+        REQUIRE(words);
+        std::printf("  shadows on against off, run %d: %llu of %u words differ\n", k + 1,
+                    static_cast<unsigned long long>(*words), w * h * 4);
+        CHECK(*words == 0);
+    }
 }

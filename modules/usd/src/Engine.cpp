@@ -856,6 +856,21 @@ AovView Engine::aovView(const render::RenderTargets& targets, AovSource aov) con
             view.buffer = &pathAux_.normal;
         }
         return view;
+    // A light group's plane, one of the frame's in one buffer: the offset
+    // addresses it at a stride of one.
+    case AovKind::LightGroup:
+        if (aov.primvar >= lightGroupCount_ || lightGroupPixels_ != uint64_t{targets.width} * targets.height) {
+            return view;
+        }
+        if (pathState_.traced && pathTracer_.has_value() && pathTracer_->lightGroups() > aov.primvar) {
+            // The path tracer's means, in its accumulation after the colour's plane.
+            view.buffer = &pathTracer_->sum();
+            view.offset = static_cast<uint32_t>(pathTracer_->lightGroupMeanOffset(aov.primvar));
+        } else if (lightGroupColour_.valid()) {
+            view.buffer = &lightGroupColour_;
+            view.offset = static_cast<uint32_t>(aov.primvar * lightGroupPixels_);
+        }
+        return view;
     default: break;
     }
     if (!aovsValid_ || aovs_.width != targets.width || aovs_.height != targets.height ||
@@ -984,6 +999,15 @@ Result<void> Engine::render(const render::Projection& projection, const render::
             lamps.push_back(lamp);
             lamps.back().lightCategory = categoryBit(lamp.lightLink);
             lamps.back().shadowCategory = categoryBit(lamp.shadowLink);
+            // Its light group, numbered among the ones this frame asks for
+            // (1 + the index; 0 for none, and for a group nobody asked for).
+            lamps.back().groupIndex = 0;
+            for (size_t g = 0; g < aovRequest.lightGroups.size() && !lamp.group.empty(); ++g) {
+                if (aovRequest.lightGroups[g] == lamp.group) {
+                    lamps.back().groupIndex = static_cast<uint32_t>(g + 1);
+                    break;
+                }
+            }
             // Under an instancer: the chain composed on the device, as a
             // mesh's, once per change; its rows place the light's copies.
             if (!entry.instancing.empty()) {
@@ -1315,6 +1339,27 @@ Result<void> Engine::render(const render::Projection& projection, const render::
         frame.lights = &*lightTable_;
         frame.samples = lightSamples_.load();
         frame.chooseLights = chooseLights_.load();
+        // The light groups' planes, one buffer for the frame's groups.
+        if (aovRequest.lightGroups.size() > technique::kMaxLightGroups) {
+            return Error::make(ErrorCode::InvalidArgument, "{} light groups asked for; at most {}",
+                               aovRequest.lightGroups.size(), technique::kMaxLightGroups);
+        }
+        lightGroupCount_ = static_cast<uint32_t>(aovRequest.lightGroups.size());
+        if (lightGroupCount_ > 0) {
+            const uint64_t pixels = uint64_t{settings.width} * settings.height;
+            const uint64_t bytes = pixels * lightGroupCount_ * 16;
+            if (!lightGroupColour_.valid() || lightGroupColour_.bytes() < bytes || lightGroupPixels_ != pixels) {
+                gpu::BufferDesc desc;
+                desc.bytes = bytes;
+                desc.elementBytes = 16;
+                desc.label = "lights.groups.colour";
+                auto colour = gpu::Buffer::create(*device_, desc);
+                if (!colour) return std::move(colour).error();
+                lightGroupColour_ = std::move(*colour);
+            }
+            lightGroupPixels_ = pixels;
+            frame.groups = {&lightGroupColour_, lightGroupCount_};
+        }
         const technique::MaterialFrame* cutouts = (materialCutouts_ || scene_->anyHidden()) ? &frame : nullptr;
             gpu::CommandBatch batch(*device_);
         switch (visibility) {
@@ -1392,6 +1437,25 @@ Result<void> Engine::render(const render::Projection& projection, const render::
             now.adaptive = paths.adaptive;
             now.error = paths.errorTarget;
             now.revision = revision_.load();
+            if (renderTags != nullptr) {
+                // Which purposes are drawn is part of what a path finds.
+                uint64_t hash = 1469598103934665603ull;
+                for (const pxr::TfToken& tag : *renderTags) {
+                    for (const char c : tag.GetString()) {
+                        hash = (hash ^ static_cast<uint8_t>(c)) * 1099511628211ull;
+                    }
+                    hash = (hash ^ 0x2Cu) * 1099511628211ull;
+                }
+                // And which light groups are gathered: their planes accumulate
+                // with the colour and stand only while the same ones do.
+                for (const std::string& group : aovRequest.lightGroups) {
+                    for (const char c : group) {
+                        hash = (hash ^ static_cast<uint8_t>(c)) * 1099511628211ull;
+                    }
+                    hash = (hash ^ 0x3Bu) * 1099511628211ull;
+                }
+                now.tags = hash;
+            }
             now.traced = true;
             // The same frame continued, or a new one: a camera that moved, a
             // scene that changed or a setting that did all start the mean

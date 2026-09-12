@@ -34,6 +34,42 @@ struct ExrAttribute {
                                     std::span<const float> depth = {}, bool half = true,
                                     std::span<const ExrAttribute> attributes = {});
 
+/// How a channel's 32-bit words are stored in the file.
+enum class ExrChannelType : uint8_t { Half, Float, Uint };
+
+/// One named channel of an image to write: `words` is one 32-bit word a
+/// pixel, bottom row first -- a float for Half and Float, an unsigned
+/// integer for Uint (an id plane; -1 stays 0xFFFFFFFF).
+struct ExrChannel {
+    std::string               name;
+    ExrChannelType            type = ExrChannelType::Float;
+    std::span<const uint32_t> words;
+};
+
+/// Writes an image of named channels ("R", "Z", "Neye.x", "primId"...): what
+/// a render product with several vars is. The channels are stored in the
+/// order the format requires (by name), whatever order they are given in.
+[[nodiscard]] Result<void> writeExrChannels(const std::filesystem::path& path, uint32_t width, uint32_t height,
+                                            std::span<const ExrChannel> channels,
+                                            std::span<const ExrAttribute> attributes = {});
+
+/// A channel read back: its words as the file held them (a Half channel
+/// comes back as floats), bottom row first.
+struct ExrChannelData {
+    std::string           name;
+    ExrChannelType        type = ExrChannelType::Float;
+    std::vector<uint32_t> words;
+};
+
+struct ExrChannels {
+    uint32_t                    width = 0;
+    uint32_t                    height = 0;
+    std::vector<ExrChannelData> channels;   ///< in the file's order (by name)
+};
+
+/// Reads every channel of an OpenEXR file, by name.
+[[nodiscard]] Result<ExrChannels> readExrChannels(const std::filesystem::path& path);
+
 struct ExrPixels {
     uint32_t                  width = 0;
     uint32_t                  height = 0;

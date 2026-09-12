@@ -23,6 +23,7 @@ public:
     TfTokenVector const& GetSupportedRprimTypes() const override;
     TfTokenVector const& GetSupportedSprimTypes() const override;
     TfTokenVector const& GetSupportedBprimTypes() const override;
+    TfTokenVector        GetRenderSettingsNamespaces() const override;
     HdRenderParam* GetRenderParam() const override { return _param.get(); }
     HdResourceRegistrySharedPtr GetResourceRegistry() const override { return _registry; }
 
