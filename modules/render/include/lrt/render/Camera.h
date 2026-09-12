@@ -33,6 +33,14 @@ struct Lens {
     double windowRoll = 0.0;                  ///< degrees, counter-clockwise
 
     double exposure = 0.0;   ///< stops, as UsdGeomCamera authors it
+    /// The diaphragm, as UsdGeomCamera authors it: 0 is a pinhole. The lens
+    /// radius is focal / (2 fStop) with focal in tenths of a scene unit, the
+    /// unit UsdGeomCamera's focalLength is in.
+    double fStop = 0.0;
+    double focusDistance = 0.0;   ///< scene units
+    /// Radial distortion, in ndc radius: p' = p (1 + k1 r^2 + k2 r^4).
+    double distortionK1 = 0.0;
+    double distortionK2 = 0.0;
 };
 
 struct Camera {
@@ -56,6 +64,13 @@ struct Projection {
     bool   orthographic = false;
     Vec3   eyeWorld;
     double exposure = 0.0;   ///< stops: the frame is scaled by 2^exposure
+    /// A thin lens: its radius in scene units (0 for a pinhole) and the depth
+    /// in focus. Only the path tracer honours it, since it is the one route
+    /// that can cast a ray from somewhere other than the pixel's centre.
+    double lensRadius = 0.0;
+    double focusDistance = 0.0;
+    double distortionK1 = 0.0;   ///< radial, in ndc radius: p' = p (1 + k1 r^2 + k2 r^4)
+    double distortionK2 = 0.0;
 };
 
 [[nodiscard]] Mat4 viewFromCamera(const Mat4& cameraToWorld);

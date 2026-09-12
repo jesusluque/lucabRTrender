@@ -334,6 +334,10 @@ private:
         double       nearZ = 0.0;
         double       farZ = 0.0;
         bool         orthographic = false;
+        double       lensRadius = 0.0;
+        double       focusDistance = 0.0;
+        double       distortionK1 = 0.0;
+        double       distortionK2 = 0.0;
         uint32_t     width = 0;
         uint32_t     height = 0;
         uint32_t     samples = 0;
@@ -353,7 +357,9 @@ private:
                 }
             }
             return focalX == o.focalX && focalY == o.focalY && centreX == o.centreX && centreY == o.centreY &&
-                   nearZ == o.nearZ && farZ == o.farZ && orthographic == o.orthographic && width == o.width &&
+                   nearZ == o.nearZ && farZ == o.farZ && orthographic == o.orthographic &&
+                   lensRadius == o.lensRadius && focusDistance == o.focusDistance &&
+                   distortionK1 == o.distortionK1 && distortionK2 == o.distortionK2 && width == o.width &&
                    height == o.height && samples == o.samples && bounces == o.bounces && adaptive == o.adaptive &&
                    error == o.error && revision == o.revision && traced == o.traced;
         }

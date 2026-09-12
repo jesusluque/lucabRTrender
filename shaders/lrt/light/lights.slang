@@ -485,7 +485,13 @@ public LightSample sampleLight(LightRecord l, float3 p, float3 n, float2 u) {
             s.wi = normalize(x * local.x + y * local.y + towards * local.z);
             s.pdf = 1.0 / (2.0 * 3.14159265358979 * (1.0 - cosMax));
         }
-        s.radiance = emission;
+        // A distant light's intensity is the irradiance it lays on a surface
+        // facing it, whatever its angular size: over a disc of solid angle
+        // omega it is spread as a radiance of intensity / omega. Until this,
+        // the disc's radiance was the intensity itself, and UsdLux's default
+        // 0.53 degree sun lit a plane 6.7e-5 of what its intensity said --
+        // 15000 times short -- while a sun of angle 0 was right.
+        s.radiance = s.delta ? emission : emission * s.pdf;
         break;
     }
     case kLightDome: {

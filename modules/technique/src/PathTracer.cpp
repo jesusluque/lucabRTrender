@@ -26,7 +26,12 @@ struct PathParams {
     uint adaptive;     // 1: a converged pixel takes no more paths
     float errorTarget; // relative standard error of the mean a pixel stops at
     uint minSamples;   // and not before this many
-    uint pad2; uint pad3;
+    uint ownRays;      // 1: the tracer casts its own primary rays (lens, distortion)
+    float lensRadius;  // scene units; 0 for a pinhole
+    float focusDistance;
+    float distortionK1;
+    float distortionK2;
+    uint pad2; uint pad3; uint pad4;
 };
 
 Texture2D<uint4>               visibility;   // (instance + 1, triangle); row 0 on top
@@ -257,6 +262,48 @@ Shaded shadeHit(uint2 pixel, PathHit hit, float3 from, float3 direction) {
     return out;
 }
 
+/// The camera's hit found by a ray of the tracer's own, for a lens with a
+/// diaphragm or a distorting one: neither passes through the pixel's centre,
+/// so the visibility buffer's hit is not this sample's. The pixel's ray is
+/// distorted radially in ndc, then a thin lens bends it: every ray through the
+/// pixel meets the pixel's ray at the depth in focus, and leaves the lens from
+/// a point drawn uniformly on its disk. Rigid rows take it to world.
+Shaded shadeLensSample(uint2 pixel, uint sample) {
+    Shaded out;
+    out.valid = false;
+    out.depth = 0.0;
+    float3 origin;
+    float3 direction;
+    viewRay(camera, float2(pixel) + 0.5, origin, direction);
+    if (camera.orthographic == 0) {
+        const float2 ndc = float2(direction.x * camera.focalX / (0.5 * float(camera.width)),
+                                  direction.y * camera.focalY / (0.5 * float(camera.height)));
+        const float r2 = dot(ndc, ndc);
+        direction.xy *= 1.0 + path.distortionK1 * r2 + path.distortionK2 * r2 * r2;
+        if (path.lensRadius > 0.0) {
+            const float3 focus = direction * max(path.focusDistance, camera.nearZ);
+            // Uniform on the lens disk, by area.
+            const float2 u = random2(pixel, sample, 0u, 13u);
+            const float r = sqrt(u.x) * path.lensRadius;
+            const float phi = 2.0 * 3.14159265358979 * u.y;
+            origin = float3(r * cos(phi), r * sin(phi), 0.0);
+            direction = focus - origin;
+        }
+    }
+    direction = normalize(direction);
+    const float3 originWorld = float3(dot(toWorld.row0.xyz, origin) + toWorld.row0.w,
+                                      dot(toWorld.row1.xyz, origin) + toWorld.row1.w,
+                                      dot(toWorld.row2.xyz, origin) + toWorld.row2.w);
+    const float3 directionWorld = normalize(float3(dot(toWorld.row0.xyz, direction),
+                                                   dot(toWorld.row1.xyz, direction),
+                                                   dot(toWorld.row2.xyz, direction)));
+    const PathHit hit = traceNearestFrom(originWorld, directionWorld, camera.nearZ);
+    if (hit.seen.x == 0) {
+        return out;
+    }
+    return shadeHit(pixel, hit, originWorld, directionWorld);
+}
+
 /// One light, sampled and weighed: next event estimation, with the density of
 /// the material's own sampling folded in by the power heuristic so the two
 /// strategies do not double count.
@@ -321,8 +368,11 @@ void tracePaths(uint3 group: SV_GroupID, uint index: SV_GroupIndex) {
     const uint samples = max(path.samples, 1u);
     // The camera's hit does not depend on the sample: rebuilt and its material
     // evaluated once, not once a path. What the denoiser wants of it is written
-    // here too, since it is the same for every sample.
-    const Shaded first = shadeAt(tid, seen);
+    // here too, since it is the same for every sample. With a lens it does
+    // depend on the sample, and each path casts its own; the aux then carry
+    // the first sample's hit.
+    const bool ownRays = kTraces && path.ownRays != 0;
+    const Shaded first = ownRays ? shadeLensSample(tid, 0u) : shadeAt(tid, seen);
     if (path.writeAux != 0) {
         auxAlbedo[at] = first.valid ? float4(stackAlbedo(first.stack, first.toEye), 1.0) : float4(0.0);
         auxNormal[at] = first.valid ? float4(first.inputs.normalWorld, 1.0) : float4(0.0);
@@ -331,8 +381,11 @@ void tracePaths(uint3 group: SV_GroupID, uint index: SV_GroupIndex) {
     float  alpha = 0.0;
     float  hitDepth = 0.0;
     float  squares = 0.0;   // sum of each sample's luminance squared
-    for (uint sample = 0; sample < samples && first.valid; ++sample) {
-        Shaded sh = first;
+    for (uint sample = 0; sample < samples && (first.valid || ownRays); ++sample) {
+        Shaded sh = ownRays && sample > 0 ? shadeLensSample(tid, sample) : first;
+        if (!sh.valid) {
+            continue;   // a lens ray that found nothing: transparent, and counted
+        }
         hitDepth = sh.depth;
         // The first hit's, kept before the bounces: `sh` walks on to whatever
         // the path finds, and it is this surface's opacity the pixel carries.
@@ -607,6 +660,14 @@ Result<void> PathTracer::trace(gpu::CommandBatch& batch, const VisibilityTargets
         cursor["path"]["adaptive"].setData(uint32_t{settings.adaptive ? 1u : 0u});
         cursor["path"]["errorTarget"].setData(settings.errorTarget);
         cursor["path"]["minSamples"].setData(settings.minSamples);
+        const bool ownRays = !projection.orthographic &&
+                             (projection.lensRadius > 0.0 || projection.distortionK1 != 0.0 ||
+                              projection.distortionK2 != 0.0);
+        cursor["path"]["ownRays"].setData(uint32_t{ownRays ? 1u : 0u});
+        cursor["path"]["lensRadius"].setData(static_cast<float>(projection.lensRadius));
+        cursor["path"]["focusDistance"].setData(static_cast<float>(projection.focusDistance));
+        cursor["path"]["distortionK1"].setData(static_cast<float>(projection.distortionK1));
+        cursor["path"]["distortionK2"].setData(static_cast<float>(projection.distortionK2));
         setCamera(cursor["camera"], projection, targets.width, targets.height);
         cursor["path"]["samples"].setData(samples);
         cursor["path"]["bounces"].setData(settings.bounces);

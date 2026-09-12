@@ -39,6 +39,11 @@ Projection projectionFor(const Camera& camera, uint32_t width, uint32_t height) 
     out.orthographic = camera.lens.projection == Lens::Projection::Orthographic;
     out.eyeWorld = camera.cameraToWorld.translation();
     out.exposure = camera.lens.exposure;
+    // focalLength is in tenths of a scene unit (GfCamera::FOCAL_LENGTH_UNIT).
+    out.lensRadius = camera.lens.fStop > 0.0 ? camera.lens.focal * 0.1 / (2.0 * camera.lens.fStop) : 0.0;
+    out.focusDistance = camera.lens.focusDistance;
+    out.distortionK1 = camera.lens.distortionK1;
+    out.distortionK2 = camera.lens.distortionK2;
     return out;
 }
 

@@ -1081,6 +1081,10 @@ Result<void> Engine::render(const render::Projection& projection, const render::
             PathState now;
             now.worldToView = projection.worldToView;
             now.focalX = projection.focalX;
+            now.lensRadius = projection.lensRadius;
+            now.focusDistance = projection.focusDistance;
+            now.distortionK1 = projection.distortionK1;
+            now.distortionK2 = projection.distortionK2;
             now.focalY = projection.focalY;
             now.centreX = projection.centreX;
             now.centreY = projection.centreY;

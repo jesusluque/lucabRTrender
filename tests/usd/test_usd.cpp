@@ -2504,3 +2504,89 @@ TEST_CASE("a PointInstancer of lights lights the scene as its instances authored
     CHECK(drawn->relMse > 1.0);
     CHECK(diff->relMse < 1e-8);
 }
+
+// UsdGeomCamera's diaphragm through Hydra: fStop and focusDistance reach the
+// path tracer's own primary rays. With the square in focus the frame is the
+// pinhole camera's, exactly; with the focus in front of it the square's
+// edges blur, which the frame shows as a difference. Distortion is checked
+// to the pixel in the technique; here it only has to arrive.
+TEST_CASE("a UsdGeomCamera's fStop and focusDistance reach the path tracer through Hydra",
+          "[usd][gpu][mesh][path][camera]") {
+    LRT_REQUIRE_GPU(gpu);
+    const gpu::Caps& caps = gpu->device->caps();
+    if (!caps.rasterization || !caps.rayQuery || !caps.accelerationStructure) {
+        SKIP("needs rasterisation and ray queries");
+    }
+    const std::string rest =
+        "def DistantLight \"Sun\"\n{\n    float inputs:intensity = 3\n    bool inputs:shadow:enable = 0\n}\n"
+        "def Scope \"Materials\"\n{\n"
+        "    def Material \"Mat\"\n    {\n"
+        "        token outputs:mtlx:surface.connect = </Materials/Mat/Surface.outputs:out>\n"
+        "        def Shader \"Surface\"\n        {\n"
+        "            uniform token info:id = \"ND_surface\"\n"
+        "            token inputs:bsdf.connect = </Materials/Mat/Diffuse.outputs:out>\n"
+        "            token outputs:out\n        }\n"
+        "        def Shader \"Diffuse\"\n        {\n"
+        "            uniform token info:id = \"ND_oren_nayar_diffuse_bsdf\"\n"
+        "            color3f inputs:color = (0.8, 0.8, 0.8)\n"
+        "            float inputs:roughness = 0\n"
+        "            token outputs:out\n        }\n    }\n}\n";
+    const auto stageWith = [&](const char* name, const char* lens) {
+        const fs::path path = scratch(name);
+        std::ofstream out(path);
+        // kSquareStage's camera, with the lens authored inside it.
+        std::string text = kSquareStage;
+        const size_t at = text.find("    float2 clippingRange");
+        REQUIRE(at != std::string::npos);
+        text.insert(at, lens);
+        out << text << rest;
+        return path;
+    };
+    // An even width: with the square's triangles meeting on a diagonal
+    // through the frame's centre, an odd width put pixel centres exactly on
+    // that shared edge, and one lens ray in four converging on such a point
+    // fell through the seam.
+    const uint32_t w = 160;
+    const uint32_t h = 121;
+    const auto frame = [&](const fs::path& path) {
+        auto renderer = usd::StageRenderer::open(path);
+        if (!renderer) FAIL(renderer.error().toString());
+        (*renderer)->setPathSamples(4);
+        (*renderer)->setPathTotal(4);
+        (*renderer)->setPathBounces(0);
+        auto image = (*renderer)->render("/Camera", 0.0, w, h, "rt");
+        if (!image) FAIL(image.error().toString());
+        return *image;
+    };
+    const usd::StageImage pinhole = frame(stageWith("lens_pinhole.usda", ""));
+    const usd::StageImage inFocus =
+        frame(stageWith("lens_focus5.usda", "    float fStop = 8\n    float focusDistance = 5\n"));
+    const usd::StageImage outOfFocus =
+        frame(stageWith("lens_focus2.usda", "    float fStop = 8\n    float focusDistance = 2.5\n"));
+    const usd::StageImage distorted = frame(stageWith(
+        "lens_distorted.usda", "    token lensDistortion:type = \"standard\"\n    float lensDistortion:k1 = 0.3\n"));
+    test::dumpPpm("dof_hydra", outOfFocus.rgba.data(), w, h);
+    gpu::BufferDesc desc;
+    desc.bytes = pinhole.rgba.size() * sizeof(float);
+    desc.elementBytes = 16;
+    auto a = gpu::Buffer::create(*gpu->device, desc, pinhole.rgba.data());
+    auto b = gpu::Buffer::create(*gpu->device, desc, inFocus.rgba.data());
+    auto c = gpu::Buffer::create(*gpu->device, desc, outOfFocus.rgba.data());
+    auto d = gpu::Buffer::create(*gpu->device, desc, distorted.rgba.data());
+    REQUIRE(a);
+    REQUIRE(b);
+    REQUIRE(c);
+    REQUIRE(d);
+    auto focused = render::compareHdr(*gpu->library, *a, *b, w, h);
+    auto blurred = render::compareHdr(*gpu->library, *a, *c, w, h);
+    auto bent = render::compareHdr(*gpu->library, *a, *d, w, h);
+    REQUIRE(focused);
+    REQUIRE(blurred);
+    REQUIRE(bent);
+    std::printf("  UsdGeomCamera lens through Hydra: in focus relMSE %.2e (p99 relative %.2e, max %.2e) against the "
+                "pinhole; out of focus %.2e; distorted %.2e\n",
+                focused->relMse, focused->p99Relative, focused->maxRelative, blurred->relMse, bent->relMse);
+    CHECK(focused->relMse < 1e-8);
+    CHECK(blurred->relMse > 1e-3);
+    CHECK(bent->relMse > 1e-3);
+}

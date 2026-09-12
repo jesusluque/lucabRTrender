@@ -3008,3 +3008,226 @@ TEST_CASE("an instanced light's records are the lights authored where the instan
     CHECK(m[1] == 6);
     CHECK(m[0] == 0);
 }
+
+// The camera's lens. A uniformly lit Lambert plane parallel to the image,
+// ending in a straight vertical edge, drawn by the path tracer's own primary
+// rays: in focus the frame must be the pinhole's (every lens ray through a
+// pixel meets its pixel ray there), and out of focus the edge must follow the
+// circular-segment profile of a uniform disk whose radius the thin lens
+// gives -- lens radius * |z - focus| / (z * focus) * focal, in pixels.
+namespace {
+
+struct LensFrame {
+    gpu::Buffer colour;
+    uint32_t    width = 0;
+    uint32_t    height = 0;
+};
+
+LensFrame renderLensPlane(test::Gpu& gpu, const render::Projection& projection, uint32_t w, uint32_t h,
+                          double planeZ, double half, double rightEdgeX, uint32_t samples) {
+    std::vector<std::filesystem::path> shaderPaths;
+    for (const std::string& path : gpu.device->shaderSearchPaths()) {
+        shaderPaths.emplace_back(path);
+    }
+    auto compiler = material::MaterialCompiler::create({LRT_MATERIALX_ROOT}, shaderPaths);
+    auto textures = material::TextureStore::create(*gpu.library);
+    auto builder = geom::MeshBuilder::create(*gpu.library);
+    auto scene = world::GpuScene::create(*gpu.library);
+    auto accel = world::RayTracingScene::create(*gpu.library);
+    auto raster = technique::VisibilityRaster::create(*gpu.library);
+    auto programs = technique::MaterialPrograms::create(*gpu.library);
+    auto tracer = technique::PathTracer::create(*gpu.library);
+    auto table = light::LightTable::create(*gpu.library);
+    if (!compiler) FAIL(compiler.error().toString());
+    if (!textures) FAIL(textures.error().toString());
+    if (!builder) FAIL(builder.error().toString());
+    if (!scene) FAIL(scene.error().toString());
+    if (!accel) FAIL(accel.error().toString());
+    if (!raster) FAIL(raster.error().toString());
+    if (!programs) FAIL(programs.error().toString());
+    if (!tracer) FAIL(tracer.error().toString());
+    if (!table) FAIL(table.error().toString());
+    auto lambert = (*compiler)->compileXml(
+        "<?xml version=\"1.0\"?>\n<materialx version=\"1.39\">\n"
+        "  <oren_nayar_diffuse_bsdf name=\"d\" type=\"BSDF\">\n"
+        "    <input name=\"color\" type=\"color3\" value=\"0.8, 0.8, 0.8\" />\n"
+        "    <input name=\"roughness\" type=\"float\" value=\"0\" />\n"
+        "  </oren_nayar_diffuse_bsdf>\n"
+        "  <surface name=\"shader\" type=\"surfaceshader\"><input name=\"bsdf\" type=\"BSDF\" nodename=\"d\" /></surface>\n"
+        "  <surfacematerial name=\"material\" type=\"material\">\n"
+        "    <input name=\"surfaceshader\" type=\"surfaceshader\" nodename=\"shader\" />\n"
+        "  </surfacematerial>\n</materialx>\n");
+    if (!lambert) FAIL(lambert.error().toString());
+    REQUIRE(programs->setModules(std::span<const material::CompiledMaterial>(&*lambert, 1)));
+    if (auto set = tracer->setPrograms(*programs); !set) FAIL(set.error().toString());
+    const std::vector<float> blob = material::MaterialCompiler::parameters(
+        *lambert, **textures, [](const std::string&) { return 0xFFFFFFFFu; });
+    REQUIRE((*textures)->commit());
+    const std::vector<technique::MaterialRecord> rows{{0, 0, 0, 0}, {1, 0, 0, 0}};
+    auto records = gpu::Buffer::fromSpan<technique::MaterialRecord>(*gpu.device, rows, "materials.records");
+    auto blobBuffer = gpu::Buffer::fromSpan<float>(*gpu.device, blob, "materials.blob");
+    REQUIRE(records);
+    REQUIRE(blobBuffer);
+    world::MeshInstance instance;
+    instance.mesh = lambertSquare(*builder, static_cast<float>(half));
+    instance.objectToWorld = aofx::xform::translation({rightEdgeX - half, 0.0, planeZ});
+    instance.material = 1;
+    REQUIRE(scene->update(std::span<const world::MeshInstance>(&instance, 1), projection));
+    REQUIRE(accel->build(*scene));
+    // A sun down -z: the plane faces +z, so its irradiance is uniform.
+    light::Light sun;
+    sun.kind = light::LightKind::Distant;
+    sun.intensity = 3.0F;
+    sun.shadow = false;
+    REQUIRE(table->set(std::span<const light::Light>(&sun, 1)));
+    technique::VisibilityTargets visibility;
+    technique::MaterialFrame frame;
+    frame.programs = &*programs;
+    frame.scene = &*scene;
+    frame.records = &*records;
+    frame.blob = &*blobBuffer;
+    frame.textures = &**textures;
+    frame.lights = &*table;
+    frame.shadows = accel->topLevel();
+    frame.samples = 1;
+    render::RenderTargets out;
+    {
+        gpu::CommandBatch batch(*gpu.device);
+        REQUIRE(raster->render(batch, *scene, projection, w, h, visibility));
+        technique::PathSettings paths;
+        paths.samples = samples;
+        paths.bounces = 0;
+        REQUIRE(tracer->trace(batch, visibility, projection, frame, paths, out, nullptr));
+        REQUIRE(batch.submit(true));
+    }
+    LensFrame result;
+    result.colour = std::move(out.colour);
+    result.width = w;
+    result.height = h;
+    return result;
+}
+
+}   // namespace
+
+TEST_CASE("a thin lens leaves the plane in focus as the pinhole draws it, and blurs an edge out of focus by "
+          "the circle of confusion",
+          "[technique][path][camera][dof]") {
+    LRT_REQUIRE_GPU(gpu);
+    const gpu::Caps& caps = gpu->device->caps();
+    if (!caps.rasterization || !caps.rayQuery || !caps.accelerationStructure) {
+        SKIP("needs rasterisation and ray queries");
+    }
+    const uint32_t w = 161;
+    const uint32_t h = 121;
+    render::Camera camera = render::Camera::lookingAt({0.0, 0.0, 0.0}, {0.0, 0.0, -1.0});
+    camera.lens.focal = 35.0;
+    const render::Projection pinhole = render::projectionFor(camera, w, h);
+    render::Projection lens = pinhole;
+    lens.lensRadius = 0.2;
+    lens.focusDistance = 4.0;
+
+    // In focus: the plane at the focus distance, its edge left of centre.
+    {
+        const LensFrame a = renderLensPlane(*gpu, pinhole, w, h, -4.0, 4.0, -0.5, 16);
+        const LensFrame b = renderLensPlane(*gpu, lens, w, h, -4.0, 4.0, -0.5, 16);
+        auto diff = render::compareHdr(*gpu->library, a.colour, b.colour, w, h);
+        REQUIRE(diff);
+        std::printf("  plane in focus, lens against pinhole: relMSE %.2e, max relative %.2e\n", diff->relMse,
+                    diff->maxRelative);
+        CHECK(diff->relMse < 1e-8);
+    }
+    // Out of focus: the plane twice as far, its edge at x = 0, blurred by a
+    // disk of lensRadius * |z - f| / (z f) * focal pixels.
+    {
+        const double z = 8.0;
+        const double radius = lens.lensRadius * std::abs(z - lens.focusDistance) / (z * lens.focusDistance) *
+                              pinhole.focalX;
+        const LensFrame blurred = renderLensPlane(*gpu, lens, w, h, -z, 8.0, 0.0, 4096);
+        test::dumpPpm(*gpu, "dof_edge", blurred.colour, w, h);
+        auto made = gpu::ComputeKernel::create(*gpu->library, "lrt/test/dof_check", "dofEdge");
+        if (!made) FAIL(made.error().toString());
+        gpu::Buffer counts = test::uintBuffer(*gpu->device, 2, "dof.counts");
+        gpu::Buffer worst = test::uintBuffer(*gpu->device, 1, "dof.worst");
+        {
+            gpu::CommandBatch batch(*gpu->device);
+            made->dispatch(batch, {1, 1, 1}, [&](rhi::ShaderCursor cursor) {
+                cursor["image"].setBinding(blurred.colour.rhi());
+                cursor["counts"].setBinding(counts.rhi());
+                cursor["worst"].setBinding(worst.rhi());
+                rhi::ShaderCursor d = cursor["dof"];
+                d["width"].setData(w);
+                d["height"].setData(h);
+                d["edge"].setData(static_cast<float>(pinhole.centreX));
+                d["radius"].setData(static_cast<float>(radius));
+                d["plateau"].setData(static_cast<float>(pinhole.centreX - 4.0 * radius - 4.0));
+                // 4096 lens samples: the coverage's standard error is at most
+                // 0.5 / 64 = 0.8% of the plateau; five of those.
+                d["tolerance"].setData(0.04F);
+                d["band"].setData(3.0F);
+            });
+            REQUIRE(batch.submit(true));
+        }
+        uint32_t c[2] = {0, 0};
+        float e = 0.0F;
+        REQUIRE(counts.read(*gpu->device, 0, sizeof(c), c));
+        REQUIRE(worst.read(*gpu->device, 0, sizeof(e), &e));
+        std::printf("  edge out of focus, circle of confusion %.2f px: %u pixels within 3 radii, %u beyond 4%% of "
+                    "the segment profile, worst %.4f\n",
+                    radius, c[0], c[1], static_cast<double>(e));
+        CHECK(radius > 4.0);
+        CHECK(c[0] > 1000);
+        CHECK(c[1] == 0);
+    }
+}
+
+// Radial distortion moves a straight edge: in each row the lit pixels are
+// those whose distorted ray meets the plane on the lit side, and the count
+// must match to the pixel.
+TEST_CASE("radial lens distortion puts the edge of a plane where the distorted ray meets it",
+          "[technique][path][camera][distortion]") {
+    LRT_REQUIRE_GPU(gpu);
+    const gpu::Caps& caps = gpu->device->caps();
+    if (!caps.rasterization || !caps.rayQuery || !caps.accelerationStructure) {
+        SKIP("needs rasterisation and ray queries");
+    }
+    const uint32_t w = 161;
+    const uint32_t h = 121;
+    render::Camera camera = render::Camera::lookingAt({0.0, 0.0, 0.0}, {0.0, 0.0, -1.0});
+    camera.lens.focal = 35.0;
+    render::Projection projection = render::projectionFor(camera, w, h);
+    projection.distortionK1 = 0.5;
+    projection.distortionK2 = -0.2;
+    const double z = 4.0;
+    const double edgeX = 0.6;   // world x of the edge, off centre so the radial term shows
+    const LensFrame frame = renderLensPlane(*gpu, projection, w, h, -z, 8.0, edgeX, 1);
+    auto made = gpu::ComputeKernel::create(*gpu->library, "lrt/test/dof_check", "distortionEdge");
+    if (!made) FAIL(made.error().toString());
+    gpu::Buffer counts = test::uintBuffer(*gpu->device, 4, "distortion.counts");
+    gpu::Buffer worst = test::uintBuffer(*gpu->device, 1, "distortion.worst");
+    {
+        gpu::CommandBatch batch(*gpu->device);
+        made->dispatch(batch, {1, 1, 1}, [&](rhi::ShaderCursor cursor) {
+            cursor["image"].setBinding(frame.colour.rhi());
+            cursor["counts"].setBinding(counts.rhi());
+            cursor["worst"].setBinding(worst.rhi());
+            rhi::ShaderCursor l = cursor["lens"];
+            l["width"].setData(w);
+            l["height"].setData(h);
+            l["focalX"].setData(static_cast<float>(projection.focalX));
+            l["focalY"].setData(static_cast<float>(projection.focalY));
+            l["centreX"].setData(static_cast<float>(projection.centreX));
+            l["centreY"].setData(static_cast<float>(projection.centreY));
+            l["k1"].setData(static_cast<float>(projection.distortionK1));
+            l["k2"].setData(static_cast<float>(projection.distortionK2));
+            l["edgeX"].setData(static_cast<float>(edgeX / z));
+        });
+        REQUIRE(batch.submit(true));
+    }
+    uint32_t c[4] = {0, 0, 0, 0};
+    REQUIRE(counts.read(*gpu->device, 0, sizeof(c), c));
+    std::printf("  distorted edge: %u rows, %u off by more than a pixel, %u off at all, %u moved by the distortion\n",
+                c[0], c[1], c[2], c[3]);
+    CHECK(c[0] == h);
+    CHECK(c[3] > h / 2);
+    CHECK(c[1] == 0);
+}

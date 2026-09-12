@@ -1458,10 +1458,18 @@ enough that what is left is the light and not the noise.
   material still stops a shadow ray where its opacity would have let it
   through.
 
-## Complete USD: the path tracer (M6, in progress)
+## Complete USD: the path tracer (M6)
 
-One bounce, over the same visibility buffer the raster shading reads, so the
-two can be told apart by exactly one thing: the bounce.
+Paths over the same visibility buffer the raster shading reads, so the two
+can be told apart by exactly one thing: the bounces -- and, with a lens, by
+the tracer's own primary rays. The milestone's five checks are each in this
+section: the white furnace (the closed emissive shell, exact to 1.7e-7 over
+0 to 6 bounces), the path tracer against the raster shading where the bounce
+contributes nothing, the error falling as one over root N (exponent -0.499),
+splats alone under `rt` through the ray tracer, and OIDN lowering the error
+(3.65e-4 to 7.17e-5). What was folded into it from M5's deferrals -- the
+cylinder, IES profiles, light instancing, the power prefix on the device --
+is in the lights section.
 
 ### What it does
 
@@ -1750,22 +1758,88 @@ the rest of M6 has to build:
   ray and overlap windows. It is what "splats in rays" will reuse, and it is
   not a skeleton for a surface path tracer.
 
+### The camera's lens
+
+Exposure, the diaphragm and radial distortion, all from `UsdGeomCamera`
+through `HdCamera`. Exposure scales the composed frame by `2^stops` once,
+after the domes -- everything the camera sees, and no AOV -- checked exact
+through Hydra (the frame with exposure 1 authored is the plain frame doubled
+on the device, 0 of 27648 words apart).
+
+The other two are not a parameter away: a ray through the aperture, or a
+distorted one, no longer passes through the pixel's centre, so it cannot
+ride on the visibility buffer the path tracer shades from. When the
+projection carries a lens radius (`focalLength / (2 fStop)`, focal in
+`HdCamera`'s scene units) or a `k1`/`k2`, the tracer casts its own primary
+ray a sample (`shadeLensSample`): the pixel's ray, its x/y scaled by
+`1 + k1 r^2 + k2 r^4` in ndc radius, then bent by a thin lens -- every ray
+through the pixel meets the pixel's ray at the depth in focus, and leaves
+the lens from a point drawn uniformly on its disc -- traced with the same
+query the bounces use and shaded by `shadeHit` from where it met the
+triangle. A lens ray that finds nothing is a transparent sample, counted.
+The aux carry the first sample's hit. The engine's path state carries the
+lens, so changing it restarts the accumulation.
+
+Checked against closed forms that share nothing with the tracer
+(`dof_check.slang`):
+
+- **In focus is the pinhole.** A uniformly lit Lambert plane at the focus
+  distance, its edge off centre, lens radius 0.2: relMSE 0 against the
+  pinhole frame, bit for bit -- every lens ray through a pixel meets that
+  pixel's ray there.
+- **Out of focus is a circular segment.** The plane twice as far: its edge
+  is blurred by the lens disc projected, a uniform disc of
+  `lensRadius |z - f| / (z f) focal` pixels (5.73 here), so a pixel at signed
+  distance d from the edge reads the fraction of that disc on the lit side,
+  `(R^2 acos(-d/R) + d sqrt(R^2 - d^2)) / (pi R^2)`. At 4096 lens rays a
+  pixel, 0 of 4235 pixels within three radii of the edge beyond 4% of the
+  profile (worst 2.2%; the coverage's standard error is at most 0.8%).
+- **Distortion moves the edge to the pixel.** `k1 0.5, k2 -0.2`, the edge
+  off centre so the radial term shows: in each of 121 rows the lit pixels
+  are exactly those whose distorted ray meets the plane on the lit side --
+  0 rows off at all, all 121 moved by the distortion.
+- **Through Hydra**: `fStop 8, focusDistance 5` on the square at 5 gives the
+  pinhole frame exactly; `focusDistance 2.5` and `lensDistortion:k1 0.3`
+  each change it (relMSE 0.44 and 6.8). The frame is 160 wide on purpose:
+  at 161 the pixel centres lay on the square's triangle seam, and one lens
+  ray in four converging exactly on the seam fell through it.
+
+**A bug the Hydra check found, in the sun.** A distant light with an angle
+handed its intensity out as the disc's radiance, so the irradiance it laid
+was `intensity * solid angle`: UsdLux's default 0.53 degree sun lit a plane
+6.7e-5 of its intensity, 15000 times short, while a sun of angle 0 -- the
+one the closed forms had been checking -- was right. Now the disc's radiance
+is `intensity / solid angle`, and the closed form takes a cap's vector
+irradiance, `pi sin^2(a)` along its axis, over that solid angle: the 0.2
+radian sun reads 0 of 8281 pixels beyond 2%, worst 0.01%.
+
 ### Not done
 
 - There is no `HdRenderThread`: the pass draws on the thread that executes
   it. `StageRenderer::render` does draw until the path traced frame holds its
   total (checked: a total of 32 at 4 a pass leaves 32 gathered), so an image
   from the CLI is a gathered one; a viewport is the host's to keep asking for.
-- Splats in rays and points as spheres.
-- Depth of field and lens distortion. Exposure is done: UsdGeomCamera's
-  `exposure` reaches the engine through `HdCamera` and scales the composed
-  frame by `2^stops` once, after the domes -- everything the camera sees, and
-  no AOV -- checked exact through Hydra (the frame with exposure 1 authored is
-  the plain frame doubled on the device, 0 of 27648 words apart). Depth of
-  field is not a parameter away: a ray through the aperture no longer passes
-  through the pixel's centre, so it cannot ride on the visibility buffer the
-  path tracer shades from, and needs the tracer to cast its own primary ray a
-  sample. That is its own piece.
+- **Splats inside the path tracer's rays.** A splats-only stage under `rt`
+  goes whole to `GaussianRayTracer` (checked, with `test_ray_tracing`'s
+  tolerances); with meshes the splats are composited over the path traced
+  surfaces by depth. A bounce ray does not see them: `rt_integrate.slang`
+  owns its pixel and assumes a primary ray, and a splat's contribution along
+  a secondary ray is an integral through its Gaussian that no route here
+  evaluates yet.
+- **Points as spheres**, spiked and not built. slang-rhi's Metal backend
+  does build acceleration structures over AABBs
+  (`AccelerationStructureBuildInputType::ProceduralPrimitives`, a
+  `BoundingBoxGeometryDescriptor` each) and OptiX does too; `Spheres` and
+  `LinearSweptSpheres` it refuses on Metal. So a sphere primitive is an AABB
+  with a custom intersection under `RayQuery`, on both devices. What it needs
+  beyond that is a second primitive type in the visibility buffer and in
+  `surface.slang` -- the same thing M8's curves add, which is where it goes.
+- The lens under `raster`. Depth of field and distortion are the path
+  tracer's (above): the raster route shades the visibility buffer's hit,
+  which is the pixel centre's, and a viewport under `raster` draws a pinhole
+  whatever the camera authors.
+- Lens distortion beyond the radial terms: `lensDistortion:center`, `anaSq`,
+  `asym` and `scale` are read by `HdCamera` and not applied.
 - The plan's per-milestone `lrt bench` condition is retired, in CLAUDE.md as
   well: `lrt bench` times splat files and never rendered a stage, so the
   condition had been unmet since meshes arrived. Medians of `lrt stage

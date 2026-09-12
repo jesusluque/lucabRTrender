@@ -42,6 +42,17 @@ void HdLrtRenderPass::_Execute(HdRenderPassStateSharedPtr const& state, TfTokenV
     // frame it draws; the projection matrix alone does not carry it.
     if (const HdCamera* camera = state->GetCamera(); camera != nullptr) {
         projection.exposure = static_cast<double>(camera->GetExposure());
+        // The diaphragm and the distortion, which only the path tracer's own
+        // rays can honour. HdCamera's focal length is already in scene units.
+        if (camera->GetFStop() > 0.0F) {
+            projection.lensRadius = static_cast<double>(camera->GetFocalLength()) /
+                                    (2.0 * static_cast<double>(camera->GetFStop()));
+            projection.focusDistance = static_cast<double>(camera->GetFocusDistance());
+        }
+        if (camera->GetLensDistortionType() == HdCameraTokens->standard) {
+            projection.distortionK1 = static_cast<double>(camera->GetLensDistortionK1());
+            projection.distortionK2 = static_cast<double>(camera->GetLensDistortionK2());
+        }
     }
 
     lrt::render::RenderSettings settings;
