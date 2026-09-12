@@ -11,6 +11,7 @@
 #include <pxr/imaging/pxOsd/tokens.h>
 
 #include "RenderParam.h"
+#include "lrt/core/Log.h"
 #include "lrt/usd/HydraCamera.h"
 
 PXR_NAMESPACE_OPEN_SCOPE

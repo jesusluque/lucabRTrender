@@ -23,6 +23,8 @@
 #include <pxr/usd/usdGeom/metrics.h>
 #include <pxr/usd/usdGeom/tokens.h>
 #include <pxr/usdImaging/usdImaging/sceneIndices.h>
+
+#include <pxr/imaging/hd/sceneIndexPluginRegistry.h>
 #include <pxr/usdImaging/usdImaging/stageSceneIndex.h>
 
 #include "RenderDelegate.h"
@@ -67,7 +69,14 @@ Result<std::unique_ptr<StageRenderer>> StageRenderer::open(const std::filesystem
     UsdImagingCreateSceneIndicesInfo info;
     info.stage = impl.stage;
     impl.sceneIndices = UsdImagingCreateSceneIndices(info);
-    impl.index->InsertSceneIndex(impl.sceneIndices.finalSceneIndex, SdfPath::AbsoluteRootPath());
+    // Through the filters registered for this renderer before the index sees
+    // it: that is what resolves a light's collections into the categories
+    // GetCategories then reports. Inserting the stage's own chain directly
+    // skips every one of them.
+    HdLrtRegisterSceneIndices();
+    const HdSceneIndexBaseRefPtr scene = HdSceneIndexPluginRegistry::GetInstance().AppendSceneIndicesForRenderer(
+        "lucabRTrender", impl.sceneIndices.finalSceneIndex);
+    impl.index->InsertSceneIndex(scene, SdfPath::AbsoluteRootPath());
 
     impl.controller = std::make_unique<HdxTaskController>(
         impl.index, SdfPath("/__lrtTaskController"), /*gpuEnabled=*/false);

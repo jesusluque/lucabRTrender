@@ -1755,3 +1755,101 @@ TEST_CASE("a dome light's image lights a Lambert plane, and shows where nothing 
     CHECK(c[1] == 0);
     CHECK(corner[0] == Catch::Approx(linear).margin(0.01F));
 }
+
+/// Hidden: the engine's half of light linking is checked in
+/// lrt_technique_tests, exactly, by counters. What does not arrive here is the
+/// scene index's half. Measured, in this order: the filter is registered and
+/// appended (traced), it is given ten light types and five geometry types, the
+/// stage's collection transports correctly in expression mode
+/// (membershipExpression='/Left' on the light's collections data source, where
+/// relationship mode sends UsdLux's default '~//*.*'), the mesh carries a
+/// categories data source and the light a lightLink -- and both are empty,
+/// before syncing and after, inserted first in the chain and last. Whatever
+/// makes HdsiLightLinkingSceneIndex mark a prim is not happening, and its
+/// implementation is not in this tree to read.
+TEST_CASE("a UsdLux light's collection reaches only what it includes",
+          "[.][usd][gpu][mesh][lights][linking]") {
+    LRT_REQUIRE_GPU(gpu);
+    if (!gpu->device->caps().rasterization) {
+        SKIP("no rasterisation on this device");
+    }
+    const fs::path path = scratch("light_linked.usda");
+    {
+        std::ofstream out(path);
+        // Two squares side by side, one material, and a light whose collection
+        // includes the left one alone. USD resolves that into a category the
+        // left square carries, which is what the engine tests.
+        out << "#usda 1.0\n(\n    upAxis = \"Y\"\n)\n";
+        for (int k = 0; k < 2; ++k) {
+            const float x = k == 0 ? -1.0F : 1.0F;
+            out << "def Mesh \"" << (k == 0 ? "Left" : "Right") << "\" (\n"
+                   "    prepend apiSchemas = [\"MaterialBindingAPI\"]\n)\n{\n"
+                   "    int[] faceVertexCounts = [4]\n    int[] faceVertexIndices = [0, 1, 2, 3]\n"
+                << "    point3f[] points = [(" << x - 0.9F << ", -0.9, -5), (" << x + 0.9F << ", -0.9, -5), ("
+                << x + 0.9F << ", 0.9, -5), (" << x - 0.9F << ", 0.9, -5)]\n"
+                << "    uniform token subdivisionScheme = \"none\"\n"
+                   "    rel material:binding = </Materials/Mat>\n}\n";
+        }
+        out << "def Camera \"Camera\"\n{\n    float focalLength = 35\n"
+               "    float horizontalAperture = 24.576\n    float verticalAperture = 18.432\n"
+               "    float2 clippingRange = (0.1, 1000)\n}\n"
+               "def SphereLight \"Key\" (\n    prepend apiSchemas = [\"ShadowAPI\"]\n)\n{\n"
+               "    bool inputs:shadow:enable = 0\n"
+               "    float inputs:radius = 0.4\n"
+               "    float inputs:intensity = 1\n"
+               "    bool inputs:normalize = 0\n"
+               "    double3 xformOp:translate = (0, 0, -3)\n"
+               "    uniform token[] xformOpOrder = [\"xformOp:translate\"]\n"
+               "    uniform token collection:lightLink:mode = \"expression\"\n"
+               "    uniform pathExpression collection:lightLink:membershipExpression = \"/Left\"\n}\n"
+               "def Scope \"Materials\"\n{\n"
+               "    def Material \"Mat\"\n    {\n"
+               "        token outputs:mtlx:surface.connect = </Materials/Mat/Surface.outputs:out>\n"
+               "        def Shader \"Surface\"\n        {\n"
+               "            uniform token info:id = \"ND_surface\"\n"
+               "            token inputs:bsdf.connect = </Materials/Mat/Diffuse.outputs:out>\n"
+               "            token outputs:out\n        }\n"
+               "        def Shader \"Diffuse\"\n        {\n"
+               "            uniform token info:id = \"ND_oren_nayar_diffuse_bsdf\"\n"
+               "            color3f inputs:color = (0.8, 0.8, 0.8)\n"
+               "            float inputs:roughness = 0\n"
+               "            token outputs:out\n        }\n    }\n}\n";
+    }
+    auto renderer = usd::StageRenderer::open(path);
+    if (!renderer) FAIL(renderer.error().toString());
+    const uint32_t w = 160;
+    const uint32_t h = 120;
+    (*renderer)->setLightSamples(16);
+    auto image = (*renderer)->render("/Camera", 0.0, w, h);
+    if (!image) FAIL(image.error().toString());
+
+    gpu::BufferDesc colourDesc;
+    colourDesc.bytes = image->rgba.size() * sizeof(float);
+    colourDesc.elementBytes = 16;
+    auto colours = gpu::Buffer::create(*gpu->device, colourDesc, image->rgba.data());
+    auto depth = gpu::Buffer::fromSpan<float>(*gpu->device, image->depth, "depth");
+    REQUIRE(colours);
+    REQUIRE(depth);
+    auto counters = gpu::ComputeKernel::create(*gpu->library, "lrt/test/light_check", "lightLinkCounters");
+    if (!counters) FAIL(counters.error().toString());
+    gpu::Buffer halves = test::uintBuffer(*gpu->device, 4, "halves");
+    {
+        gpu::CommandBatch batch(*gpu->device);
+        counters->dispatch(batch, {1, 1, 1}, [&](rhi::ShaderCursor cursor) {
+            cursor["image"].setBinding(colours->rhi());
+            cursor["imageDepth"].setBinding(depth->rhi());
+            cursor["halves"].setBinding(halves.rhi());
+            cursor["params"]["thetaBins"].setData(h);
+            cursor["params"]["phiBins"].setData(w);
+        });
+        REQUIRE(batch.submit(true));
+    }
+    uint32_t n[4] = {0, 0, 0, 0};
+    REQUIRE(halves.read(*gpu->device, 0, sizeof(n), n));
+    std::printf("  collection:lightLink includes /Left: left %u drawn %u lit, right %u drawn %u lit\n", n[0], n[1],
+                n[2], n[3]);
+    CHECK(n[0] > 1000);
+    CHECK(n[1] == n[0]);   // the light reaches what its collection includes
+    CHECK(n[2] > 1000);
+    CHECK(n[3] == 0);      // and nothing else
+}

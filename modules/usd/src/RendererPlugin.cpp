@@ -1,10 +1,9 @@
 // Copyright (c) 2026 lucabRTrender contributors.
 #include <pxr/imaging/hd/rendererPlugin.h>
 #include <pxr/imaging/hd/rendererPluginRegistry.h>
-#include <pxr/imaging/hd/sceneIndexPluginRegistry.h>
-#include <pxr/imaging/hdsi/lightLinkingSceneIndex.h>
 
 #include "RenderDelegate.h"
+#include "lrt/core/Log.h"
 
 PXR_NAMESPACE_OPEN_SCOPE
 
@@ -24,20 +23,12 @@ public:
 
 TF_REGISTRY_FUNCTION(TfType) {
     HdRendererPluginRegistry::Define<HdLrtRendererPlugin>();
-}
-
-/// Light linking is USD's to resolve: this scene index turns a light's
-/// collections into categories on the geometry they include, which is what
-/// GetCategories then hands the delegate and what a light's lightLink and
-/// shadowLink name. Without it every collection is invisible here.
-TF_REGISTRY_FUNCTION(HdSceneIndexPlugin) {
-    HdSceneIndexPluginRegistry::GetInstance().RegisterSceneIndexForRenderer(
-        "lucabRTrender",
-        [](const std::string&, const HdSceneIndexBaseRefPtr& inputScene,
-           const HdContainerDataSourceHandle& inputArgs) -> HdSceneIndexBaseRefPtr {
-            return HdsiLightLinkingSceneIndex::New(inputScene, inputArgs);
-        },
-        nullptr, 0, HdSceneIndexPluginRegistry::InsertionOrderAtEnd);
+    // Light linking is USD's to resolve: this scene index turns a light's
+    // lightLink and shadowLink collections into categories on the geometry
+    // they include, which is what GetCategories hands the delegate. Hosts on
+    // the scene index path get it from here; the legacy scene delegate
+    // resolves the same collections itself.
+    HdLrtRegisterSceneIndices();
 }
 
 PXR_NAMESPACE_CLOSE_SCOPE

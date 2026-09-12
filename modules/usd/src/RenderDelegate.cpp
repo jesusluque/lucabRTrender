@@ -1,4 +1,8 @@
 // Copyright (c) 2026 lucabRTrender contributors.
+#include <pxr/imaging/hd/retainedDataSource.h>
+#include <pxr/imaging/hd/sceneIndexPluginRegistry.h>
+#include <pxr/imaging/hdsi/lightLinkingSceneIndex.h>
+
 #include "RenderDelegate.h"
 
 #include "Light.h"
@@ -18,6 +22,43 @@
 #include "lrt/core/Log.h"
 
 PXR_NAMESPACE_OPEN_SCOPE
+
+/// Which prims the light linking scene index is about. Its defaults are not
+/// ours to assume: without saying so it sees the collections and marks
+/// nobody, which is what the probe showed -- a good membership expression and
+/// no categories at all.
+static HdContainerDataSourceHandle _lightLinkingArgs() {
+    VtArray<TfToken> lights;
+    for (const TfToken& type : HdLightPrimTypeTokens()) {
+        lights.push_back(type);
+    }
+    const VtArray<TfToken> geometry{HdPrimTypeTokens->mesh, HdPrimTypeTokens->basisCurves,
+                                    HdPrimTypeTokens->points, HdPrimTypeTokens->volume,
+                                    HdPrimTypeTokens->instancer};
+    return HdRetainedContainerDataSource::New(
+        HdsiLightLinkingSceneIndexTokens->lightPrimTypes,
+        HdRetainedTypedSampledDataSource<VtArray<TfToken>>::New(lights),
+        HdsiLightLinkingSceneIndexTokens->geometryPrimTypes,
+        HdRetainedTypedSampledDataSource<VtArray<TfToken>>::New(geometry));
+}
+
+void HdLrtRegisterSceneIndices() {
+    // Once, and from anywhere: a host that makes the delegate itself never
+    // goes through plug's discovery, so a registry function alone would not
+    // run at all -- measured, by tracing it and seeing nothing.
+    static const bool once = [] {
+        HdSceneIndexPluginRegistry::GetInstance().RegisterSceneIndexForRenderer(
+            "lucabRTrender",
+            [](const std::string&, const HdSceneIndexBaseRefPtr& inputScene,
+               const HdContainerDataSourceHandle& inputArgs) -> HdSceneIndexBaseRefPtr {
+                return HdsiLightLinkingSceneIndex::New(inputScene, inputArgs);
+            },
+            _lightLinkingArgs(), 0, HdSceneIndexPluginRegistry::InsertionOrderAtEnd);
+        return true;
+    }();
+    (void)once;
+}
+
 
 HdLrtRenderDelegate::HdLrtRenderDelegate() { _Setup(); }
 

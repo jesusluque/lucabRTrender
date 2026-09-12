@@ -70,4 +70,8 @@ private:
     HdResourceRegistrySharedPtr        _registry;
 };
 
+/// Registers the scene indices this renderer needs (light linking), once.
+/// Hosts that build the delegate themselves must call it; the plugin does.
+void HdLrtRegisterSceneIndices();
+
 PXR_NAMESPACE_CLOSE_SCOPE

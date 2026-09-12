@@ -1269,7 +1269,33 @@ enough that what is left is the light and not the noise.
 - **The two dome densities are not combined.** A dome is sampled either by
   its image or around the surface, whichever its variation calls for, and
   never both with MIS weighing between them: that is the path tracer's, M6.
-- **No light or shadow linking** yet, though the ground is surveyed: USD
+- **Light linking works in the engine and not through USD.** The engine's
+  half is exact: an instance carries a 64-bit mask of its categories (the
+  record grew to 192 bytes, and a set record spends two spare words to carry
+  the same mask through the instances the device writes), a light carries the
+  category it lights, and shading skips a light the surface does not carry --
+  checked by counters rather than a tolerance, two squares of different
+  categories with 6150 pixels each, the linked one wholly lit and the other
+  exactly zero, both lit when the light has no collection.
+  - **What does not arrive is the scene index's half**, measured in this
+    order rather than guessed: `HdsiLightLinkingSceneIndex` is registered
+    from a point every host reaches -- a registry function alone never runs,
+    since a host that builds the delegate itself never goes through plug's
+    discovery -- and it is appended to the chain (traced); it is given ten
+    light types and five geometry types, so its defaults are not the
+    obstacle; the stage's collection transports correctly, but only in
+    *expression mode* (`membershipExpression='/Left'` reaches the light's
+    collections data source, where relationship mode sends UsdLux's default
+    `~//*.*`); and the mesh carries a `categories` data source while the
+    light carries `lightLink` -- both empty, before the stage is synced and
+    after, with the filter inserted first in the chain and last. Whatever
+    makes that filter mark a prim is not happening here, and its
+    implementation is headers only in this install. The USD case is written
+    and hidden (`[.][usd][gpu][mesh][lights][linking]`) with that list in it.
+- **Shadow linking is carried, not honoured.** The category reaches the light
+  record; what is missing is for the trace to skip an instance outside the
+  set, which is the cutouts' re-trace loop applied to a different test.
+- **The rest of the ground is surveyed:** USD
   resolves the collections for us if the delegate registers
   `HdsiLightLinkingSceneIndex` (`RegisterSceneIndexForRenderer` with our
   display name, from `RendererPlugin.cpp`), after which an rprim's categories
