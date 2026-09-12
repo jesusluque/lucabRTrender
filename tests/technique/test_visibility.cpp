@@ -437,3 +437,176 @@ TEST_CASE("a single-sided mesh shows its front only, mirrored or not", "[techniq
     CHECK(mirroredFront == front);
     CHECK(mirroredBack == 0);
 }
+
+// A mesh deformed in place: rebuilt with the same topology key and layout,
+// the scene copies its positions over the old ones -- the pools stand, no
+// repack -- and what was built on them is refit, not rebuilt: the hardware
+// bottom level in place, the compute LBVH by settling its boxes over the
+// same tree. Checked by what the deformation changes: rays and the walker
+// must see the triangles the rasteriser sees (it reads the pool directly),
+// the LBVH's nodes must each hold their children, and with the refit
+// skipped on purpose the same comparisons fail by the thousand.
+TEST_CASE("a deformed mesh refits its acceleration structures and the routes still agree",
+          "[technique][visibility][deformation][refit]") {
+    LRT_REQUIRE_GPU(gpu);
+    if (!gpu->device->caps().rasterization || !gpu->device->caps().rayQuery) {
+        SKIP("needs both rasterisation and ray queries");
+    }
+    auto r = renderer(*gpu);
+    auto rt = world::RayTracingScene::create(*gpu->library);
+    auto trace = technique::VisibilityTrace::create(*gpu->library);
+    auto bvh = world::BvhScene::create(*gpu->library);
+    auto walk = technique::VisibilityBvh::create(*gpu->library);
+    auto compare = gpu::ComputeKernel::create(*gpu->library, "lrt/test/ids_compare", "idsCompare");
+    auto check = gpu::ComputeKernel::create(*gpu->library, "lrt/test/bvh_check", "bvhCheck");
+    if (!rt) FAIL(rt.error().toString());
+    if (!trace) FAIL(trace.error().toString());
+    if (!bvh) FAIL(bvh.error().toString());
+    if (!walk) FAIL(walk.error().toString());
+    if (!compare) FAIL(compare.error().toString());
+    if (!check) FAIL(check.error().toString());
+    const uint32_t w = 241;
+    const uint32_t h = 181;
+    const render::Projection projection =
+        render::projectionFor(render::Camera::lookingAt({3.0, 4.0, 11.0}, {0.0, 0.0, 0.0}), w, h);
+    // The bumpy grid, built as many times as it is deformed: one topology.
+    const int n = 32;
+    std::vector<int32_t> counts;
+    std::vector<int32_t> indices;
+    for (int y = 0; y < n; ++y) {
+        for (int x = 0; x < n; ++x) {
+            const int p = y * (n + 1) + x;
+            counts.push_back(4);
+            indices.insert(indices.end(), {p, p + n + 1, p + n + 2, p + 1});
+        }
+    }
+    const auto grid = [&](float phase, float amplitude) {
+        std::vector<float> points;
+        for (int y = 0; y <= n; ++y) {
+            for (int x = 0; x <= n; ++x) {
+                const float fx = static_cast<float>(x) / n * 6.0F - 3.0F;
+                const float fy = static_cast<float>(y) / n * 6.0F - 3.0F;
+                points.insert(points.end(),
+                              {fx, amplitude * std::sin(fx * 1.7F + phase) * std::cos(fy * 1.3F - phase), fy});
+            }
+        }
+        geom::MeshInput in;
+        in.source = "grid";
+        in.topology = 7;
+        in.points = {std::as_bytes(std::span<const float>(points)), false};
+        in.faceVertexCounts = counts;
+        in.faceVertexIndices = indices;
+        auto built = r->builder.build(in);
+        if (!built) FAIL(built.error().toString());
+        return std::make_shared<const geom::GpuMesh>(std::move(*built));
+    };
+    const auto idsAgainstRaster = [&](const technique::VisibilityTargets& rastered,
+                                      const technique::VisibilityTargets& other) {
+        gpu::Buffer out = test::uintBuffer(*gpu->device, 4, "ids.counts");
+        auto viewA = rastered.ids.view(0);
+        auto viewB = other.ids.view(0);
+        REQUIRE(viewA);
+        REQUIRE(viewB);
+        gpu::CommandBatch batch(*gpu->device);
+        compare->dispatch(batch, {1, 1, 1}, [&](rhi::ShaderCursor cursor) {
+            cursor["a"].setBinding((*viewA).get());
+            cursor["b"].setBinding((*viewB).get());
+            cursor["counts"].setBinding(out.rhi());
+            cursor["params"]["width"].setData(w);
+            cursor["params"]["height"].setData(h);
+        });
+        REQUIRE(batch.submit(true));
+        uint32_t c[4] = {0, 0, 0, 0};
+        REQUIRE(out.read(*gpu->device, 0, sizeof(c), c));
+        REQUIRE(c[1] > 1000);
+        return c[0];
+    };
+    const auto bvhViolations = [&]() {
+        gpu::Buffer out = test::uintBuffer(*gpu->device, 2, "bvh.violations");
+        const uint32_t triangles = r->scene.mesh(0).triangles;
+        gpu::CommandBatch batch(*gpu->device);
+        check->dispatch(batch, {1, 1, 1}, [&](rhi::ShaderCursor cursor) {
+            cursor["positions"].setBinding(r->scene.positions().rhi());
+            cursor["indices"].setBinding(r->scene.indices().rhi());
+            cursor["meshBoxes"].setBinding(bvh->meshBoxes().rhi());
+            cursor["meshChildren"].setBinding(bvh->meshChildren().rhi());
+            cursor["meshLeaves"].setBinding(bvh->meshLeaves().rhi());
+            cursor["violations"].setBinding(out.rhi());
+            cursor["params"]["count"].setData(triangles);
+            cursor["params"]["nodeBase"].setData(uint32_t{0});
+            cursor["params"]["leafBase"].setData(r->scene.firstTriangle(0));
+            cursor["mesh"]["firstPoint"].setData(r->scene.firstPoint(0));
+            cursor["mesh"]["firstTriangle"].setData(r->scene.firstTriangle(0));
+        });
+        REQUIRE(batch.submit(true));
+        uint32_t c[2] = {0, 0};
+        REQUIRE(out.read(*gpu->device, 0, sizeof(c), c));
+        REQUIRE(c[1] == triangles - 1);
+        return c[0];
+    };
+    const auto routes = [&](bool refit, uint32_t* raysDiffer, uint32_t* walkDiffer) {
+        technique::VisibilityTargets rastered;
+        technique::VisibilityTargets traced;
+        technique::VisibilityTargets walked;
+        {
+            gpu::CommandBatch batch(*gpu->device);
+            REQUIRE(r->raster.render(batch, r->scene, projection, w, h, rastered));
+            REQUIRE(batch.submit(true));
+        }
+        REQUIRE(rt->build(r->scene, refit));
+        {
+            gpu::CommandBatch batch(*gpu->device);
+            REQUIRE(trace->render(batch, *rt, projection, w, h, traced));
+            REQUIRE(batch.submit(true));
+        }
+        REQUIRE(bvh->build(r->scene, refit));
+        {
+            gpu::CommandBatch batch(*gpu->device);
+            REQUIRE(walk->render(batch, r->scene, *bvh, projection, w, h, walked));
+            REQUIRE(batch.submit(true));
+        }
+        *raysDiffer = idsAgainstRaster(rastered, traced);
+        *walkDiffer = idsAgainstRaster(rastered, walked);
+    };
+
+    world::MeshInstance ground;
+    ground.mesh = grid(0.0F, 0.4F);
+    REQUIRE(r->scene.update(std::span<const world::MeshInstance>(&ground, 1), projection));
+    const uint64_t generation = r->scene.generation();
+    uint32_t rays = 0;
+    uint32_t walked = 0;
+    routes(true, &rays, &walked);
+    std::printf("  built: %u / %u interior pixels differ (rays / walker), %u LBVH violations\n", rays, walked,
+                bvhViolations());
+    CHECK(rays == 0);
+    CHECK(walked == 0);
+
+    // Deformed: the same topology, other heights. No repack, a refit.
+    ground.mesh = grid(1.3F, 0.9F);
+    REQUIRE(r->scene.update(std::span<const world::MeshInstance>(&ground, 1), projection));
+    CHECK(r->scene.generation() == generation);
+    CHECK(r->scene.positionsRevision() == 1);
+    routes(true, &rays, &walked);
+    const uint32_t violationsAfterRefit = bvhViolations();
+    std::printf("  deformed and refit: %u / %u differ, %u LBVH violations\n", rays, walked, violationsAfterRefit);
+    CHECK(rays == 0);
+    CHECK(walked == 0);
+    CHECK(violationsAfterRefit == 0);
+
+    // Deformed again with the refit skipped: the structures are the last
+    // shape's, and the comparisons say so.
+    ground.mesh = grid(2.6F, -0.7F);
+    REQUIRE(r->scene.update(std::span<const world::MeshInstance>(&ground, 1), projection));
+    CHECK(r->scene.generation() == generation);
+    routes(false, &rays, &walked);
+    const uint32_t violationsStale = bvhViolations();
+    std::printf("  deformed, refit skipped: %u / %u differ, %u LBVH violations\n", rays, walked, violationsStale);
+    CHECK(rays > 1000);
+    CHECK(walked > 1000);
+    CHECK(violationsStale > 100);
+    // And caught up.
+    routes(true, &rays, &walked);
+    std::printf("  then refit: %u / %u differ, %u LBVH violations\n", rays, walked, bvhViolations());
+    CHECK(rays == 0);
+    CHECK(walked == 0);
+}

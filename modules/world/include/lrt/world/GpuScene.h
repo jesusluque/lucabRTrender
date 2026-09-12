@@ -87,6 +87,13 @@ public:
     [[nodiscard]] uint32_t firstTriangle(uint32_t mesh) const { return ranges_[mesh].firstTriangle; }
     /// Changes whenever the pools are repacked (the mesh set changed).
     [[nodiscard]] uint64_t generation() const noexcept { return generation_; }
+    /// Changes whenever a mesh was deformed in place: replaced by one of the
+    /// same topology key and layout, whose positions and primvars were copied
+    /// over its own. The pools' layout did not change; what is built on their
+    /// positions (BLAS, LBVH) has to be refit.
+    [[nodiscard]] uint64_t positionsRevision() const noexcept { return positionsRevision_; }
+    /// Per mesh: raised each time it was deformed in place (0 after a repack).
+    [[nodiscard]] uint64_t meshRevision(uint32_t mesh) const { return meshRevisions_[mesh]; }
 
     // Pools and records (shaders/lrt/world/scene_types.slang).
     [[nodiscard]] const gpu::Buffer& positions() const noexcept { return positions_; }
@@ -116,6 +123,12 @@ private:
         uint32_t firstTriangle = 0;
     };
     [[nodiscard]] Result<void> repack();
+    /// Mesh `k` replaced in place by `mesh`, of the same layout.
+    [[nodiscard]] Result<void> refresh(uint32_t k, const geom::GpuMesh& mesh);
+    [[nodiscard]] static bool sameLayout(const geom::GpuMesh& a, const geom::GpuMesh& b) noexcept;
+    uint64_t                                           positionsRevision_ = 0;
+    std::vector<uint64_t>                              meshRevisions_;
+    std::vector<uint64_t>                              primvarValueBase_;   ///< per mesh: its first value in primvarValues_
 
     gpu::Device*                                       device_ = nullptr;
     gpu::ComputeKernel                                 records_;

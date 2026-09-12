@@ -61,6 +61,10 @@ struct MeshInput {
     std::span<const PrimvarInput> primvars;
     /// GeomSubsets of one family (materialBind): each one's authored face indices.
     std::vector<std::span<const int32_t>> subsets;
+    /// A key the caller keeps for the topology, 0 for none: a mesh built with
+    /// the same key, counts and primvar layout as one already in a scene is
+    /// taken as that mesh deformed, and replaces its positions in place.
+    uint64_t                   topology = 0;
 };
 
 struct GpuMesh {
@@ -77,6 +81,9 @@ struct GpuMesh {
     gpu::Buffer   triangleSubsets;  ///< uint per triangle: 0, or k + 1 for the k-th subset (when subsets > 0)
     std::vector<GpuPrimvar> primvars;   ///< authored, and "normals" when computed
     scene::Bounds bounds;
+    /// The caller's key for the mesh's topology (MeshInput::topology): two
+    /// meshes of the same key and layout are one mesh deformed.
+    uint64_t      topology = 0;
 
     [[nodiscard]] const GpuPrimvar* primvar(std::string_view name) const noexcept {
         for (const GpuPrimvar& p : primvars) {

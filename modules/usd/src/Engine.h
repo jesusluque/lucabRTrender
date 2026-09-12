@@ -90,6 +90,7 @@ struct MeshEntry {
     std::vector<uint64_t>                  chainVersions;   ///< the instancer versions `chain` was made from
     bool                                   chainDirty = false;
     std::shared_ptr<const geom::GpuMesh>   gpu;
+    uint64_t                               topologyKey = 0;   ///< the key its GpuMesh was built with
     render::Mat4                           objectToWorld = render::Mat4::identity();
     MeshLook                               look;
     std::vector<pxr::SdfPath>              subsetMaterials;   ///< per GeomSubset the mesh was built with
@@ -221,6 +222,10 @@ public:
     /// path traced one has nothing to gather and is always finished.
     [[nodiscard]] uint32_t pathAccumulated() const noexcept;
     [[nodiscard]] bool pathConverged() const noexcept;
+    /// The mesh pools' generation (a repack each) and positions revision (a
+    /// deformation in place each), so a host can tell which one a change was.
+    [[nodiscard]] uint64_t meshGeneration() const noexcept;
+    [[nodiscard]] uint64_t meshPositionsRevision() const noexcept;
     void setInstancer(const pxr::SdfPath& id, const pxr::SdfPath& parent, InstancerArrays arrays);
     void removeInstancer(const pxr::SdfPath& id);
     void remove(const pxr::SdfPath& id);
@@ -279,6 +284,7 @@ private:
     std::map<pxr::SdfPath, MeshEntry>         meshes_;
     std::map<pxr::SdfPath, InstancerEntry>    instancers_;
     uint64_t                                  instancerVersion_ = 0;
+    uint64_t nextTopologyKey_ = 0;   ///< one per topology a mesh was given
     std::optional<world::Instancing>          instancing_;
     std::optional<geom::MeshBuilder>          meshBuilder_;   ///< made on first use
     std::optional<world::GpuScene>            scene_;

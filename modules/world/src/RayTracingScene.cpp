@@ -26,10 +26,13 @@ Result<gpu::Buffer> deviceBuffer(gpu::Device& device, uint64_t bytes, uint32_t e
 Result<rhi::ComPtr<rhi::IAccelerationStructure>> buildStructure(gpu::Device& device,
                                                                 const rhi::AccelerationStructureBuildDesc& build,
                                                                 rhi::AccelerationStructureKind kind,
-                                                                const char* label) {
+                                                                const char* label, uint64_t* updateScratch = nullptr) {
     rhi::AccelerationStructureSizes sizes;
     if (SLANG_FAILED(device.rhi()->getAccelerationStructureSizes(build, &sizes))) {
         return Error::make(ErrorCode::DeviceFailure, "no sizes for acceleration structure '{}'", label);
+    }
+    if (updateScratch != nullptr) {
+        *updateScratch = std::max(*updateScratch, sizes.updateScratchSize);
     }
     auto scratch = deviceBuffer(device, sizes.scratchSize, 1, "scene.as.scratch");
     if (!scratch) return std::move(scratch).error();
@@ -63,10 +66,13 @@ Result<RayTracingScene> RayTracingScene::create(gpu::ShaderLibrary& library) {
     return rt;
 }
 
-Result<void> RayTracingScene::build(const GpuScene& scene) {
+Result<void> RayTracingScene::build(const GpuScene& scene, bool refit) {
     gpu::Device& device = *device_;
     if (scene.generation() != generation_) {
         bottom_.clear();
+        bottomInputs_.clear();
+        meshRevisions_.clear();
+        uint64_t updateScratch = 0;
         std::vector<uint32_t> handles;
         for (uint32_t m = 0; m < scene.meshCount(); ++m) {
             const geom::GpuMesh& mesh = scene.mesh(m);
@@ -86,19 +92,47 @@ Result<void> RayTracingScene::build(const GpuScene& scene) {
             rhi::AccelerationStructureBuildDesc build;
             build.inputs = &input;
             build.inputCount = 1;
-            build.flags = rhi::AccelerationStructureBuildFlags::PreferFastTrace;
-            auto made = buildStructure(device, build, rhi::AccelerationStructureKind::BottomLevel, "scene.blas");
+            // Updatable: a deformed mesh refits this structure in place.
+            build.flags = rhi::AccelerationStructureBuildFlags::PreferFastTrace |
+                          rhi::AccelerationStructureBuildFlags::AllowUpdate;
+            auto made = buildStructure(device, build, rhi::AccelerationStructureKind::BottomLevel, "scene.blas",
+                                       &updateScratch);
             if (!made) return std::move(made).error();
             const uint64_t handle = (*made)->getHandle().value;
             handles.push_back(static_cast<uint32_t>(handle));
             handles.push_back(static_cast<uint32_t>(handle >> 32));
             bottom_.push_back(std::move(*made));
+            bottomInputs_.push_back(input);
+            meshRevisions_.push_back(scene.meshRevision(m));
         }
+        auto scratch = deviceBuffer(device, updateScratch, 1, "scene.as.updateScratch");
+        if (!scratch) return std::move(scratch).error();
+        updateScratch_ = std::move(*scratch);
         auto madeHandles = gpu::Buffer::fromSpan<uint32_t>(device, handles.empty() ? std::vector<uint32_t>{0, 0} : handles,
                                                            "scene.as.handles");
         if (!madeHandles) return std::move(madeHandles).error();
         handles_ = std::move(*madeHandles);
         generation_ = scene.generation();
+    } else if (refit) {
+        // The pools stand; a mesh deformed in place refits its structure over
+        // the same triangles -- one submit each, since they share the scratch.
+        for (uint32_t m = 0; m < scene.meshCount(); ++m) {
+            if (scene.meshRevision(m) == meshRevisions_[m]) {
+                continue;
+            }
+            rhi::AccelerationStructureBuildDesc build;
+            build.inputs = &bottomInputs_[m];
+            build.inputCount = 1;
+            build.mode = rhi::AccelerationStructureBuildMode::Update;
+            build.flags = rhi::AccelerationStructureBuildFlags::PreferFastTrace |
+                          rhi::AccelerationStructureBuildFlags::AllowUpdate;
+            gpu::CommandBatch batch(device);
+            batch.encoder()->buildAccelerationStructure(build, bottom_[m], bottom_[m],
+                                                        rhi::BufferOffsetPair(updateScratch_.rhi(), 0), 0, nullptr);
+            batch.markDirty();
+            LRT_TRY(batch.submit(true));
+            meshRevisions_[m] = scene.meshRevision(m);
+        }
     }
 
     const uint32_t count = scene.instanceCount();

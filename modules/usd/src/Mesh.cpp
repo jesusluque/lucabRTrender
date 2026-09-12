@@ -126,6 +126,7 @@ void HdLrtMesh::Sync(HdSceneDelegate* delegate, HdRenderParam* renderParam, HdDi
         const HdDisplayStyle style = GetDisplayStyle(delegate);
         a.smoothNormals = !style.flatShadingEnabled && topology.GetScheme() != PxOsdOpenSubdivTokens->none &&
                           topology.GetScheme() != PxOsdOpenSubdivTokens->bilinear;
+        a.topologyChanged = (*dirtyBits & HdChangeTracker::DirtyTopology) != 0;
         arrays = std::move(a);
     }
     std::optional<lrt::usd::MeshLook> look;

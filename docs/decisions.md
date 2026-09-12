@@ -1849,6 +1849,61 @@ radian sun reads 0 of 8281 pixels beyond 2%, worst 0.01%.
   "does this direction reach light k, and with what radiance" beside
   `lightPdf`, which does not exist. Until then the disjointness above is the
   argument, and a weight here would be the defect again.
+## Complete USD: animation and movement (M7, in progress)
+
+### Deformation in place, and refit instead of rebuild
+
+Until this, a mesh whose points changed was a new `GpuMesh`, and a new mesh
+in the set meant `GpuScene::repack` -- every pool reallocated and copied,
+every bottom-level structure and every LBVH built again -- once a frame for
+anything animated. The plan named a latent bug here (a mesh deformed in
+place would have left the structures stale, since they key on
+`generation()` alone); the tree never deformed in place, so the bug never
+fired, and the cost stood in for it.
+
+Now a mesh carries a **topology key** (`MeshInput::topology`, kept by the
+caller: the engine gives a prim a new key when Hydra marks its topology
+dirty and keeps it otherwise). `GpuScene::update` takes a mesh set in which
+every slot holds the same mesh or one of the same key and layout (counts,
+subsets, primvar names, interpolations, components and counts) as a
+**deformation**: the new positions and primvar values are copied over the
+old in the pools, the record's box is rewritten, `positionsRevision()` and
+that mesh's `meshRevision(k)` rise, and `generation()` does not. Anything
+else repacks as before.
+
+What is built on the pools follows the revision. `RayTracingScene` builds
+its bottom levels `AllowUpdate` and keeps one scratch of the largest update
+size; a mesh whose revision moved is refit in place
+(`AccelerationStructureBuildMode::Update`, source and destination the same
+structure), one submit each since they share the scratch. `BvhScene` keeps
+each mesh's build parameters, recomputes its leaves' boxes from the pool's
+positions and settles the internal boxes over the same tree (`bvh_refit`,
+the passes already written for the build): the tree keeps the shape the
+old positions gave it, so its boxes get looser and never wrong, until the
+next repack reshapes it. Both take a `refit` flag whose false leaves a
+deformed mesh's structure as it was -- there for the check below, not for a
+caller.
+
+**Checked** by what a deformation changes, in `test_visibility` on the
+bumpy grid built three times under one key: after a deformation the scene's
+generation stands and its positions revision is 1; rays and the compute
+walker see the triangles the rasteriser sees (0 of the interior pixels
+differ, the rasteriser reading the pool directly); `bvh_check.slang` finds
+0 of 2047 LBVH nodes whose box misses a child's (a leaf's box being the one
+its triangle's positions make now). With the refit skipped on purpose the
+same comparisons say so -- 5378 and 1918 pixels differ, 1143 nodes miss a
+child -- and the next build with the refit allowed catches up to 0 again.
+Through Hydra, a sheet with time-sampled points: at the second time Hydra
+hands new points and the same topology, the engine keeps the key, the
+generation stands and the revision rises (`StageRenderer::meshGeneration`
+and `meshPositionsRevision`), 28042 of 30000 pixels change, and the three
+routes agree on the deformed frame to the same 4 edge pixels the flat one
+allows.
+
+**Not done here**: the top level is still rebuilt every call (it is small,
+and instances move every frame); a mesh with changed topology still
+repacks every pool, not only its own.
+
 ## Linux, on the 94 (M11's first half)
 
 ### The first table, after the port was reconciled with engine

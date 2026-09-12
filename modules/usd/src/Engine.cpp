@@ -238,6 +238,14 @@ bool Engine::pathConverged() const noexcept {
     return pathState_.adaptive && pathProgress_.covered > 0 && pathProgress_.converged == pathProgress_.covered;
 }
 
+uint64_t Engine::meshGeneration() const noexcept {
+    return scene_.has_value() ? scene_->generation() : 0;
+}
+
+uint64_t Engine::meshPositionsRevision() const noexcept {
+    return scene_.has_value() ? scene_->positionsRevision() : 0;
+}
+
 void Engine::removeLight(const pxr::SdfPath& id) {
     revision_.fetch_add(1);
     const std::lock_guard<std::mutex> held(guard_);
@@ -312,6 +320,12 @@ Result<size_t> Engine::commit() {
         input.holeIndices = std::span<const int32_t>(a.holeIndices.cdata(), a.holeIndices.size());
         input.leftHanded = a.leftHanded;
         input.smoothNormals = a.smoothNormals;
+        // The same key while Hydra says the topology stands, so the scene
+        // takes the rebuilt mesh as the old one deformed and refits.
+        if (a.topologyChanged || entry.topologyKey == 0) {
+            entry.topologyKey = ++nextTopologyKey_;
+        }
+        input.topology = entry.topologyKey;
         std::vector<geom::PrimvarInput> primvars;
         for (const PrimvarArrays& p : a.primvars) {
             geom::PrimvarInput primvar;

@@ -162,6 +162,18 @@ uint32_t StageRenderer::pathAccumulated() const {
     const Engine* engine = param != nullptr ? param->GetEngine() : nullptr;
     return engine != nullptr ? engine->pathAccumulated() : 0;
 }
+
+uint64_t StageRenderer::meshGeneration() const {
+    auto* param = static_cast<HdLrtRenderParam*>(impl_->delegate->GetRenderParam());
+    const Engine* engine = param != nullptr ? param->GetEngine() : nullptr;
+    return engine != nullptr ? engine->meshGeneration() : 0;
+}
+
+uint64_t StageRenderer::meshPositionsRevision() const {
+    auto* param = static_cast<HdLrtRenderParam*>(impl_->delegate->GetRenderParam());
+    const Engine* engine = param != nullptr ? param->GetEngine() : nullptr;
+    return engine != nullptr ? engine->meshPositionsRevision() : 0;
+}
 bool StageRenderer::pathConverged() const {
     auto* param = static_cast<HdLrtRenderParam*>(impl_->delegate->GetRenderParam());
     const Engine* engine = param != nullptr ? param->GetEngine() : nullptr;

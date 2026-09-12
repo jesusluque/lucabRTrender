@@ -128,6 +128,10 @@ public:
     /// to gather and reads as finished.
     [[nodiscard]] uint32_t pathAccumulated() const;
     [[nodiscard]] bool pathConverged() const;
+    /// The mesh pools' generation and positions revision (Engine's): a
+    /// deformation raises the second and not the first.
+    [[nodiscard]] uint64_t meshGeneration() const;
+    [[nodiscard]] uint64_t meshPositionsRevision() const;
 
     /// The Hydra outputs renders produce, colour and depth always among them
     /// ("primId", "instanceId", "elementId", "Neye", "normal", "primvars:st"...).

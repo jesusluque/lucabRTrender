@@ -70,6 +70,24 @@ Result<void> BvhScene::hierarchy(const Build& build, gpu::SortBuffers& sorting, 
         });
         LRT_TRY(batch.submit(true));
     }
+    return settle(build, leafBoxes, boxes, children, leaves);
+}
+
+Result<void> BvhScene::settle(const Build& build, const gpu::Buffer& leafBoxes, gpu::Buffer& boxes,
+                              const gpu::Buffer& children, const gpu::Buffer& leaves) {
+    gpu::Device& device = *device_;
+    const uint32_t n = build.count;
+    const auto setBvh = [&](rhi::ShaderCursor p) {
+        p["count"].setData(n);
+        p["nodeBase"].setData(build.nodeBase);
+        p["leafBase"].setData(build.leafBase);
+        p["boundsLoX"].setData(build.lo[0]);
+        p["boundsLoY"].setData(build.lo[1]);
+        p["boundsLoZ"].setData(build.lo[2]);
+        p["boundsHiX"].setData(build.hi[0]);
+        p["boundsHiY"].setData(build.hi[1]);
+        p["boundsHiZ"].setData(build.hi[2]);
+    };
     if (n < 2) {
         return ok();
     }
@@ -106,7 +124,7 @@ Result<void> BvhScene::hierarchy(const Build& build, gpu::SortBuffers& sorting, 
     return Error::make(ErrorCode::InternalError, "BVH refit of {} leaves did not settle", n);
 }
 
-Result<void> BvhScene::build(const GpuScene& scene) {
+Result<void> BvhScene::build(const GpuScene& scene, bool refit) {
     gpu::Device& device = *device_;
     const auto sortBuffers = [&](uint32_t n, gpu::SortBuffers& sorting) -> Result<void> {
         for (auto [into, label] : {std::pair{&sorting.keysLo, "bvh.keys"}, std::pair{&sorting.values, "bvh.order"},
@@ -121,6 +139,8 @@ Result<void> BvhScene::build(const GpuScene& scene) {
 
     // Per mesh, when the pools changed.
     if (scene.generation() != generation_) {
+        meshBuilds_.clear();
+        meshRevisions_.clear();
         uint64_t nodes = 0;
         uint64_t triangles = 0;
         for (uint32_t m = 0; m < scene.meshCount(); ++m) {
@@ -175,8 +195,49 @@ Result<void> BvhScene::build(const GpuScene& scene) {
             }
             LRT_TRY(hierarchy(build, sorting, *leafBoxes, meshBoxes_, meshChildren_, meshLeaves_));
             nodeBase += std::max<uint32_t>(n, 1) - 1;
+            meshBuilds_.push_back(build);
+            meshRevisions_.push_back(scene.meshRevision(m));
         }
         generation_ = scene.generation();
+    } else if (refit) {
+        // A mesh deformed in place: its leaves' boxes again from the pool's
+        // positions, and the tree it has settled over them. The tree was
+        // shaped by the old positions, so its boxes only get looser -- never
+        // wrong -- until the next repack reshapes it.
+        for (uint32_t m = 0; m < scene.meshCount(); ++m) {
+            if (scene.meshRevision(m) == meshRevisions_[m]) {
+                continue;
+            }
+            const Build& build = meshBuilds_[m];
+            const uint32_t n = build.count;
+            gpu::SortBuffers sorting;
+            LRT_TRY(sortBuffers(n, sorting));   // the codes are written and not sorted: a refit keeps its order
+            auto leafBoxes = deviceBuffer(device, uint64_t{n} * 2, 16, "bvh.mesh.leafBoxes");
+            if (!leafBoxes) return std::move(leafBoxes).error();
+            {
+                gpu::CommandBatch batch(device);
+                triangleLeaves_.dispatch(batch, {n, 1, 1}, [&](rhi::ShaderCursor cursor) {
+                    cursor["positions"].setBinding(scene.positions().rhi());
+                    cursor["indices"].setBinding(scene.indices().rhi());
+                    cursor["leafBoxes"].setBinding(leafBoxes->rhi());
+                    cursor["mortonKeys"].setBinding(sorting.keysLo.rhi());
+                    cursor["mortonValues"].setBinding(sorting.values.rhi());
+                    rhi::ShaderCursor p = cursor["params"];
+                    p["count"].setData(n);
+                    p["boundsLoX"].setData(build.lo[0]);
+                    p["boundsLoY"].setData(build.lo[1]);
+                    p["boundsLoZ"].setData(build.lo[2]);
+                    p["boundsHiX"].setData(build.hi[0]);
+                    p["boundsHiY"].setData(build.hi[1]);
+                    p["boundsHiZ"].setData(build.hi[2]);
+                    cursor["mesh"]["firstPoint"].setData(scene.firstPoint(m));
+                    cursor["mesh"]["firstTriangle"].setData(scene.firstTriangle(m));
+                });
+                LRT_TRY(batch.submit(true));
+            }
+            LRT_TRY(settle(build, *leafBoxes, meshBoxes_, meshChildren_, meshLeaves_));
+            meshRevisions_[m] = scene.meshRevision(m);
+        }
     }
 
     // The instances, every frame.

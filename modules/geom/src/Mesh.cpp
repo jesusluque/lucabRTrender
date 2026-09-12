@@ -67,6 +67,7 @@ Result<MeshBuilder> MeshBuilder::create(gpu::ShaderLibrary& library) {
 Result<GpuMesh> MeshBuilder::build(const MeshInput& in) {
     gpu::Device& device = *device_;
     GpuMesh mesh;
+    mesh.topology = in.topology;
     mesh.source = in.source;
     mesh.points = static_cast<uint32_t>(in.points.values() / 3);
     mesh.faces = static_cast<uint32_t>(in.faceVertexCounts.size());

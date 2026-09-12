@@ -61,6 +61,9 @@ struct MeshArrays {
     pxr::VtArray<int>      holeIndices;
     bool                   leftHanded = false;
     bool                   smoothNormals = true;
+    /// Hydra marked the topology dirty: the mesh is a new one, not the last
+    /// one deformed.
+    bool                   topologyChanged = true;
     std::vector<PrimvarArrays> primvars;
     std::vector<MeshSubset>    subsets;
 };

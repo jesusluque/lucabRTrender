@@ -2590,3 +2590,119 @@ TEST_CASE("a UsdGeomCamera's fStop and focusDistance reach the path tracer throu
     CHECK(blurred->relMse > 1e-3);
     CHECK(bent->relMse > 1e-3);
 }
+
+// A mesh whose points are time sampled, through Hydra: at the second time
+// Hydra hands the delegate new points and the same topology, the engine
+// rebuilds the mesh under the same key, and the scene takes it as a
+// deformation -- the pools' generation stands while their positions revision
+// rises -- so the hardware and compute structures are refit. Checked by the
+// three routes agreeing on the deformed frame, and by that frame differing
+// from the first time's.
+TEST_CASE("time sampled points deform a mesh in place through Hydra, and every route sees the deformation",
+          "[usd][gpu][mesh][deformation][refit]") {
+    LRT_REQUIRE_GPU(gpu);
+    const gpu::Caps& caps = gpu->device->caps();
+    if (!caps.rasterization || !caps.rayQuery || !caps.accelerationStructure) {
+        SKIP("needs rasterisation and ray queries, to compare all three routes");
+    }
+    const int n = 12;
+    const auto grid = [&](double amplitude) {
+        std::string out = "[";
+        for (int y = 0; y <= n; ++y) {
+            for (int x = 0; x <= n; ++x) {
+                const double fx = static_cast<double>(x) / n * 4.0 - 2.0;
+                const double fy = static_cast<double>(y) / n * 3.0 - 1.5;
+                const double fz = -6.0 + amplitude * std::sin(fx * 1.9) * std::cos(fy * 2.3);
+                char buffer[96];
+                std::snprintf(buffer, sizeof(buffer), "%s(%.4f, %.4f, %.4f)", (x == 0 && y == 0) ? "" : ", ", fx, fy,
+                              fz);
+                out += buffer;
+            }
+        }
+        return out + "]";
+    };
+    std::string counts = "[";
+    std::string indices = "[";
+    for (int y = 0; y < n; ++y) {
+        for (int x = 0; x < n; ++x) {
+            const int p = y * (n + 1) + x;
+            char buffer[96];
+            std::snprintf(buffer, sizeof(buffer), "%s4", (x == 0 && y == 0) ? "" : ", ");
+            counts += buffer;
+            // Counter-clockwise seen from +z, where the camera is: single sided
+            // by USD's default, the sheet faces it.
+            std::snprintf(buffer, sizeof(buffer), "%s%d, %d, %d, %d", (x == 0 && y == 0) ? "" : ", ", p, p + 1,
+                          p + n + 2, p + n + 1);
+            indices += buffer;
+        }
+    }
+    counts += "]";
+    indices += "]";
+    const fs::path path = scratch("deforming.usda");
+    {
+        std::ofstream out(path);
+        out << "#usda 1.0\n(\n    upAxis = \"Y\"\n    startTimeCode = 0\n    endTimeCode = 1\n)\n"
+               "def Mesh \"Sheet\"\n{\n"
+            << "    int[] faceVertexCounts = " << counts << "\n"
+            << "    int[] faceVertexIndices = " << indices << "\n"
+            << "    point3f[] points.timeSamples = {\n        0: " << grid(0.0) << ",\n        1: " << grid(1.2)
+            << ",\n    }\n"
+               "    uniform token subdivisionScheme = \"none\"\n"
+               "    color3f[] primvars:displayColor = [(0.6, 0.7, 0.3)] ( interpolation = \"constant\" )\n}\n"
+               "def Camera \"Camera\"\n{\n"
+               "    float focalLength = 35\n"
+               "    float horizontalAperture = 24.576\n    float verticalAperture = 18.432\n"
+               "    float2 clippingRange = (0.1, 1000)\n}\n";
+    }
+    const uint32_t w = 200;
+    const uint32_t h = 150;
+    auto renderer = usd::StageRenderer::open(path);
+    if (!renderer) FAIL(renderer.error().toString());
+    const auto frame = [&](double time, const char* route) {
+        REQUIRE((*renderer)->setMeshVisibility(route));
+        auto image = (*renderer)->render("/Camera", time, w, h);
+        if (!image) FAIL(image.error().toString());
+        gpu::BufferDesc desc;
+        desc.bytes = image->rgba.size() * sizeof(float);
+        desc.elementBytes = 16;
+        auto buffer = gpu::Buffer::create(*gpu->device, desc, image->rgba.data());
+        REQUIRE(buffer);
+        return *buffer;
+    };
+    const gpu::Buffer flat = frame(0.0, "raster");
+    const gpu::Buffer flatRays = frame(0.0, "rays");
+    const uint64_t generation = (*renderer)->meshGeneration();
+    const uint64_t revision = (*renderer)->meshPositionsRevision();
+    const gpu::Buffer bentRaster = frame(1.0, "raster");
+    CHECK((*renderer)->meshGeneration() == generation);
+    CHECK((*renderer)->meshPositionsRevision() > revision);
+    const gpu::Buffer bentRays = frame(1.0, "rays");
+    const gpu::Buffer bentBvh = frame(1.0, "bvh");
+    CHECK((*renderer)->meshGeneration() == generation);
+    auto moved = render::compareImages(*gpu->library, flat, bentRaster, w, h);
+    auto baseline = render::compareImages(*gpu->library, flat, flatRays, w, h);
+    auto rays = render::compareImages(*gpu->library, bentRaster, bentRays, w, h);
+    auto bvh = render::compareImages(*gpu->library, bentRaster, bentBvh, w, h);
+    REQUIRE(moved);
+    REQUIRE(baseline);
+    REQUIRE(rays);
+    REQUIRE(bvh);
+    // The routes differ along triangle edges (the rasteriser's coverage rule
+    // against a ray at the pixel's centre); the interior agrees, which the
+    // technique's check counts exactly. Here the deformed frame's edge
+    // disagreement must be no more than the flat frame's kind: a stale
+    // structure would disagree over the whole sheet.
+    std::printf("  time 1 against time 0: %llu pixels beyond 2 (max %u); raster against rays: %llu beyond 2 at "
+                "time 1, %llu at time 0; against the compute BVH %llu; generation %llu, positions revision %llu "
+                "-> %llu\n",
+                static_cast<unsigned long long>(moved->over2), moved->max,
+                static_cast<unsigned long long>(rays->over2), static_cast<unsigned long long>(baseline->over2),
+                static_cast<unsigned long long>(bvh->over2), static_cast<unsigned long long>(generation),
+                static_cast<unsigned long long>(revision),
+                static_cast<unsigned long long>((*renderer)->meshPositionsRevision()));
+    CHECK(moved->over2 > uint64_t{w} * h / 20);
+    CHECK(rays->over2 <= 2 * baseline->over2 + 50);
+    CHECK(bvh->over2 <= 2 * baseline->over2 + 50);
+    CHECK(rays->over2 < uint64_t{w} * h / 50);
+    CHECK(bvh->over2 < uint64_t{w} * h / 50);
+}

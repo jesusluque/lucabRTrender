@@ -23,7 +23,12 @@ class BvhScene {
 public:
     [[nodiscard]] static Result<BvhScene> create(gpu::ShaderLibrary& library);
 
-    [[nodiscard]] Result<void> build(const GpuScene& scene);
+    /// Each mesh's LBVH is built when the pools were repacked and refit --
+    /// leaf boxes recomputed, internal boxes settled over the same tree --
+    /// when it was deformed in place (GpuScene::meshRevision); the top level
+    /// is built every call. `refit` false leaves a deformed mesh's tree as it
+    /// was, for a check that the refit matters.
+    [[nodiscard]] Result<void> build(const GpuScene& scene, bool refit = true);
 
     [[nodiscard]] const gpu::Buffer& topBoxes() const noexcept { return topBoxes_; }
     [[nodiscard]] const gpu::Buffer& topChildren() const noexcept { return topChildren_; }
@@ -43,6 +48,11 @@ private:
     /// Hierarchy from sorted codes, then refit until nothing changes.
     [[nodiscard]] Result<void> hierarchy(const Build& build, gpu::SortBuffers& sorting, const gpu::Buffer& leafBoxes,
                                          gpu::Buffer& boxes, gpu::Buffer& children, gpu::Buffer& leaves);
+    /// Refit passes over an existing tree until no box changes.
+    [[nodiscard]] Result<void> settle(const Build& build, const gpu::Buffer& leafBoxes, gpu::Buffer& boxes,
+                                      const gpu::Buffer& children, const gpu::Buffer& leaves);
+    std::vector<Build>    meshBuilds_;      ///< per mesh: what its tree was built with
+    std::vector<uint64_t> meshRevisions_;   ///< per mesh: the revision its tree holds
 
     gpu::Device*       device_ = nullptr;
     gpu::RadixSort     sort_;

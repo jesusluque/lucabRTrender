@@ -87,9 +87,52 @@ Result<GpuScene> GpuScene::create(gpu::ShaderLibrary& library) {
     return scene;
 }
 
+bool GpuScene::sameLayout(const geom::GpuMesh& a, const geom::GpuMesh& b) noexcept {
+    if (a.topology == 0 || a.topology != b.topology || a.points != b.points || a.faces != b.faces ||
+        a.corners != b.corners || a.triangles != b.triangles || a.subsets != b.subsets ||
+        a.primvars.size() != b.primvars.size()) {
+        return false;
+    }
+    for (size_t p = 0; p < a.primvars.size(); ++p) {
+        const geom::GpuPrimvar& x = a.primvars[p];
+        const geom::GpuPrimvar& y = b.primvars[p];
+        if (x.name != y.name || x.interpolation != y.interpolation || x.components != y.components ||
+            x.count != y.count) {
+            return false;
+        }
+    }
+    return true;
+}
+
+Result<void> GpuScene::refresh(uint32_t k, const geom::GpuMesh& m) {
+    gpu::Device& device = *device_;
+    const Range& r = ranges_[k];
+    gpu::CommandBatch batch(device);
+    rhi::ICommandEncoder* e = batch.encoder();
+    e->copyBuffer(positions_.rhi(), uint64_t{r.firstPoint} * 16, m.positions.rhi(), 0, uint64_t{m.points} * 16);
+    uint64_t valueAt = primvarValueBase_[k];
+    for (const geom::GpuPrimvar& p : m.primvars) {
+        e->copyBuffer(primvarValues_.rhi(), valueAt * 16, p.values.rhi(), 0, uint64_t{p.count} * 16);
+        valueAt += p.count;
+    }
+    batch.markDirty();
+    LRT_TRY(batch.submit(true));
+    // The record's box is the mesh's new one; the rest of the record stands.
+    constexpr size_t kWords = sizeof(MeshRecord) / 4;
+    constexpr size_t kLoWord = offsetof(MeshRecord, lo) / 4;
+    constexpr size_t kHiWord = offsetof(MeshRecord, hi) / 4;
+    for (size_t c = 0; c < 3; ++c) {
+        std::memcpy(&meshRecordWords_[k * kWords + kLoWord + c], &m.bounds.min[c], 4);
+        std::memcpy(&meshRecordWords_[k * kWords + kHiWord + c], &m.bounds.max[c], 4);
+    }
+    return meshRecords_.write(device, k * sizeof(MeshRecord), sizeof(MeshRecord), &meshRecordWords_[k * kWords]);
+}
+
 Result<void> GpuScene::repack() {
     gpu::Device& device = *device_;
     ranges_.assign(meshes_.size(), {});
+    meshRevisions_.assign(meshes_.size(), 0);
+    primvarValueBase_.assign(meshes_.size(), 0);
     uint64_t points = 0;
     uint64_t triangles = 0;
     for (size_t k = 0; k < meshes_.size(); ++k) {
@@ -164,6 +207,7 @@ Result<void> GpuScene::repack() {
             }
         }
         firstPrimvar_[k] = static_cast<uint32_t>(primvars.size());
+        primvarValueBase_[k] = valueAt;
         for (const geom::GpuPrimvar& p : m.primvars) {
             e->copyBuffer(primvarValues_.rhi(), valueAt * 16, p.values.rhi(), 0, uint64_t{p.count} * 16);
             primvars.push_back({static_cast<uint32_t>(p.interpolation), p.components, static_cast<uint32_t>(valueAt),
@@ -272,8 +316,26 @@ Result<void> GpuScene::update(std::span<const MeshInstance> instances, const ren
         }
     }
     if (meshes != meshes_) {
-        meshes_ = std::move(meshes);
-        LRT_TRY(repack());
+        // The same meshes deformed -- each slot the same mesh or one of its
+        // topology key and layout -- keep the pools and take new positions
+        // in place; anything else repacks.
+        bool deformation = meshes.size() == meshes_.size();
+        for (size_t k = 0; deformation && k < meshes.size(); ++k) {
+            deformation = meshes[k] == meshes_[k] || sameLayout(*meshes[k], *meshes_[k]);
+        }
+        if (deformation) {
+            for (size_t k = 0; k < meshes.size(); ++k) {
+                if (meshes[k] != meshes_[k]) {
+                    LRT_TRY(refresh(static_cast<uint32_t>(k), *meshes[k]));
+                    meshes_[k] = meshes[k];
+                    ++meshRevisions_[k];
+                }
+            }
+            ++positionsRevision_;
+        } else {
+            meshes_ = std::move(meshes);
+            LRT_TRY(repack());
+        }
     }
     if (slotsDirty_) {
         LRT_TRY(writeSlots());
