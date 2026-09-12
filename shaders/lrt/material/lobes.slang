@@ -488,6 +488,18 @@ public float3 stackEval(LobeStack stack, float3 wo, float3 wi) {
     return sum;
 }
 
+/// The stack's directional albedo at `wo`: what fraction of the light
+/// arriving from there it returns, summed over the lobes with their weights.
+/// The denoiser's albedo input, and what a layered material's throughput is
+/// derived from.
+public float3 stackAlbedo(LobeStack stack, float3 wo) {
+    float3 sum = float3(0.0);
+    for (uint k = 0; k < stack.count; ++k) {
+        sum += stack.lobes[k].weight * lobeAlbedo(stack.lobes[k], wo);
+    }
+    return sum;
+}
+
 public float stackPdf(LobeStack stack, float3 wo, float3 wi) {
     float total = 0.0;
     float weighted = 0.0;

@@ -554,6 +554,18 @@ AovView Engine::aovView(const render::RenderTargets& targets, AovSource aov) con
     switch (aov.kind) {
     case AovKind::Colour: view.buffer = &targets.colour; return view;
     case AovKind::Depth: view.buffer = &targets.depth; view.source = 1; return view;
+    // The path tracer's, written at its first hit: nothing where the frame
+    // was not path traced.
+    case AovKind::Albedo:
+        if (pathAuxValid_ && pathAux_.width == targets.width && pathAux_.height == targets.height) {
+            view.buffer = &pathAux_.albedo;
+        }
+        return view;
+    case AovKind::ShadingNormal:
+        if (pathAuxValid_ && pathAux_.width == targets.width && pathAux_.height == targets.height) {
+            view.buffer = &pathAux_.normal;
+        }
+        return view;
     default: break;
     }
     if (!aovsValid_ || aovs_.width != targets.width || aovs_.height != targets.height ||
@@ -863,6 +875,7 @@ Result<void> Engine::render(const render::Projection& projection, const render::
     const bool pathTracing = meshLayer && technique == Technique::RayTraced;
     if (!pathTracing) {
         pathState_.traced = false;
+        pathAuxValid_ = false;
     }
     if (meshLayer) {
         LRT_TRY(scene_->update(meshInstances, projection, meshSets));
@@ -1010,7 +1023,8 @@ Result<void> Engine::render(const render::Projection& projection, const render::
                 pathState_ = now;
             }
             paths.seed = pathSeed_++ * 7919u;
-            LRT_TRY(pathTracer_->trace(batch, visibility_, projection, frame, paths, meshLayer_));
+            LRT_TRY(pathTracer_->trace(batch, visibility_, projection, frame, paths, meshLayer_, &pathAux_));
+            pathAuxValid_ = true;
         } else {
             LRT_TRY(materialShading_->shade(batch, visibility_, projection, frame, meshLayer_));
         }

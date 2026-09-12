@@ -71,6 +71,10 @@ void HdLrtRenderPass::_Execute(HdRenderPassStateSharedPtr const& state, TfTokenV
         } else if (binding.aovName == HdAovTokens->elementId) {
             source.kind = lrt::usd::AovKind::ElementId;
             request.ids = true;
+        } else if (binding.aovName == TfToken("albedo")) {
+            source.kind = lrt::usd::AovKind::Albedo;
+        } else if (binding.aovName == TfToken("shadingNormal")) {
+            source.kind = lrt::usd::AovKind::ShadingNormal;
         } else if (binding.aovName == HdAovTokens->Neye) {
             source.kind = lrt::usd::AovKind::EyeNormal;
             request.normals = true;

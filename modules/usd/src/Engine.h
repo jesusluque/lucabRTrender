@@ -118,7 +118,7 @@ struct AovLayout {
 };
 
 /// Which image an AOV reads.
-enum class AovKind { Colour, Depth, PrimId, InstanceId, ElementId, EyeNormal, WorldNormal, Primvar };
+enum class AovKind { Colour, Depth, PrimId, InstanceId, ElementId, EyeNormal, WorldNormal, Primvar, Albedo, ShadingNormal };
 
 struct AovSource {
     AovKind  kind = AovKind::Colour;
@@ -278,6 +278,8 @@ private:
     std::optional<technique::MaterialPrograms> materialPrograms_;
     std::optional<technique::MaterialShading> materialShading_;
     std::optional<technique::PathTracer>      pathTracer_;   ///< made on first use
+    technique::PathAux                        pathAux_;      ///< the last path traced frame's albedo and normal
+    bool                                      pathAuxValid_ = false;
     std::map<pxr::SdfPath, MaterialEntry>     materials_;
     std::map<pxr::SdfPath, light::Light>      lights_;
     std::optional<light::LightTable>          lightTable_;

@@ -41,6 +41,17 @@ struct PathSettings {
     bool     accumulate = false;   ///< add to what is there rather than replace it
 };
 
+/// What the denoiser wants beside the colour: the first hit's albedo and its
+/// shading normal, in world space, as the material saw them. Written once a
+/// frame, since they do not depend on the sample.
+struct PathAux {
+    gpu::Buffer albedo;   ///< float4 a pixel: the lobes' directional albedo at the view direction
+    gpu::Buffer normal;   ///< float4 a pixel: the shading normal, unit, facing the eye
+    uint32_t    width = 0;
+    uint32_t    height = 0;
+    [[nodiscard]] bool valid() const noexcept { return albedo.valid() && normal.valid(); }
+};
+
 class PathTracer {
 public:
     [[nodiscard]] static Result<PathTracer> create(gpu::ShaderLibrary& library);
@@ -50,9 +61,11 @@ public:
 
     /// Traces `settings.samples` paths a pixel into `out`, as a running mean
     /// over everything accumulated so far.
+    /// `aux`, when given, receives the first hit's albedo and shading normal.
     [[nodiscard]] Result<void> trace(gpu::CommandBatch& batch, const VisibilityTargets& targets,
                                      const render::Projection& projection, const MaterialFrame& frame,
-                                     const PathSettings& settings, render::RenderTargets& out);
+                                     const PathSettings& settings, render::RenderTargets& out,
+                                     PathAux* aux = nullptr);
 
     /// How many paths a pixel the accumulation holds.
     [[nodiscard]] uint32_t accumulated() const noexcept { return accumulated_; }

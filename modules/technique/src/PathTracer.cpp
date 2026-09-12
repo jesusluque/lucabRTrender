@@ -22,13 +22,16 @@ struct PathParams {
     uint accumulated;  // paths a pixel already in `sum`
     uint chooseLights;
     float power;
-    uint pad0; uint pad1;
+    uint writeAux;     // 1: write the first hit's albedo and normal
+    uint pad1;
 };
 
 Texture2D<uint4>               visibility;   // (instance + 1, triangle); row 0 on top
 RWStructuredBuffer<float4>     sum;          // paths added so far, a pixel
 RWStructuredBuffer<float4>     colour;       // their mean
 RWStructuredBuffer<float>      depth;
+RWStructuredBuffer<float4>     auxAlbedo;    // written when path.writeAux
+RWStructuredBuffer<float4>     auxNormal;
 ConstantBuffer<CameraParams>   camera;
 StructuredBuffer<LightRecord>  lights;
 uniform uint                   lightCount;
@@ -304,14 +307,19 @@ void tracePaths(uint3 group: SV_GroupID, uint index: SV_GroupIndex) {
     const uint at = tid.y * camera.width + tid.x;
     const uint4 seen = visibility.Load(int3(int(tid.x), int(camera.height - 1 - tid.y), 0));
     const uint samples = max(path.samples, 1u);
+    // The camera's hit does not depend on the sample: rebuilt and its material
+    // evaluated once, not once a path. What the denoiser wants of it is written
+    // here too, since it is the same for every sample.
+    const Shaded first = shadeAt(tid, seen);
+    if (path.writeAux != 0) {
+        auxAlbedo[at] = first.valid ? float4(stackAlbedo(first.stack, first.toEye), 1.0) : float4(0.0);
+        auxNormal[at] = first.valid ? float4(first.inputs.normalWorld, 1.0) : float4(0.0);
+    }
     float3 total = float3(0.0);
     float  alpha = 0.0;
     float  hitDepth = 0.0;
-    for (uint sample = 0; sample < samples; ++sample) {
-        Shaded sh = shadeAt(tid, seen);
-        if (!sh.valid) {
-            continue;
-        }
+    for (uint sample = 0; sample < samples && first.valid; ++sample) {
+        Shaded sh = first;
         hitDepth = sh.depth;
         // The first hit's, kept before the bounces: `sh` walks on to whatever
         // the path finds, and it is this surface's opacity the pixel carries.
@@ -400,7 +408,7 @@ Result<void> PathTracer::setPrograms(const MaterialPrograms& programs) {
 
 Result<void> PathTracer::trace(gpu::CommandBatch& batch, const VisibilityTargets& targets,
                                const render::Projection& projection, const MaterialFrame& frame,
-                               const PathSettings& settings, render::RenderTargets& out) {
+                               const PathSettings& settings, render::RenderTargets& out, PathAux* aux) {
     if (!kernel_.has_value()) {
         return Error(ErrorCode::InvalidArgument, "path tracer: no materials set");
     }
@@ -439,6 +447,21 @@ Result<void> PathTracer::trace(gpu::CommandBatch& batch, const VisibilityTargets
     if (!settings.accumulate) {
         accumulated_ = 0;
     }
+    if (aux != nullptr && (aux->width != targets.width || aux->height != targets.height || !aux->valid())) {
+        gpu::BufferDesc desc;
+        desc.bytes = pixels * 16;
+        desc.elementBytes = 16;
+        desc.label = "path.albedo";
+        auto albedo = gpu::Buffer::create(*device_, desc);
+        if (!albedo) return std::move(albedo).error();
+        desc.label = "path.normal";
+        auto normal = gpu::Buffer::create(*device_, desc);
+        if (!normal) return std::move(normal).error();
+        aux->albedo = std::move(*albedo);
+        aux->normal = std::move(*normal);
+        aux->width = targets.width;
+        aux->height = targets.height;
+    }
     auto ids = targets.ids.view(0);
     if (!ids) return std::move(ids).error();
     const uint32_t samples = std::max(settings.samples, 1u);
@@ -455,6 +478,11 @@ Result<void> PathTracer::trace(gpu::CommandBatch& batch, const VisibilityTargets
         cursor["sum"].setBinding(sum_.rhi());
         cursor["colour"].setBinding(out.colour.rhi());
         cursor["depth"].setBinding(out.depth.rhi());
+        // A buffer has to be bound either way; without aux the colour stands in
+        // and the kernel never writes it.
+        cursor["auxAlbedo"].setBinding(aux != nullptr ? aux->albedo.rhi() : out.colour.rhi());
+        cursor["auxNormal"].setBinding(aux != nullptr ? aux->normal.rhi() : out.colour.rhi());
+        cursor["path"]["writeAux"].setData(uint32_t{aux != nullptr ? 1u : 0u});
         setCamera(cursor["camera"], projection, targets.width, targets.height);
         cursor["path"]["samples"].setData(samples);
         cursor["path"]["bounces"].setData(settings.bounces);

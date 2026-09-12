@@ -2151,3 +2151,122 @@ TEST_CASE("a closed emissive shell reads the geometric series of its bounces",
     }
 }
 
+// The path tracer's first-hit albedo and shading normal, which the denoiser
+// takes as its guides. Counters: a Lambert of roughness 0 returns everything,
+// so its directional albedo is the authored colour; the normal is unit and
+// faces the eye.
+TEST_CASE("the path tracer's first hit reports its albedo and shading normal", "[technique][path][aov]") {
+    LRT_REQUIRE_GPU(gpu);
+    if (!gpu->device->caps().rasterization) {
+        SKIP("no rasterisation on this device");
+    }
+    std::vector<std::filesystem::path> shaderPaths;
+    for (const std::string& path : gpu->device->shaderSearchPaths()) {
+        shaderPaths.emplace_back(path);
+    }
+    auto compiler = material::MaterialCompiler::create({LRT_MATERIALX_ROOT}, shaderPaths);
+    auto textures = material::TextureStore::create(*gpu->library);
+    auto builder = geom::MeshBuilder::create(*gpu->library);
+    auto scene = world::GpuScene::create(*gpu->library);
+    auto raster = technique::VisibilityRaster::create(*gpu->library);
+    auto programs = technique::MaterialPrograms::create(*gpu->library);
+    auto tracer = technique::PathTracer::create(*gpu->library);
+    auto table = light::LightTable::create(*gpu->device);
+    if (!compiler) FAIL(compiler.error().toString());
+    if (!textures) FAIL(textures.error().toString());
+    if (!builder) FAIL(builder.error().toString());
+    if (!scene) FAIL(scene.error().toString());
+    if (!raster) FAIL(raster.error().toString());
+    if (!programs) FAIL(programs.error().toString());
+    if (!tracer) FAIL(tracer.error().toString());
+    if (!table) FAIL(table.error().toString());
+    auto lambert = (*compiler)->compileXml(
+        "<?xml version=\"1.0\"?>\n<materialx version=\"1.39\">\n"
+        "  <oren_nayar_diffuse_bsdf name=\"d\" type=\"BSDF\">\n"
+        "    <input name=\"color\" type=\"color3\" value=\"0.8, 0.6, 0.4\" />\n"
+        "    <input name=\"roughness\" type=\"float\" value=\"0\" />\n"
+        "  </oren_nayar_diffuse_bsdf>\n"
+        "  <surface name=\"shader\" type=\"surfaceshader\"><input name=\"bsdf\" type=\"BSDF\" nodename=\"d\" /></surface>\n"
+        "  <surfacematerial name=\"material\" type=\"material\">\n"
+        "    <input name=\"surfaceshader\" type=\"surfaceshader\" nodename=\"shader\" />\n"
+        "  </surfacematerial>\n</materialx>\n");
+    if (!lambert) FAIL(lambert.error().toString());
+    REQUIRE(programs->setModules(std::span<const material::CompiledMaterial>(&*lambert, 1)));
+    REQUIRE(tracer->setPrograms(*programs));
+    const std::vector<float> blob = material::MaterialCompiler::parameters(
+        *lambert, **textures, [](const std::string&) { return 0xFFFFFFFFu; });
+    REQUIRE((*textures)->commit());
+    const std::vector<technique::MaterialRecord> rows{{0, 0, 0, 0}, {1, 0, 0, 0}};
+    auto records = gpu::Buffer::fromSpan<technique::MaterialRecord>(*gpu->device, rows, "materials.records");
+    auto blobBuffer = gpu::Buffer::fromSpan<float>(*gpu->device, blob, "materials.blob");
+    REQUIRE(records);
+    REQUIRE(blobBuffer);
+
+    const uint32_t w = 96;
+    const uint32_t h = 72;
+    render::Camera camera = render::Camera::lookingAt({0.0, 0.0, 0.0}, {0.0, 0.0, -1.0});
+    camera.lens.focal = 35.0;
+    const render::Projection projection = render::projectionFor(camera, w, h);
+    world::MeshInstance instance;
+    instance.mesh = lambertSquare(*builder, 1.0F);
+    instance.objectToWorld = aofx::xform::translation({0.0, 0.0, -5.0});
+    instance.material = 1;
+    REQUIRE(scene->update(std::span<const world::MeshInstance>(&instance, 1), projection));
+    light::Light sky;
+    sky.kind = light::LightKind::Dome;
+    sky.shadow = false;
+    REQUIRE(table->set(std::span<const light::Light>(&sky, 1)));
+
+    technique::VisibilityTargets visibility;
+    technique::MaterialFrame frame;
+    frame.programs = &*programs;
+    frame.scene = &*scene;
+    frame.records = &*records;
+    frame.blob = &*blobBuffer;
+    frame.textures = &**textures;
+    frame.lights = &*table;
+    frame.samples = 1;
+    render::RenderTargets out;
+    technique::PathAux aux;
+    {
+        gpu::CommandBatch batch(*gpu->device);
+        REQUIRE(raster->render(batch, *scene, projection, w, h, visibility));
+        technique::PathSettings paths;
+        paths.samples = 1;
+        paths.bounces = 0;
+        REQUIRE(tracer->trace(batch, visibility, projection, frame, paths, out, &aux));
+        REQUIRE(batch.submit(true));
+    }
+    REQUIRE(aux.valid());
+    auto made = gpu::ComputeKernel::create(*gpu->library, "lrt/test/aux_check", "auxCheck");
+    if (!made) FAIL(made.error().toString());
+    gpu::ComputeKernel check = std::move(*made);
+    gpu::Buffer counts = test::uintBuffer(*gpu->device, 4, "aux.counts");
+    gpu::Buffer worst = test::uintBuffer(*gpu->device, 2, "aux.worst");
+    {
+        gpu::CommandBatch batch(*gpu->device);
+        check.dispatch(batch, {1, 1, 1}, [&](rhi::ShaderCursor cursor) {
+            cursor["albedo"].setBinding(aux.albedo.rhi());
+            cursor["normal"].setBinding(aux.normal.rhi());
+            cursor["counts"].setBinding(counts.rhi());
+            cursor["worst"].setBinding(worst.rhi());
+            cursor["aux"]["albedoR"].setData(0.8F);
+            cursor["aux"]["albedoG"].setData(0.6F);
+            cursor["aux"]["albedoB"].setData(0.4F);
+            cursor["aux"]["tolerance"].setData(1.0e-3F);
+            cursor["aux"]["pixels"].setData(w * h);
+        });
+        REQUIRE(batch.submit(true));
+    }
+    uint32_t c[4] = {0, 0, 0, 0};
+    float e[2] = {0.0F, 0.0F};
+    REQUIRE(counts.read(*gpu->device, 0, sizeof(c), c));
+    REQUIRE(worst.read(*gpu->device, 0, sizeof(e), e));
+    std::printf("  %u covered: %u albedo off (worst %.2e), %u not unit (worst %.2e), %u not facing the eye\n", c[0],
+                c[1], static_cast<double>(e[0]), c[2], static_cast<double>(e[1]), c[3]);
+    CHECK(c[0] > 1000);
+    CHECK(c[1] == 0);
+    CHECK(c[2] == 0);
+    CHECK(c[3] == 0);
+}
+
