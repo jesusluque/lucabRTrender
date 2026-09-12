@@ -32,7 +32,9 @@
 #include "lrt/gpu/Device.h"
 #include "lrt/gpu/ShaderLibrary.h"
 #include "lrt/usd/PrimData.h"
+#include "lrt/geom/Curves.h"
 #include "lrt/geom/Mesh.h"
+#include "lrt/geom/Skinner.h"
 #include "lrt/lod/Lod.h"
 #include "lrt/technique/Visibility.h"
 #include "lrt/world/GpuScene.h"
@@ -85,6 +87,7 @@ struct InstancerEntry {
 
 struct MeshEntry {
     std::optional<MeshArrays>              pending;
+    std::optional<CurveArrays>             pendingCurves;   ///< a BasisCurves prim: built as a tube mesh
     std::vector<InstancerLink>             instancing;      ///< innermost first; empty: not instanced
     world::InstanceChain                   chain;           ///< composed from `instancing`
     std::vector<uint64_t>                  chainVersions;   ///< the instancer versions `chain` was made from
@@ -187,6 +190,10 @@ public:
     void setPoints(const pxr::SdfPath& id, std::optional<PointsArrays> raw,
                    const render::Mat4* transform, std::optional<bool> visible,
                    std::optional<render::PointStyle> style);
+    /// A BasisCurves prim: a mesh entry whose GpuMesh is a tube over its spans.
+    void setCurves(const pxr::SdfPath& id, int32_t primId, const pxr::TfToken& renderTag,
+                   std::optional<CurveArrays> arrays, const render::Mat4* transform, std::optional<bool> visible,
+                   std::optional<MeshLook> look);
     void setMesh(const pxr::SdfPath& id, int32_t primId, const pxr::TfToken& renderTag,
                  std::optional<MeshArrays> arrays, const render::Mat4* transform, std::optional<bool> visible,
                  std::optional<MeshLook> look,
@@ -300,7 +307,9 @@ private:
     uint64_t                                  instancerVersion_ = 0;
     uint64_t nextTopologyKey_ = 0;   ///< one per topology a mesh was given
     std::optional<world::Instancing>          instancing_;
-    std::optional<geom::MeshBuilder>          meshBuilder_;   ///< made on first use
+    std::optional<geom::MeshBuilder>          meshBuilder_;
+    std::optional<geom::Skinner>              skinner_;
+    std::optional<geom::CurveBuilder>         curveBuilder_;   ///< made on first use
     std::optional<world::GpuScene>            scene_;
     std::optional<technique::VisibilityRaster> visibilityRaster_;   ///< each made on first use
     std::optional<world::RayTracingScene>      rayTracingScene_;

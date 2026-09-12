@@ -186,6 +186,8 @@ Result<void> GpuScene::repack() {
     LRT_TRY(make(triangleCorners_, triangles * 3, 4, "scene.triangleCorners"));
     LRT_TRY(make(triangleFaces_, triangles, 4, "scene.triangleFaces"));
     LRT_TRY(make(triangleSubsets_, triangles, 4, "scene.triangleSubsets"));
+    LRT_TRY(make(triangleHidden_, triangles, 4, "scene.triangleHidden"));
+    anyHidden_ = false;
     subsetBases_.assign(meshes_.size(), 0);
     uint32_t subsetsSoFar = 0;
     for (size_t k = 0; k < meshes_.size(); ++k) {
@@ -227,6 +229,11 @@ Result<void> GpuScene::repack() {
                 e->copyBuffer(triangleSubsets_.rhi(), uint64_t{r.firstTriangle} * 4, m.triangleSubsets.rhi(), 0,
                               uint64_t{m.triangles} * 4);
             }
+            if (m.triangleHidden.valid()) {
+                e->copyBuffer(triangleHidden_.rhi(), uint64_t{r.firstTriangle} * 4, m.triangleHidden.rhi(), 0,
+                              uint64_t{m.triangles} * 4);
+            }
+            anyHidden_ = anyHidden_ || m.hidden;
         }
         firstPrimvar_[k] = static_cast<uint32_t>(primvars.size());
         primvarValueBase_[k] = valueAt;

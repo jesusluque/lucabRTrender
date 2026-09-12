@@ -1,6 +1,12 @@
 // Copyright (c) 2026 lucabRTrender contributors.
 #include <pxr/imaging/hd/retainedDataSource.h>
+#include <pxr/imaging/hd/extComputation.h>
 #include <pxr/imaging/hd/sceneIndexPluginRegistry.h>
+#include <pxr/imaging/hdsi/coordSysPrimSceneIndex.h>
+#include <pxr/imaging/hdsi/implicitSurfaceSceneIndex.h>
+#include <pxr/imaging/hdsi/nurbsApproximatingSceneIndex.h>
+#include <pxr/imaging/hdsi/pinnedCurveExpandingSceneIndex.h>
+#include <pxr/imaging/hdsi/tetMeshConversionSceneIndex.h>
 #include <pxr/imaging/hdsi/lightLinkingSceneIndex.h>
 #include <pxr/imaging/hdsi/velocityMotionResolvingSceneIndex.h>
 
@@ -15,6 +21,7 @@
 #include <pxr/imaging/hd/tokens.h>
 
 #include "Instancer.h"
+#include "Curves.h"
 #include "Mesh.h"
 #include "ParticleField.h"
 #include "Points.h"
@@ -43,6 +50,19 @@ static HdContainerDataSourceHandle _lightLinkingArgs() {
         HdRetainedTypedSampledDataSource<VtArray<TfToken>>::New(geometry));
 }
 
+static HdContainerDataSourceHandle _implicitSurfaceArgs() {
+    // Every implicit type to a mesh: the delegate has no primitive of its
+    // own for any of them.
+    const TfToken toMesh = HdsiImplicitSurfaceSceneIndexTokens->toMesh;
+    return HdRetainedContainerDataSource::New(
+        HdPrimTypeTokens->sphere, HdRetainedTypedSampledDataSource<TfToken>::New(toMesh),
+        HdPrimTypeTokens->cube, HdRetainedTypedSampledDataSource<TfToken>::New(toMesh),
+        HdPrimTypeTokens->cone, HdRetainedTypedSampledDataSource<TfToken>::New(toMesh),
+        HdPrimTypeTokens->cylinder, HdRetainedTypedSampledDataSource<TfToken>::New(toMesh),
+        HdPrimTypeTokens->capsule, HdRetainedTypedSampledDataSource<TfToken>::New(toMesh),
+        HdPrimTypeTokens->plane, HdRetainedTypedSampledDataSource<TfToken>::New(toMesh));
+}
+
 void HdLrtRegisterSceneIndices() {
     // Once, and from anywhere: a host that makes the delegate itself never
     // goes through plug's discovery, so a registry function alone would not
@@ -62,13 +82,56 @@ void HdLrtRegisterSceneIndices() {
                 return HdsiVelocityMotionResolvingSceneIndex::New(inputScene, inputArgs);
             },
             nullptr, 0, HdSceneIndexPluginRegistry::InsertionOrderAtStart);
+        // Geometry the delegate does not draw natively, turned into meshes
+        // and curves it does, in phase 1: implicit surfaces (sphere, cube,
+        // cone, cylinder, capsule, plane) tessellated by hdsi, tetrahedral
+        // meshes as their surface triangles, NURBS patches approximated, and
+        // pinned curves expanded to the basis the delegate takes.
+        HdSceneIndexPluginRegistry::GetInstance().RegisterSceneIndexForRenderer(
+            "lucabRTrender",
+            [](const std::string&, const HdSceneIndexBaseRefPtr& inputScene,
+               const HdContainerDataSourceHandle& inputArgs) -> HdSceneIndexBaseRefPtr {
+                return HdsiImplicitSurfaceSceneIndex::New(inputScene, inputArgs);
+            },
+            _implicitSurfaceArgs(), 1, HdSceneIndexPluginRegistry::InsertionOrderAtStart);
+        HdSceneIndexPluginRegistry::GetInstance().RegisterSceneIndexForRenderer(
+            "lucabRTrender",
+            [](const std::string&, const HdSceneIndexBaseRefPtr& inputScene,
+               const HdContainerDataSourceHandle&) -> HdSceneIndexBaseRefPtr {
+                return HdsiTetMeshConversionSceneIndex::New(inputScene);
+            },
+            nullptr, 1, HdSceneIndexPluginRegistry::InsertionOrderAtEnd);
+        HdSceneIndexPluginRegistry::GetInstance().RegisterSceneIndexForRenderer(
+            "lucabRTrender",
+            [](const std::string&, const HdSceneIndexBaseRefPtr& inputScene,
+               const HdContainerDataSourceHandle&) -> HdSceneIndexBaseRefPtr {
+                return HdsiNurbsApproximatingSceneIndex::New(inputScene);
+            },
+            nullptr, 1, HdSceneIndexPluginRegistry::InsertionOrderAtEnd);
+        HdSceneIndexPluginRegistry::GetInstance().RegisterSceneIndexForRenderer(
+            "lucabRTrender",
+            [](const std::string&, const HdSceneIndexBaseRefPtr& inputScene,
+               const HdContainerDataSourceHandle&) -> HdSceneIndexBaseRefPtr {
+                return HdsiPinnedCurveExpandingSceneIndex::New(inputScene);
+            },
+            nullptr, 1, HdSceneIndexPluginRegistry::InsertionOrderAtEnd);
+        // Coordinate systems bound to any xformable become coordSys prims
+        // under it, in phase 2, so a material's binding names a prim of
+        // that type with that prim's transform.
+        HdSceneIndexPluginRegistry::GetInstance().RegisterSceneIndexForRenderer(
+            "lucabRTrender",
+            [](const std::string&, const HdSceneIndexBaseRefPtr& inputScene,
+               const HdContainerDataSourceHandle&) -> HdSceneIndexBaseRefPtr {
+                return HdsiCoordSysPrimSceneIndex::New(inputScene);
+            },
+            nullptr, 2, HdSceneIndexPluginRegistry::InsertionOrderAtEnd);
         HdSceneIndexPluginRegistry::GetInstance().RegisterSceneIndexForRenderer(
             "lucabRTrender",
             [](const std::string&, const HdSceneIndexBaseRefPtr& inputScene,
                const HdContainerDataSourceHandle& inputArgs) -> HdSceneIndexBaseRefPtr {
                 return HdsiLightLinkingSceneIndex::New(inputScene, inputArgs);
             },
-            _lightLinkingArgs(), 0, HdSceneIndexPluginRegistry::InsertionOrderAtEnd);
+            _lightLinkingArgs(), 3, HdSceneIndexPluginRegistry::InsertionOrderAtEnd);
         return true;
     }();
     (void)once;
@@ -99,7 +162,7 @@ void HdLrtRenderDelegate::_Setup() {
 
 TfTokenVector const& HdLrtRenderDelegate::GetSupportedRprimTypes() const {
     static const TfTokenVector types{HdPrimTypeTokens->mesh, HdPrimTypeTokens->particleField,
-                                     HdPrimTypeTokens->points};
+                                     HdPrimTypeTokens->points, HdPrimTypeTokens->basisCurves};
     return types;
 }
 
@@ -107,7 +170,8 @@ TfTokenVector const& HdLrtRenderDelegate::GetSupportedSprimTypes() const {
     static const TfTokenVector types{HdPrimTypeTokens->camera,      HdPrimTypeTokens->material,
                                      HdPrimTypeTokens->sphereLight, HdPrimTypeTokens->diskLight,
                                      HdPrimTypeTokens->rectLight,   HdPrimTypeTokens->distantLight,
-                                     HdPrimTypeTokens->domeLight,   HdPrimTypeTokens->cylinderLight};
+                                     HdPrimTypeTokens->domeLight,   HdPrimTypeTokens->cylinderLight,
+                                     HdPrimTypeTokens->extComputation};
     return types;
 }
 
@@ -283,6 +347,9 @@ HdRprim* HdLrtRenderDelegate::CreateRprim(TfToken const& typeId, SdfPath const& 
     if (typeId == HdPrimTypeTokens->points) {
         return new HdLrtPoints(id);
     }
+    if (typeId == HdPrimTypeTokens->basisCurves) {
+        return new HdLrtBasisCurves(id);
+    }
     if (typeId == HdPrimTypeTokens->mesh) {
         return new HdLrtMesh(id);
     }
@@ -304,6 +371,12 @@ HdSprim* HdLrtRenderDelegate::CreateSprim(TfToken const& typeId, SdfPath const& 
     if (HdPrimTypeIsLight(typeId)) {
         return new HdLrtLight(typeId, id);
     }
+    if (typeId == HdPrimTypeTokens->extComputation) {
+        // Skinning's inputs travel as ext computation prims (usdSkelImaging);
+        // the mesh reads them at Sync and the engine runs the computation
+        // itself, on the device.
+        return new HdExtComputation(id);
+    }
     return typeId == HdPrimTypeTokens->camera ? new HdCamera(id) : nullptr;
 }
 
@@ -313,6 +386,9 @@ HdSprim* HdLrtRenderDelegate::CreateFallbackSprim(TfToken const& typeId) {
     }
     if (HdPrimTypeIsLight(typeId)) {
         return new HdLrtLight(typeId, SdfPath::EmptyPath());
+    }
+    if (typeId == HdPrimTypeTokens->extComputation) {
+        return new HdExtComputation(SdfPath::EmptyPath());
     }
     return typeId == HdPrimTypeTokens->camera ? new HdCamera(SdfPath::EmptyPath()) : nullptr;
 }

@@ -1994,6 +1994,186 @@ spans more than two authored samples takes the outer two. Where a prim's
 transform and points both move at different sample times, the transform's
 times are taken for both.
 
+### Skinning and blend shapes, on the device
+
+**Where the inputs come from.** In 26.08 usdSkelImaging resolves a
+skinned prim through scene indices: `UsdSkelImagingPointsResolvingSceneIndex`
+adds two ext computation prims under the mesh -- an aggregator holding what
+does not change per frame (`restPoints`, `geomBindXform`, the joint
+`influences` as (joint, weight) pairs with `numInfluencesPerComponent` and
+`hasConstantInfluences`, `blendShapeOffsets` as (xyz, sub-shape) with a
+`blendShapeOffsetRanges` pair a point) and the computation itself holding
+the animation's (`skinningXforms` or `skinningDualQuats` with
+`skinningScaleXforms`, `blendShapeWeights` a sub-shape, `skelLocalToWorld`,
+`primWorldToLocal`) -- and hands the mesh its `points` as that
+computation's output. Hydra never runs the computation for us: the
+delegate declares the `extComputation` sprim (`HdExtComputation`, as it
+comes), `HdLrtMesh::Sync` finds the computed `points` primvar, walks the
+computation's scene inputs and its aggregator's outputs by name, and hands
+the values whole to the engine (`SkinningArrays`), the rest points standing
+in for the mesh's own.
+
+**What runs.** `geom::Skinner` uploads those arrays as they are and
+`skinning.slang` (`skinPoints`) does what usdSkelImaging's own
+`skinning.glslfx` does, so a host that runs the computation itself and this
+one read the same: sub-shape offsets summed into the rest point by their
+weights; then linear blend skinning -- each influence's transform applied
+to the point taken into bind space by `geomBindXform`, weighed -- or dual
+quaternion skinning, the influences' dual quaternions blended on the
+pivot's hemisphere (the heaviest influence's), normalised, any scale
+applied linearly, then the point turned and moved by the blend; then
+`primWorldToLocal * skelLocalToWorld`. The rest points are widened to
+float4 by the builder's own decode kernel; the only host work is
+transposing the matrices to the rows the kernel multiplies with. The
+skinned positions go into `MeshBuilder::build` through
+`MeshInput::devicePositions` -- the builder copies them instead of decoding
+`points`, so normals and bounds are the skinned mesh's -- under the mesh's
+topology key, so a frame of animation is a deformation in place and a
+refit. The sub-shape weights, including an inbetween's share of a shape's
+weight, are resolved by usdSkel on the host before they reach the
+computation: a few floats a shape a frame, USD's own code.
+
+**Checked** in `test_skinning` against closed forms a check kernel
+evaluates a second time: one joint of weight 1 through non-trivial
+`geomBind`, joint, `skelLocalToWorld` and `primWorldToLocal` matrices is
+the matrix chain, 0 of 64 points beyond 1e-5, per-point and constant
+influences alike; two joints turning about one axis by 20 and 80 degrees
+at equal weight blend, under dual quaternions, to the 50 degree turn
+exactly (worst 2.4e-7), where linear blending of the same pulls all 64
+points off by up to 0.2; three sub-shapes over 40 of 64 points add their
+offsets by their weights exactly. Through Hydra: a square bound to the
+sliding joint of a two-joint skeleton is the square authored with that
+slide as its transform, 0 pixels beyond 2 at rest and slid, by raster and
+by rays, its generation standing across the frames; a blend shape with an
+inbetween authored at 0.5 draws, at weight 1, as the square authored with
+the shape's offsets and, at 0.5, as the square authored with the
+inbetween's own offsets -- not half the shape's -- 0 pixels beyond 2 both.
+
+**A bug the check caught in itself.** The first check kernel read a
+point's blend shape range past the end of the ranges buffer for the points
+without one; alone the stale memory read as zeros, after two other cases
+it did not, and one thread looped for billions of steps -- the device
+hung, `submit` never returned, and the case only "failed" by the SIGTERM
+that ended it. The kernel now takes how many points have a range, as the
+skinning kernel always did. A check has to guard what the kernel guards.
+
+**Not done.** The deferred-skinning route (`HD_ENABLE_DEFERRED_SKINNING`,
+`hydra:skinningXforms` and the rest as primvars named by
+`HdSkinningSettings::GetSkinningInputNames`) is not read: the variable has
+to be set before Hydra loads, which only a process's `main` can do through
+`platform::setEnvOnce`, and it would be a second reader of the same
+Skinner; the ext computation route is the one every host gets. Skinned
+normals are recomputed from the skinned points (smooth) rather than
+skinned from authored normals (`skinningNormalsComputation` is not read).
+A skinned mesh under a shutter blurs by its transform only: the skinning
+transforms are read at the frame, not at the shutter's samples.
+
+### The timeline
+
+`lrt view` had a time slider; it now plays. Play advances the time by the
+wall clock at the stage's `timeCodesPerSecond` and wraps at the end, the
+step buttons move a frame, and dragging the slider stops the play. What
+frame N shows is `SetTime`'s business and when it is drawn the clock's --
+the two are not mixed, which is also how `lrt live` already worked: its
+`sched` clock decides when frame N is drawn, and `--start` what frame N
+is. Nothing here is measured beyond the frame times the panel shows.
+
+## Complete USD: the breadth of geometry (M8, in progress)
+
+### hdsi's conversions ahead of the delegate
+
+The delegate draws meshes, points and splats; what USD authors beyond
+those reaches it as meshes through hdsi's scene indices, registered for
+this renderer in phases ahead of light linking: `HdsiImplicitSurfaceSceneIndex`
+with every implicit type (sphere, cube, cone, cylinder, capsule, plane)
+set to `toMesh`, `HdsiTetMeshConversionSceneIndex` (a TetMesh's surface
+faces), `HdsiNurbsApproximatingSceneIndex` (a NurbsPatch as a mesh),
+`HdsiPinnedCurveExpandingSceneIndex` (for the curves M8 adds below), and
+`HdsiCoordSysPrimSceneIndex`, which turns a coordinate system bound to any
+xformable into a `coordSys` prim under it with that prim's transform. The
+delegate's own code did not change; the registration and its arguments did.
+
+**Checked** through Hydra: a `UsdGeomSphere` of radius 1.2 against the
+analytic sphere in `sphereCheck` (beside `planeCheck`) -- hdsi tessellates
+it with ten segments, so a chord sits inside the sphere by up to
+`r (1 - cos(pi/10))` = 0.0587, coverage is judged outside that band about
+the silhouette and depth where the ray meets the sphere squarely (within
+0.8 r of the axis, where a facet's error along the ray is at most the sag
+over 0.6): 0 of 26788 pixels wrong, depth within 0.075 of the sphere over
+9772 pixels. A one-tetrahedron `TetMesh` against its four faces authored as
+a mesh, by depth (hdsi winds the surface its own way and the headlight
+shades the side it sees): relMSE 0. A degree-one `NurbsPatch` against its
+quad: 0 pixels beyond 2. The first sphere check was wrong itself -- it took
+`sqrt(dist^2 - r^2)` for `dist - r` and judged half the disc wrong -- and
+Python recounting the same formula on the dumped depth reproduced the count
+exactly, which is what told the kernel from the expectation.
+
+### Invisible faces
+
+A face Hydra marks invisible (`HdMeshTopology::GetInvisibleFaces`) stays
+in the topology and is not drawn: unlike a hole, whose triangles the
+triangulation drops, an invisible face keeps its triangles and their
+numbering, so showing it again is a flag and not a rebuild. The builder
+marks the faces the way it marks holes (the same kernel over another
+list), `meshTriangulate` writes a `triangleHidden` flag a triangle, the
+scene pools it beside `triangleSubsets`, and the one place every route
+already evaluates a sample before keeping it -- the cutout passes'
+`materialCuts` -- answers yes for a hidden triangle before it looks at the
+material. The engine takes the cutout passes whenever a mesh has a hidden
+face, cutout materials or not.
+
+**Checked** in `test_lights` on the bumpy grid with its odd faces
+invisible, by the three routes: every pixel where the full grid showed an
+even face shows exactly that (instance, triangle) -- 0 of 9945 differ, by
+raster, rays and the compute walker alike, so hiding renumbered nothing
+and hid nothing it should not -- and none of the 9945 lies on an odd face;
+19903 pixels were drawn with every face. A first version of the check
+compared every drawn pixel with the full grid's and found 131 differing:
+pixels where an odd face had stood in front of an even one, which the
+hidden grid rightly shows. What USD does not have is a way to author
+invisible faces on a mesh (`UsdGeomSubset` carries no visibility;
+`invisibleIds` is for points and curves), so the Hydra side is read and
+not exercised by a stage.
+
+### Basis curves, as tubes
+
+`UsdGeomBasisCurves` arrive through `HdLrtBasisCurves` (an `HdRprim`, as
+points are) as their topology, points and widths, and `geom::CurveBuilder`
+lays a tube over every span on the device: `curve_tube.slang` evaluates
+the span at `segments + 1` parameters -- the Bezier, uniform B-spline,
+Catmull-Rom or linear form of its control points, with the derivative for
+the tangent -- and rings `sides` vertices at half the width about each
+point in a frame taken from the tangent; the width is constant, a curve's,
+a control point's (blended like the point) or a span end's. The rings'
+quads are host bookkeeping (a pattern of indices), the positions the
+kernel's, and the whole goes through `MeshBuilder::build` as device
+positions with smooth normals, so a curve is a `GpuMesh`: every visibility
+route draws it, shading, AOVs, cutouts, linking, picking and the path
+tracer take it as a mesh, and a curve whose points move is a deformation
+and a refit (the same topology key). Periodic curves wrap their spans;
+pinned ones are expanded by hdsi ahead of the delegate. A uniform primvar
+becomes one value a face, each face taking its curve's.
+
+This is not the plan's design -- a curve primitive of its own in the
+visibility buffer, ribbons in raster and swept cones in the BVH -- and the
+reason is cost against what it buys: the plan's purpose was that nothing
+downstream should change, and a tube as a mesh changes nothing downstream
+at all, at the price of a fixed tessellation (a hair far away aliases as
+any thin mesh does, and a head of hair is many triangles). A curve
+intersector is where the design should go if hair at scale is wanted; the
+tube is exact in what it draws.
+
+**Checked** in `test_curves` against the curve: for every basis, periodic
+and not, every tube vertex sits at half the width from the point of the
+curve it rings, that point evaluated a second time in the check kernel in
+the Bernstein, polynomial and Hermite forms (not the builder's), 0 of up
+to 504 vertices beyond 1e-5, worst 2.8e-7; the span counts and the
+triangle counts are what the rule says. Through Hydra, a straight linear
+curve of width 0.4 is a cylinder: `cylinderCheck` finds 0 pixels wrong
+beyond the eight-sided tube's facet band and the depth within the sag
+over 0.7 of the cylinder's front (0.0169 against 0.0152), by raster, rays
+and the compute walker alike.
+
 ## Linux, on the 94 (M11's first half)
 
 ### The first table, after the port was reconciled with engine

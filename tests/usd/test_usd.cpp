@@ -2856,3 +2856,486 @@ TEST_CASE("authored velocities blur a mesh as the equivalent time samples do", "
                 diff->maxRelative);
     CHECK(diff->relMse < 1e-6);
 }
+
+// Skinning through Hydra: a square bound to one joint of a two-joint
+// skeleton whose animation slides that joint. usdSkelImaging hands the
+// delegate the skinning as ext computation prims; the engine runs them on
+// the device (geom::Skinner) and builds the mesh from the skinned points.
+// With every weight on the sliding joint the skinned square is the square
+// authored with that slide as its transform -- to the pixel, both routes --
+// and at the rest pose it is the square as authored. The skinned mesh keeps
+// its topology key across frames, so the animation is a refit, not a
+// repack.
+TEST_CASE("a skeleton's animation skins a mesh on the device, as the authored transform draws it",
+          "[usd][gpu][mesh][skinning]") {
+    LRT_REQUIRE_GPU(gpu);
+    if (!gpu->device->caps().rasterization) {
+        SKIP("no rasterisation on this device");
+    }
+    const std::string square =
+        "    int[] faceVertexCounts = [4]\n"
+        "    int[] faceVertexIndices = [0, 1, 2, 3]\n"
+        "    point3f[] points = [(-0.5, -0.5, -5), (0.5, -0.5, -5), (0.5, 0.5, -5), (-0.5, 0.5, -5)]\n"
+        "    uniform token subdivisionScheme = \"none\"\n"
+        "    color3f[] primvars:displayColor = [(0.3, 0.7, 0.5)] ( interpolation = \"constant\" )\n";
+    const std::string camera = "def Camera \"Camera\"\n{\n"
+                               "    float focalLength = 35\n"
+                               "    float horizontalAperture = 24.576\n    float verticalAperture = 18.432\n"
+                               "    float2 clippingRange = (0.1, 1000)\n}\n";
+    const fs::path skinned = scratch("skinned.usda");
+    {
+        std::ofstream out(skinned);
+        out << "#usda 1.0\n(\n    upAxis = \"Y\"\n    startTimeCode = 0\n    endTimeCode = 1\n)\n"
+               "def SkelRoot \"Root\"\n{\n"
+               "    def Skeleton \"Skel\" (\n        prepend apiSchemas = [\"SkelBindingAPI\"]\n    )\n    {\n"
+               "        uniform token[] joints = [\"root\", \"root/arm\"]\n"
+               "        uniform matrix4d[] bindTransforms = [( (1,0,0,0), (0,1,0,0), (0,0,1,0), (0,0,0,1) ), "
+               "( (1,0,0,0), (0,1,0,0), (0,0,1,0), (0,0,0,1) )]\n"
+               "        uniform matrix4d[] restTransforms = [( (1,0,0,0), (0,1,0,0), (0,0,1,0), (0,0,0,1) ), "
+               "( (1,0,0,0), (0,1,0,0), (0,0,1,0), (0,0,0,1) )]\n"
+               "        rel skel:animationSource = </Root/Anim>\n    }\n"
+               "    def SkelAnimation \"Anim\"\n    {\n"
+               "        uniform token[] joints = [\"root/arm\"]\n"
+               "        float3[] translations.timeSamples = {\n            0: [(0, 0, 0)],\n            1: [(1.2, 0.4, 0)],\n        }\n"
+               "        quatf[] rotations = [(1, 0, 0, 0)]\n"
+               "        half3[] scales = [(1, 1, 1)]\n    }\n"
+               "    def Mesh \"Square\" (\n        prepend apiSchemas = [\"SkelBindingAPI\"]\n    )\n    {\n"
+            << square
+            << "        rel skel:skeleton = </Root/Skel>\n"
+               "        int[] primvars:skel:jointIndices = [1, 1, 1, 1] ( elementSize = 1\n            interpolation = \"vertex\" )\n"
+               "        float[] primvars:skel:jointWeights = [1, 1, 1, 1] ( elementSize = 1\n            interpolation = \"vertex\" )\n"
+               "        matrix4d primvars:skel:geomBindTransform = ( (1,0,0,0), (0,1,0,0), (0,0,1,0), (0,0,0,1) )\n"
+               "    }\n}\n"
+            << camera;
+    }
+    const auto plain = [&](const char* name, const char* translate) {
+        const fs::path path = scratch(name);
+        std::ofstream out(path);
+        out << "#usda 1.0\n(\n    upAxis = \"Y\"\n)\n"
+               "def Mesh \"Square\"\n{\n"
+            << square << "    double3 xformOp:translate = " << translate << "\n"
+            << "    uniform token[] xformOpOrder = [\"xformOp:translate\"]\n}\n"
+            << camera;
+        return path;
+    };
+    const uint32_t w = 200;
+    const uint32_t h = 150;
+    const auto frame = [&](usd::StageRenderer& renderer, double time, const char* route) {
+        REQUIRE(renderer.setMeshVisibility(route));
+        auto image = renderer.render("/Camera", time, w, h);
+        if (!image) FAIL(image.error().toString());
+        gpu::BufferDesc desc;
+        desc.bytes = image->rgba.size() * sizeof(float);
+        desc.elementBytes = 16;
+        auto buffer = gpu::Buffer::create(*gpu->device, desc, image->rgba.data());
+        REQUIRE(buffer);
+        return *buffer;
+    };
+    auto skel = usd::StageRenderer::open(skinned);
+    auto rest = usd::StageRenderer::open(plain("skinned_rest.usda", "(0, 0, 0)"));
+    auto moved = usd::StageRenderer::open(plain("skinned_moved.usda", "(1.2, 0.4, 0)"));
+    if (!skel) FAIL(skel.error().toString());
+    if (!rest) FAIL(rest.error().toString());
+    if (!moved) FAIL(moved.error().toString());
+    const gpu::Buffer skelRest = frame(**skel, 0.0, "raster");
+    const uint64_t generation = (*skel)->meshGeneration();
+    const gpu::Buffer skelMoved = frame(**skel, 1.0, "raster");
+    const gpu::Buffer authoredRest = frame(**rest, 0.0, "raster");
+    const gpu::Buffer authoredMoved = frame(**moved, 0.0, "raster");
+    auto atRest = render::compareImages(*gpu->library, skelRest, authoredRest, w, h);
+    auto atOne = render::compareImages(*gpu->library, skelMoved, authoredMoved, w, h);
+    auto changed = render::compareImages(*gpu->library, skelRest, skelMoved, w, h);
+    REQUIRE(atRest);
+    REQUIRE(atOne);
+    REQUIRE(changed);
+    std::printf("  skinned square: at rest %llu pixels beyond 2 of the authored square (max %u); slid %llu (max %u); "
+                "the slide changes %llu pixels; generation %llu -> %llu\n",
+                static_cast<unsigned long long>(atRest->over2), atRest->max,
+                static_cast<unsigned long long>(atOne->over2), atOne->max,
+                static_cast<unsigned long long>(changed->over2), static_cast<unsigned long long>(generation),
+                static_cast<unsigned long long>((*skel)->meshGeneration()));
+    CHECK(changed->over2 > 1000);
+    CHECK(atRest->max == 0);
+    CHECK(atOne->max == 0);
+    CHECK((*skel)->meshGeneration() == generation);
+    if (gpu->device->caps().rayQuery && gpu->device->caps().accelerationStructure) {
+        const gpu::Buffer rays = frame(**skel, 1.0, "rays");
+        auto viaRays = render::compareImages(*gpu->library, rays, authoredMoved, w, h);
+        REQUIRE(viaRays);
+        std::printf("  and through rays: %llu beyond 2 (max %u)\n", static_cast<unsigned long long>(viaRays->over2),
+                    viaRays->max);
+        CHECK(viaRays->over2 < uint64_t{w} * h / 50);
+    }
+}
+
+// Blend shapes through Hydra: a shape with an inbetween, weighed by the
+// animation. At weight 1 the square is the square authored with the
+// shape's offsets; at weight 0.5 it is the inbetween authored at 0.5 -- not
+// half the shape's offsets, which is what proves the inbetween is resolved
+// -- both to the pixel.
+TEST_CASE("blend shapes and their inbetweens deform a mesh through Hydra as the authored shapes draw it",
+          "[usd][gpu][mesh][skinning][blendshapes]") {
+    LRT_REQUIRE_GPU(gpu);
+    if (!gpu->device->caps().rasterization) {
+        SKIP("no rasterisation on this device");
+    }
+    const auto squareWith = [](const char* p0, const char* p1, const char* p2, const char* p3) {
+        return std::string("    int[] faceVertexCounts = [4]\n    int[] faceVertexIndices = [0, 1, 2, 3]\n"
+                           "    point3f[] points = [") +
+               p0 + ", " + p1 + ", " + p2 + ", " + p3 +
+               "]\n    uniform token subdivisionScheme = \"none\"\n"
+               "    color3f[] primvars:displayColor = [(0.3, 0.7, 0.5)] ( interpolation = \"constant\" )\n";
+    };
+    const std::string camera = "def Camera \"Camera\"\n{\n"
+                               "    float focalLength = 35\n"
+                               "    float horizontalAperture = 24.576\n    float verticalAperture = 18.432\n"
+                               "    float2 clippingRange = (0.1, 1000)\n}\n";
+    const fs::path shaped = scratch("blendshape.usda");
+    {
+        std::ofstream out(shaped);
+        out << "#usda 1.0\n(\n    upAxis = \"Y\"\n    startTimeCode = 0\n    endTimeCode = 2\n)\n"
+               "def SkelRoot \"Root\"\n{\n"
+               "    def Skeleton \"Skel\" (\n        prepend apiSchemas = [\"SkelBindingAPI\"]\n    )\n    {\n"
+               "        uniform token[] joints = [\"root\"]\n"
+               "        uniform matrix4d[] bindTransforms = [( (1,0,0,0), (0,1,0,0), (0,0,1,0), (0,0,0,1) )]\n"
+               "        uniform matrix4d[] restTransforms = [( (1,0,0,0), (0,1,0,0), (0,0,1,0), (0,0,0,1) )]\n"
+               "        rel skel:animationSource = </Root/Anim>\n    }\n"
+               "    def SkelAnimation \"Anim\"\n    {\n"
+               "        uniform token[] joints = [\"root\"]\n"
+               "        float3[] translations = [(0, 0, 0)]\n"
+               "        quatf[] rotations = [(1, 0, 0, 0)]\n"
+               "        half3[] scales = [(1, 1, 1)]\n"
+               "        uniform token[] blendShapes = [\"puff\"]\n"
+               "        float[] blendShapeWeights.timeSamples = {\n            0: [0],\n            1: [0.5],\n            2: [1],\n        }\n"
+               "    }\n"
+               "    def Mesh \"Square\" (\n        prepend apiSchemas = [\"SkelBindingAPI\"]\n    )\n    {\n"
+            << squareWith("(-0.5, -0.5, -5)", "(0.5, -0.5, -5)", "(0.5, 0.5, -5)", "(-0.5, 0.5, -5)")
+            << "        rel skel:skeleton = </Root/Skel>\n"
+               "        uniform token[] skel:blendShapes = [\"puff\"]\n"
+               "        rel skel:blendShapeTargets = [</Root/Square/Puff>]\n"
+               "        int[] primvars:skel:jointIndices = [0, 0, 0, 0] ( elementSize = 1\n            interpolation = \"vertex\" )\n"
+               "        float[] primvars:skel:jointWeights = [1, 1, 1, 1] ( elementSize = 1\n            interpolation = \"vertex\" )\n"
+               "        def BlendShape \"Puff\"\n        {\n"
+               "            uniform vector3f[] offsets = [(0.8, 0, 0), (0, 0.6, 0)]\n"
+               "            uniform int[] pointIndices = [1, 2]\n"
+               "            uniform vector3f[] inbetweens:Half:offsets = [(0.1, -0.3, 0), (-0.2, 0.1, 0)] (\n"
+               "                weight = 0.5\n            )\n        }\n"
+               "    }\n}\n"
+            << camera;
+    }
+    const auto plain = [&](const char* name, const std::string& square) {
+        const fs::path path = scratch(name);
+        std::ofstream out(path);
+        out << "#usda 1.0\n(\n    upAxis = \"Y\"\n)\ndef Mesh \"Square\"\n{\n" << square << "}\n" << camera;
+        return path;
+    };
+    const uint32_t w = 200;
+    const uint32_t h = 150;
+    const auto frame = [&](usd::StageRenderer& renderer, double time) {
+        auto image = renderer.render("/Camera", time, w, h);
+        if (!image) FAIL(image.error().toString());
+        gpu::BufferDesc desc;
+        desc.bytes = image->rgba.size() * sizeof(float);
+        desc.elementBytes = 16;
+        auto buffer = gpu::Buffer::create(*gpu->device, desc, image->rgba.data());
+        REQUIRE(buffer);
+        return *buffer;
+    };
+    auto skel = usd::StageRenderer::open(shaped);
+    // Weight 1: the shape's offsets on points 1 and 2. Weight 0.5: the
+    // inbetween's own offsets, as authored at 0.5.
+    auto full = usd::StageRenderer::open(plain(
+        "blendshape_full.usda", squareWith("(-0.5, -0.5, -5)", "(1.3, -0.5, -5)", "(0.5, 1.1, -5)", "(-0.5, 0.5, -5)")));
+    auto half = usd::StageRenderer::open(plain(
+        "blendshape_half.usda", squareWith("(-0.5, -0.5, -5)", "(0.6, -0.8, -5)", "(0.3, 0.6, -5)", "(-0.5, 0.5, -5)")));
+    if (!skel) FAIL(skel.error().toString());
+    if (!full) FAIL(full.error().toString());
+    if (!half) FAIL(half.error().toString());
+    const gpu::Buffer rest = frame(**skel, 0.0);
+    const gpu::Buffer atHalf = frame(**skel, 1.0);
+    const gpu::Buffer atFull = frame(**skel, 2.0);
+    const gpu::Buffer authoredFull = frame(**full, 0.0);
+    const gpu::Buffer authoredHalf = frame(**half, 0.0);
+    auto fullDiff = render::compareImages(*gpu->library, atFull, authoredFull, w, h);
+    auto halfDiff = render::compareImages(*gpu->library, atHalf, authoredHalf, w, h);
+    auto moved = render::compareImages(*gpu->library, rest, atFull, w, h);
+    REQUIRE(fullDiff);
+    REQUIRE(halfDiff);
+    REQUIRE(moved);
+    std::printf("  blend shape at weight 1: %llu pixels beyond 2 of the authored shape (max %u); at 0.5, %llu beyond "
+                "the authored inbetween (max %u); the shape changes %llu pixels\n",
+                static_cast<unsigned long long>(fullDiff->over2), fullDiff->max,
+                static_cast<unsigned long long>(halfDiff->over2), halfDiff->max,
+                static_cast<unsigned long long>(moved->over2));
+    CHECK(moved->over2 > 1000);
+    CHECK(fullDiff->max == 0);
+    CHECK(halfDiff->max == 0);
+}
+
+// hdsi's conversions ahead of the delegate: a UsdGeomSphere becomes a mesh
+// (checked against the analytic sphere, to the tessellation's chord), a
+// TetMesh becomes its surface triangles and a degree-one NurbsPatch its
+// quad -- each drawn as the mesh authored by hand, to the pixel.
+TEST_CASE("implicit surfaces, tetrahedral meshes and NURBS patches arrive as meshes through Hydra",
+          "[usd][gpu][mesh][hdsi]") {
+    LRT_REQUIRE_GPU(gpu);
+    if (!gpu->device->caps().rasterization) {
+        SKIP("no rasterisation on this device");
+    }
+    const std::string camera = "def Camera \"Camera\"\n{\n"
+                               "    float focalLength = 35\n"
+                               "    float horizontalAperture = 24.576\n    float verticalAperture = 18.432\n"
+                               "    float2 clippingRange = (0.1, 1000)\n}\n";
+    const uint32_t w = 200;
+    const uint32_t h = 150;
+    const auto image = [&](const fs::path& path) {
+        auto renderer = usd::StageRenderer::open(path);
+        if (!renderer) FAIL(renderer.error().toString());
+        auto out = (*renderer)->render("/Camera", 0.0, w, h);
+        if (!out) FAIL(out.error().toString());
+        return *out;
+    };
+    const auto buffer = [&](const usd::StageImage& img) {
+        gpu::BufferDesc desc;
+        desc.bytes = img.rgba.size() * sizeof(float);
+        desc.elementBytes = 16;
+        auto made = gpu::Buffer::create(*gpu->device, desc, img.rgba.data());
+        REQUIRE(made);
+        return *made;
+    };
+    // The depth as an image, for a comparison that does not care which way
+    // a face winds: the same triangles at the same places, however shaded.
+    const auto depthImage = [&](const usd::StageImage& img) {
+        std::vector<float> packed(img.depth.size() * 4, 1.0F);
+        for (size_t i = 0; i < img.depth.size(); ++i) {
+            packed[i * 4] = img.depth[i];
+        }
+        gpu::BufferDesc desc;
+        desc.bytes = packed.size() * sizeof(float);
+        desc.elementBytes = 16;
+        auto made = gpu::Buffer::create(*gpu->device, desc, packed.data());
+        REQUIRE(made);
+        return *made;
+    };
+    // The sphere, against the analytic one: hdsi tessellates with 10 axial
+    // and 10 radial segments, so the chord's sag is r (1 - cos(pi / 10)).
+    {
+        const fs::path path = scratch("hdsi_sphere.usda");
+        {
+            std::ofstream out(path);
+            out << "#usda 1.0\n(\n    upAxis = \"Y\"\n)\n"
+                   "def Sphere \"Ball\"\n{\n    double radius = 1.2\n"
+                   "    double3 xformOp:translate = (0, 0, -5)\n"
+                   "    uniform token[] xformOpOrder = [\"xformOp:translate\"]\n}\n"
+                << camera;
+        }
+        const usd::StageImage img = image(path);
+        test::dumpPpm("hdsi_sphere", img.rgba.data(), w, h);
+        render::Camera cam;
+        cam.lens.focal = 35.0;
+        cam.lens.haperture = 24.576;
+        const render::Projection projection = render::projectionFor(cam, w, h);
+        auto depth = gpu::Buffer::fromSpan<float>(*gpu->device, img.depth, "depth");
+        REQUIRE(depth);
+        const gpu::Buffer colours = buffer(img);
+        auto check = gpu::ComputeKernel::create(*gpu->library, "lrt/test/visibility_check", "sphereCheck");
+        if (!check) FAIL(check.error().toString());
+        gpu::Buffer counts = test::uintBuffer(*gpu->device, 3, "sphere.counts");
+        gpu::Buffer worst = test::uintBuffer(*gpu->device, 1, "sphere.worst");
+        const float radius = 1.2F;
+        const float sag = radius * (1.0F - std::cos(3.14159265F / 10.0F));
+        {
+            gpu::CommandBatch batch(*gpu->device);
+            check->dispatch(batch, {1, 1, 1}, [&](rhi::ShaderCursor cursor) {
+                cursor["colour"].setBinding(colours.rhi());
+                cursor["depth"].setBinding(depth->rhi());
+                cursor["counts"].setBinding(counts.rhi());
+                cursor["worst"].setBinding(worst.rhi());
+                technique::setCamera(cursor["camera"], projection, w, h);
+                cursor["sphere"]["z"].setData(5.0F);
+                cursor["sphere"]["radius"].setData(radius);
+                cursor["sphere"]["sag"].setData(sag);
+            });
+            REQUIRE(batch.submit(true));
+        }
+        uint32_t c[3] = {0, 0, 0};
+        float e = 0.0F;
+        REQUIRE(counts.read(*gpu->device, 0, sizeof(c), c));
+        REQUIRE(worst.read(*gpu->device, 0, sizeof(e), &e));
+        std::printf("  UsdGeomSphere as a mesh: %u of %u pixels judged wrong outside the chord band, %u squarely "
+                    "covered, depth within %.4f of the analytic sphere (sag %.4f)\n",
+                    c[0], c[1], c[2], static_cast<double>(e), static_cast<double>(sag));
+        CHECK(c[2] > 2000);
+        CHECK(c[0] == 0);
+        CHECK(e <= sag / 0.6F + 1e-4F);
+    }
+    // A tetrahedron as a TetMesh, against its four faces authored as a mesh.
+    {
+        const char* points = "[(-1, -0.6, -5), (1, -0.6, -5), (0, -0.6, -6.5), (0, 0.9, -5.5)]";
+        const fs::path tet = scratch("hdsi_tet.usda");
+        {
+            std::ofstream out(tet);
+            out << "#usda 1.0\n(\n    upAxis = \"Y\"\n)\n"
+                   "def TetMesh \"Tet\"\n{\n"
+                << "    point3f[] points = " << points << "\n"
+                << "    int4[] tetVertexIndices = [(0, 1, 2, 3)]\n"
+                   "    int3[] surfaceFaceVertexIndices = [(0, 2, 1), (0, 1, 3), (1, 2, 3), (2, 0, 3)]\n"
+                   "    color3f[] primvars:displayColor = [(0.6, 0.5, 0.2)] ( interpolation = \"constant\" )\n}\n"
+                << camera;
+        }
+        const fs::path faces = scratch("hdsi_tet_faces.usda");
+        {
+            std::ofstream out(faces);
+            // The surface hdsi derives: each face wound outward.
+            out << "#usda 1.0\n(\n    upAxis = \"Y\"\n)\n"
+                   "def Mesh \"Tet\"\n{\n"
+                << "    point3f[] points = " << points << "\n"
+                << "    int[] faceVertexCounts = [3, 3, 3, 3]\n"
+                   "    int[] faceVertexIndices = [0, 2, 1, 0, 1, 3, 1, 2, 3, 2, 0, 3]\n"
+                   "    uniform token subdivisionScheme = \"none\"\n"
+                   "    bool doubleSided = 1\n"
+                   "    color3f[] primvars:displayColor = [(0.6, 0.5, 0.2)] ( interpolation = \"constant\" )\n}\n"
+                << camera;
+        }
+        // Depth against depth: hdsi winds the surface its own way, and the
+        // headlight shades a face by the side it sees.
+        const usd::StageImage a = image(tet);
+        const usd::StageImage b = image(faces);
+        const gpu::Buffer depthA = depthImage(a);
+        const gpu::Buffer depthB = depthImage(b);
+        auto diff = render::compareHdr(*gpu->library, depthA, depthB, w, h);
+        REQUIRE(diff);
+        std::vector<float> blank(static_cast<size_t>(w) * h * 4, 0.0F);
+        gpu::BufferDesc desc;
+        desc.bytes = blank.size() * sizeof(float);
+        desc.elementBytes = 16;
+        auto blankBuffer = gpu::Buffer::create(*gpu->device, desc, blank.data());
+        REQUIRE(blankBuffer);
+        auto drawn = render::compareImages(*gpu->library, buffer(a), *blankBuffer, w, h);
+        REQUIRE(drawn);
+        std::printf("  TetMesh against its faces as a mesh, by depth: relMSE %.2e, max relative %.2e; drawn %llu\n",
+                    diff->relMse, diff->maxRelative, static_cast<unsigned long long>(drawn->over2));
+        CHECK(drawn->over2 > 1000);
+        CHECK(diff->relMse < 1e-8);
+    }
+    // A bilinear NurbsPatch, against its quad.
+    {
+        const char* points = "[(-1, -0.7, -5), (1, -0.7, -5), (-1, 0.7, -5), (1, 0.7, -5)]";
+        const fs::path patch = scratch("hdsi_nurbs.usda");
+        {
+            std::ofstream out(patch);
+            out << "#usda 1.0\n(\n    upAxis = \"Y\"\n)\n"
+                   "def NurbsPatch \"Patch\"\n{\n"
+                   "    int uVertexCount = 2\n    int vVertexCount = 2\n"
+                   "    int uOrder = 2\n    int vOrder = 2\n"
+                   "    double[] uKnots = [0, 0, 1, 1]\n    double[] vKnots = [0, 0, 1, 1]\n"
+                << "    point3f[] points = " << points << "\n"
+                << "    color3f[] primvars:displayColor = [(0.2, 0.5, 0.7)] ( interpolation = \"constant\" )\n}\n"
+                << camera;
+        }
+        const fs::path quad = scratch("hdsi_nurbs_quad.usda");
+        {
+            std::ofstream out(quad);
+            out << "#usda 1.0\n(\n    upAxis = \"Y\"\n)\n"
+                   "def Mesh \"Patch\"\n{\n"
+                << "    point3f[] points = " << points << "\n"
+                << "    int[] faceVertexCounts = [4]\n    int[] faceVertexIndices = [0, 1, 3, 2]\n"
+                   "    uniform token subdivisionScheme = \"none\"\n"
+                   "    bool doubleSided = 1\n"
+                   "    color3f[] primvars:displayColor = [(0.2, 0.5, 0.7)] ( interpolation = \"constant\" )\n}\n"
+                << camera;
+        }
+        const gpu::Buffer a = buffer(image(patch));
+        const gpu::Buffer b = buffer(image(quad));
+        auto diff = render::compareImages(*gpu->library, a, b, w, h);
+        REQUIRE(diff);
+        std::printf("  NurbsPatch against its quad: %llu pixels beyond 2 (max %u)\n",
+                    static_cast<unsigned long long>(diff->over2), diff->max);
+        CHECK(diff->max == 0);
+    }
+}
+
+// BasisCurves through Hydra: a straight linear curve of width w along x is
+// a tube -- a cylinder of radius w/2 tessellated with `sides` sides -- so
+// its depth on the row through its axis is the front of that cylinder to
+// within a facet's sag, and the rows it covers are those within w/2 of the
+// axis, to the same sag. The three visibility routes must agree on it.
+TEST_CASE("a linear BasisCurves prim draws as a tube of its width through Hydra, on every route",
+          "[usd][gpu][mesh][curves]") {
+    LRT_REQUIRE_GPU(gpu);
+    if (!gpu->device->caps().rasterization) {
+        SKIP("no rasterisation on this device");
+    }
+    const fs::path path = scratch("curve.usda");
+    {
+        std::ofstream out(path);
+        out << "#usda 1.0\n(\n    upAxis = \"Y\"\n)\n"
+               "def BasisCurves \"Hair\"\n{\n"
+               "    uniform token type = \"linear\"\n"
+               "    int[] curveVertexCounts = [2]\n"
+               "    point3f[] points = [(-3, 0.2, -5), (3, 0.2, -5)]\n"
+               "    float[] widths = [0.4] ( interpolation = \"constant\" )\n"
+               "    color3f[] primvars:displayColor = [(0.7, 0.5, 0.3)] ( interpolation = \"constant\" )\n}\n"
+               "def Camera \"Camera\"\n{\n"
+               "    float focalLength = 35\n"
+               "    float horizontalAperture = 24.576\n    float verticalAperture = 18.432\n"
+               "    float2 clippingRange = (0.1, 1000)\n}\n";
+    }
+    const uint32_t w = 200;
+    const uint32_t h = 150;
+    auto renderer = usd::StageRenderer::open(path);
+    if (!renderer) FAIL(renderer.error().toString());
+    render::Camera cam;
+    cam.lens.focal = 35.0;
+    cam.lens.haperture = 24.576;
+    const render::Projection projection = render::projectionFor(cam, w, h);
+    const float radius = 0.2F;
+    const float sag = radius * (1.0F - std::cos(3.14159265F / 8.0F));   // 8 sides
+    for (const char* route : {"raster", "rays", "bvh"}) {
+        if (std::string(route) != "raster" && !(gpu->device->caps().rayQuery && gpu->device->caps().accelerationStructure)) {
+            continue;
+        }
+        REQUIRE((*renderer)->setMeshVisibility(route));
+        auto image = (*renderer)->render("/Camera", 0.0, w, h);
+        if (!image) FAIL(image.error().toString());
+        auto depth = gpu::Buffer::fromSpan<float>(*gpu->device, image->depth, "depth");
+        REQUIRE(depth);
+        gpu::BufferDesc desc;
+        desc.bytes = image->rgba.size() * sizeof(float);
+        desc.elementBytes = 16;
+        auto colours = gpu::Buffer::create(*gpu->device, desc, image->rgba.data());
+        REQUIRE(colours);
+        auto check = gpu::ComputeKernel::create(*gpu->library, "lrt/test/visibility_check", "cylinderCheck");
+        if (!check) FAIL(check.error().toString());
+        gpu::Buffer counts = test::uintBuffer(*gpu->device, 3, "cylinder.counts");
+        gpu::Buffer worst = test::uintBuffer(*gpu->device, 1, "cylinder.worst");
+        {
+            gpu::CommandBatch batch(*gpu->device);
+            check->dispatch(batch, {1, 1, 1}, [&](rhi::ShaderCursor cursor) {
+                cursor["colour"].setBinding(colours->rhi());
+                cursor["depth"].setBinding(depth->rhi());
+                cursor["counts"].setBinding(counts.rhi());
+                cursor["worst"].setBinding(worst.rhi());
+                technique::setCamera(cursor["camera"], projection, w, h);
+                rhi::ShaderCursor c = cursor["cylinder"];
+                c["y"].setData(0.2F);
+                c["z"].setData(5.0F);
+                c["radius"].setData(radius);
+                c["sag"].setData(sag);
+                c["xMin"].setData(-3.0F);
+                c["xMax"].setData(3.0F);
+            });
+            REQUIRE(batch.submit(true));
+        }
+        uint32_t c[3] = {0, 0, 0};
+        float e = 0.0F;
+        REQUIRE(counts.read(*gpu->device, 0, sizeof(c), c));
+        REQUIRE(worst.read(*gpu->device, 0, sizeof(e), &e));
+        std::printf("  %s: %u pixels squarely on the tube, %u coverage wrong beyond the facet band, depth within "
+                    "%.4f of the cylinder's front (sag %.4f)\n",
+                    route, c[2], c[0], static_cast<double>(e), static_cast<double>(sag));
+        CHECK(c[2] > 500);
+        CHECK(c[0] == 0);
+        CHECK(e <= sag / 0.7F + 1e-3F);
+    }
+}

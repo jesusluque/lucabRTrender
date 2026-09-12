@@ -17,6 +17,10 @@ namespace {
 const char* kCutout = R"(
 public bool materialCuts(CameraParams camera, uint2 pixel, uint4 seen) {
     const Surface s = surfaceAt(camera, pixel.x, pixel.y, seen);
+    // An invisible face cuts as a cutout does, whatever its material.
+    if (triangleHidden[s.mesh.firstTriangle + s.triangle] != 0) {
+        return true;
+    }
     const MaterialRecord m = materials[materialRowOf(s)];
     if ((m.flags & kMaterialCutout) == 0) {
         return false;
@@ -89,6 +93,7 @@ void bindMaterialFrame(rhi::ShaderCursor cursor, const MaterialFrame& frame, con
     bindScene(cursor, *frame.scene);
     cursor["materials"].setBinding(frame.records->rhi());
     cursor["triangleSubsets"].setBinding(frame.scene->triangleSubsets().rhi());
+    cursor["triangleHidden"].setBinding(frame.scene->triangleHidden().rhi());
     cursor["subsetRows"].setBinding(frame.scene->subsetRows().rhi());
     cursor["gMaterialBlob"].setBinding(frame.blob->rhi());
     frame.textures->bind(cursor["gTextures"]);

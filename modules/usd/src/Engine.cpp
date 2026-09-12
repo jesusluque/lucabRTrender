@@ -1,5 +1,14 @@
 // Copyright (c) 2026 lucabRTrender contributors.
 #include "Engine.h"
+#include <pxr/imaging/hd/tokens.h>
+#include <pxr/base/gf/vec4f.h>
+#include <pxr/base/gf/vec2f.h>
+#include <pxr/base/gf/vec2i.h>
+#include <pxr/base/gf/matrix3f.h>
+#include <pxr/base/gf/quatf.h>
+#include <pxr/base/vt/array.h>
+#include <pxr/base/gf/matrix4d.h>
+#include <pxr/base/gf/matrix4f.h>
 
 #include <algorithm>
 #include <cstdlib>
@@ -92,6 +101,79 @@ void Engine::setPoints(const pxr::SdfPath& id, std::optional<PointsArrays> raw,
     if (style.has_value()) {
         entry.style = *style;
     }
+}
+
+namespace {
+
+std::array<float, 16> matrixOf(const pxr::VtValue& value) {
+    std::array<float, 16> out{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+    if (value.IsHolding<pxr::GfMatrix4f>()) {
+        const pxr::GfMatrix4f& m = value.UncheckedGet<pxr::GfMatrix4f>();
+        for (int r = 0; r < 4; ++r) for (int c = 0; c < 4; ++c) out[static_cast<size_t>(r * 4 + c)] = m[r][c];
+    } else if (value.IsHolding<pxr::GfMatrix4d>()) {
+        const pxr::GfMatrix4d& m = value.UncheckedGet<pxr::GfMatrix4d>();
+        for (int r = 0; r < 4; ++r) for (int c = 0; c < 4; ++c) out[static_cast<size_t>(r * 4 + c)] = static_cast<float>(m[r][c]);
+    }
+    return out;
+}
+
+template <typename Array>
+std::span<const std::byte> bytesOf(const pxr::VtValue& value) {
+    if (!value.IsHolding<Array>()) {
+        return {};
+    }
+    const Array& array = value.UncheckedGet<Array>();
+    return {reinterpret_cast<const std::byte*>(array.cdata()), array.size() * sizeof(typename Array::value_type)};
+}
+
+/// The skinner's input over Hydra's values: byte views, nothing converted
+/// but the three matrices (and a double matrix to float, as Storm's kernel
+/// casts them).
+geom::SkinningInput skinningInputOf(const SkinningArrays& s, const scene::FloatStream& rest) {
+    geom::SkinningInput in;
+    in.points = static_cast<uint32_t>(rest.values() / 3);
+    in.restPoints = rest.bytes;
+    in.blendShapeOffsets = bytesOf<pxr::VtVec4fArray>(s.blendShapeOffsets);
+    in.blendShapeOffsetRanges = bytesOf<pxr::VtVec2iArray>(s.blendShapeOffsetRanges);
+    in.blendShapeWeights = bytesOf<pxr::VtFloatArray>(s.blendShapeWeights);
+    in.influences = bytesOf<pxr::VtVec2fArray>(s.influences);
+    in.numInfluencesPerPoint = static_cast<uint32_t>(std::max(s.numInfluencesPerComponent, 0));
+    in.constantInfluences = s.hasConstantInfluences;
+    in.method = s.dualQuaternion ? geom::SkinningMethod::DualQuaternion : geom::SkinningMethod::LinearBlend;
+    in.skinningXforms = bytesOf<pxr::VtMatrix4fArray>(s.skinningXforms);
+    in.skinningDualQuats = bytesOf<pxr::VtVec4fArray>(s.skinningDualQuats);
+    if (in.skinningDualQuats.empty()) {
+        in.skinningDualQuats = bytesOf<pxr::VtQuatfArray>(s.skinningDualQuats);
+    }
+    in.skinningScaleXforms = bytesOf<pxr::VtMatrix3fArray>(s.skinningScaleXforms);
+    in.geomBindXform = matrixOf(s.geomBindXform);
+    in.skelLocalToWorld = matrixOf(s.skelLocalToWorld);
+    in.primWorldToLocal = matrixOf(s.primWorldToLocal);
+    return in;
+}
+
+}   // namespace
+
+void Engine::setCurves(const pxr::SdfPath& id, int32_t primId, const pxr::TfToken& renderTag,
+                       std::optional<CurveArrays> arrays, const render::Mat4* transform, std::optional<bool> visible,
+                       std::optional<MeshLook> look) {
+    const std::lock_guard<std::mutex> held(guard_);
+    MeshEntry& entry = meshes_[id];
+    entry.primId = static_cast<uint32_t>(primId);
+    entry.renderTag = renderTag;
+    if (arrays.has_value()) {
+        entry.pendingCurves = std::move(arrays);
+    }
+    if (transform != nullptr) {
+        entry.objectToWorld = *transform;
+    }
+    if (visible.has_value()) {
+        entry.visible = *visible;
+    }
+    if (look.has_value()) {
+        entry.look = *look;
+    }
+    revision_.fetch_add(1);
 }
 
 void Engine::setMesh(const pxr::SdfPath& id, int32_t primId, const pxr::TfToken& renderTag,
@@ -332,6 +414,67 @@ Result<size_t> Engine::commit() {
         }
     }
     for (auto& [id, entry] : meshes_) {
+        if (entry.pendingCurves.has_value()) {
+            const CurveArrays& c = *entry.pendingCurves;
+            geom::CurveInput input;
+            input.source = id.GetString();
+            input.points = streamOf(c.points);
+            input.curveVertexCounts = std::span<const int32_t>(c.curveVertexCounts.cdata(), c.curveVertexCounts.size());
+            input.curveIndices = std::span<const int32_t>(c.curveIndices.cdata(), c.curveIndices.size());
+            if (c.type == pxr::HdTokens->cubic) {
+                input.basis = c.basis == pxr::HdTokens->bspline      ? geom::CurveBasis::BSpline
+                              : c.basis == pxr::HdTokens->catmullRom ? geom::CurveBasis::CatmullRom
+                                                                     : geom::CurveBasis::Bezier;
+            } else {
+                input.basis = geom::CurveBasis::Linear;
+            }
+            input.wrap = c.wrap == pxr::HdTokens->periodic ? geom::CurveWrap::Periodic : geom::CurveWrap::Nonperiodic;
+            std::vector<float> widths;
+            if (c.widths.IsHolding<pxr::VtFloatArray>()) {
+                const auto& w = c.widths.UncheckedGet<pxr::VtFloatArray>();
+                widths.assign(w.begin(), w.end());
+            } else if (c.widths.IsHolding<float>()) {
+                widths.push_back(c.widths.UncheckedGet<float>());
+            }
+            input.widths = widths;
+            // HdInterpolation: constant 0, uniform 1, varying 2, vertex 3.
+            input.widthInterpolation = c.widthsInterpolation == 1   ? geom::WidthInterpolation::Uniform
+                                       : c.widthsInterpolation == 2 ? geom::WidthInterpolation::Varying
+                                       : c.widthsInterpolation == 3 ? geom::WidthInterpolation::Vertex
+                                                                    : geom::WidthInterpolation::Constant;
+            if (widths.size() == 1) {
+                input.widthInterpolation = geom::WidthInterpolation::Constant;
+                input.width = widths.front();
+            }
+            std::vector<geom::PrimvarInput> primvars;
+            for (const PrimvarArrays& p : c.primvars) {
+                geom::PrimvarInput primvar;
+                primvar.name = p.name;
+                primvar.interpolation = static_cast<geom::Interpolation>(p.interpolation);
+                primvar.values = primvarStreamOf(p.values, &primvar.components);
+                primvars.push_back(std::move(primvar));
+            }
+            input.primvars = primvars;
+            if (c.topologyChanged || entry.topologyKey == 0) {
+                entry.topologyKey = ++nextTopologyKey_;
+            }
+            input.topology = entry.topologyKey;
+            entry.gpu.reset();
+            if (!curveBuilder_.has_value()) {
+                auto made = geom::CurveBuilder::create(*library_);
+                if (!made) return std::move(made).error();
+                curveBuilder_.emplace(std::move(*made));
+            }
+            auto built = curveBuilder_->build(input);
+            if (built) {
+                entry.gpu = std::make_shared<const geom::GpuMesh>(std::move(built->mesh));
+            } else {
+                log::warn("hdLrt: {}: {}", id.GetString(), built.error().toString());
+            }
+            entry.pendingCurves.reset();
+            ++uploaded;
+            continue;
+        }
         if (!entry.pending.has_value()) {
             continue;
         }
@@ -342,6 +485,7 @@ Result<size_t> Engine::commit() {
         input.faceVertexCounts = std::span<const int32_t>(a.faceVertexCounts.cdata(), a.faceVertexCounts.size());
         input.faceVertexIndices = std::span<const int32_t>(a.faceVertexIndices.cdata(), a.faceVertexIndices.size());
         input.holeIndices = std::span<const int32_t>(a.holeIndices.cdata(), a.holeIndices.size());
+        input.invisibleFaces = std::span<const int32_t>(a.invisibleFaces.cdata(), a.invisibleFaces.size());
         input.leftHanded = a.leftHanded;
         input.smoothNormals = a.smoothNormals;
         // The same key while Hydra says the topology stands, so the scene
@@ -365,6 +509,25 @@ Result<size_t> Engine::commit() {
             input.subsets.emplace_back(subset.faces.cdata(), subset.faces.size());
         }
         entry.gpu.reset();
+        // Skinned: the rest points go through the skinner on the device, and
+        // the mesh is built from what comes out, under the same topology key
+        // -- a deformation of the rest mesh, refit and not rebuilt.
+        gpu::Buffer skinned;
+        if (a.skinning.has_value() && input.points.values() >= 3) {
+            if (!skinner_.has_value()) {
+                auto made = geom::Skinner::create(*library_);
+                if (!made) return std::move(made).error();
+                skinner_.emplace(std::move(*made));
+            }
+            auto result = skinner_->skin(skinningInputOf(*a.skinning, input.points));
+            if (result) {
+                skinned = std::move(*result);
+                input.devicePositions = &skinned;
+                input.devicePoints = static_cast<uint32_t>(input.points.values() / 3);
+            } else {
+                log::warn("hdLrt: {}: skinning: {}", id.GetString(), result.error().toString());
+            }
+        }
         if (input.points.values() >= 3 && !a.faceVertexCounts.empty()) {
             if (!meshBuilder_.has_value()) {
                 auto made = geom::MeshBuilder::create(*library_);
@@ -1102,7 +1265,7 @@ Result<void> Engine::render(const render::Projection& projection, const render::
         frame.lights = &*lightTable_;
         frame.samples = lightSamples_.load();
         frame.chooseLights = chooseLights_.load();
-        const technique::MaterialFrame* cutouts = materialCutouts_ ? &frame : nullptr;
+        const technique::MaterialFrame* cutouts = (materialCutouts_ || scene_->anyHidden()) ? &frame : nullptr;
             gpu::CommandBatch batch(*device_);
         switch (visibility) {
         case MeshVisibility::Automatic:

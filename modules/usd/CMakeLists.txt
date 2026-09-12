@@ -9,6 +9,7 @@ set(LRT_USD_SOURCES
     src/Light.cpp
     src/Material.cpp
     src/Points.cpp
+    src/Curves.cpp
     src/RenderPass.cpp
     src/RenderDelegate.cpp)
 set(LRT_USD_LIBS usd usdGeom usdVol usdShade usdLux usdRender usdSkel usdImaging usdSkelImaging

@@ -249,6 +249,11 @@ Result<ViewStats> runViewer(const ViewOptions& options) {
     float exposure = 0.0F;
     float renderScale = 1.0F;
     double time = stage.startTimeCode();
+    // The timeline: playing advances the time by the wall clock at the
+    // stage's timeCodesPerSecond and wraps at the end. What frame N shows is
+    // the stage's business (SetTime); when it is drawn is the clock's.
+    bool playing = false;
+    auto lastTick = std::chrono::steady_clock::now();
     double focal = 35.0;
     std::optional<usd::StagePick> picked;
     std::string status;
@@ -398,6 +403,37 @@ Result<ViewStats> runViewer(const ViewOptions& options) {
                 float t = static_cast<float>(time);
                 if (ImGui::SliderFloat("Time", &t, float(start), float(end), "%.1f")) {
                     time = t;
+                    playing = false;
+                }
+                if (ImGui::Button(playing ? "Pause" : "Play")) {
+                    playing = !playing;
+                    lastTick = std::chrono::steady_clock::now();
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("|<")) {
+                    time = start;
+                    playing = false;
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("<")) {
+                    time = std::max(start, std::floor(time - 1.0 + 0.5));
+                    playing = false;
+                }
+                ImGui::SameLine();
+                if (ImGui::Button(">")) {
+                    time = std::min(end, std::floor(time + 1.0 + 0.5));
+                    playing = false;
+                }
+                ImGui::SameLine();
+                ImGui::Text("%.1f fps", stage.timeCodesPerSecond());
+            }
+            if (playing) {
+                const auto now = std::chrono::steady_clock::now();
+                const double seconds = std::chrono::duration<double>(now - lastTick).count();
+                lastTick = now;
+                time += seconds * stage.timeCodesPerSecond();
+                if (time > end) {
+                    time = start + std::fmod(time - start, std::max(end - start, 1e-9));
                 }
             }
             ImGui::Separator();

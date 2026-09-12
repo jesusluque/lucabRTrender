@@ -69,7 +69,7 @@ Result<GpuMesh> MeshBuilder::build(const MeshInput& in) {
     GpuMesh mesh;
     mesh.topology = in.topology;
     mesh.source = in.source;
-    mesh.points = static_cast<uint32_t>(in.points.values() / 3);
+    mesh.points = in.devicePositions != nullptr ? in.devicePoints : static_cast<uint32_t>(in.points.values() / 3);
     mesh.faces = static_cast<uint32_t>(in.faceVertexCounts.size());
     const uint32_t indexCount = static_cast<uint32_t>(in.faceVertexIndices.size());
     const uint32_t holeCount = static_cast<uint32_t>(in.holeIndices.size());
@@ -78,7 +78,15 @@ Result<GpuMesh> MeshBuilder::build(const MeshInput& in) {
     }
 
     // Points.
-    {
+    if (in.devicePositions != nullptr) {
+        auto positions = deviceBuffer(device, mesh.points, 16, "mesh.positions");
+        if (!positions) return std::move(positions).error();
+        mesh.positions = std::move(*positions);
+        gpu::CommandBatch batch(device);
+        batch.encoder()->copyBuffer(mesh.positions.rhi(), 0, in.devicePositions->rhi(), 0, uint64_t{mesh.points} * 16);
+        batch.markDirty();
+        LRT_TRY(batch.submit(true));
+    } else {
         const uint64_t words = std::max<uint64_t>((in.points.bytes.size() + 3) / 4, 1);
         auto source = deviceBuffer(device, words, 4, "mesh.points.words");
         if (!source) return std::move(source).error();
@@ -103,6 +111,11 @@ Result<GpuMesh> MeshBuilder::build(const MeshInput& in) {
     if (!indices) return std::move(indices).error();
     auto holes = intBuffer(device, in.holeIndices, "mesh.holeIndices");
     if (!holes) return std::move(holes).error();
+    auto invisible = intBuffer(device, in.invisibleFaces, "mesh.invisibleFaces");
+    if (!invisible) return std::move(invisible).error();
+    auto invisibleFlags = deviceBuffer(device, mesh.faces, 4, "mesh.invisibleFlags");
+    if (!invisibleFlags) return std::move(invisibleFlags).error();
+    mesh.hidden = !in.invisibleFaces.empty();
     auto holeFlags = deviceBuffer(device, mesh.faces, 4, "mesh.holeFlags");
     if (!holeFlags) return std::move(holeFlags).error();
     auto cornerCounts = deviceBuffer(device, mesh.faces, 4, "mesh.cornerCounts");
@@ -142,6 +155,22 @@ Result<GpuMesh> MeshBuilder::build(const MeshInput& in) {
                 topologyParams(cursor["params"]);
             });
         }
+        // The invisible faces' flags, the same way: cleared, then marked.
+        subsetClear_.dispatch(batch, {mesh.faces, 1, 1}, [&](rhi::ShaderCursor cursor) {
+            cursor["cleared"].setBinding(invisibleFlags->rhi());
+            cursor["params"]["count"].setData(mesh.faces);
+            cursor["params"]["value"].setData(uint32_t{0});
+        });
+        if (!in.invisibleFaces.empty()) {
+            holes_.dispatch(batch, {static_cast<uint32_t>(in.invisibleFaces.size()), 1, 1},
+                            [&](rhi::ShaderCursor cursor) {
+                                cursor["holeIndices"].setBinding(invisible->rhi());
+                                cursor["holeFlags"].setBinding(invisibleFlags->rhi());
+                                rhi::ShaderCursor p = cursor["params"];
+                                p["faces"].setData(mesh.faces);
+                                p["holes"].setData(static_cast<uint32_t>(in.invisibleFaces.size()));
+                            });
+        }
         faceCounts_.dispatch(batch, {mesh.faces, 1, 1}, [&](rhi::ShaderCursor cursor) {
             cursor["faceVertexCounts"].setBinding(counts->rhi());
             cursor["holeFlags"].setBinding(holeFlags->rhi());
@@ -166,9 +195,12 @@ Result<GpuMesh> MeshBuilder::build(const MeshInput& in) {
     if (!triangleCorners) return std::move(triangleCorners).error();
     auto triangleFaces = deviceBuffer(device, mesh.triangles, 4, "mesh.triangleFaces");
     if (!triangleFaces) return std::move(triangleFaces).error();
+    auto triangleHidden = deviceBuffer(device, mesh.triangles, 4, "mesh.triangleHidden");
+    if (!triangleHidden) return std::move(triangleHidden).error();
     mesh.indices = std::move(*triangles);
     mesh.triangleCorners = std::move(*triangleCorners);
     mesh.triangleFaces = std::move(*triangleFaces);
+    mesh.triangleHidden = std::move(*triangleHidden);
     if (mesh.triangles > 0) {
         gpu::CommandBatch batch(device);
         triangulate_.dispatch(batch, {mesh.faces, 1, 1}, [&](rhi::ShaderCursor cursor) {
@@ -179,6 +211,8 @@ Result<GpuMesh> MeshBuilder::build(const MeshInput& in) {
             cursor["triangles"].setBinding(mesh.indices.rhi());
             cursor["triangleCorners"].setBinding(mesh.triangleCorners.rhi());
             cursor["triangleFaces"].setBinding(mesh.triangleFaces.rhi());
+            cursor["invisibleFlags"].setBinding(invisibleFlags->rhi());
+            cursor["triangleHidden"].setBinding(mesh.triangleHidden.rhi());
             topologyParams(cursor["params"]);
         });
         LRT_TRY(batch.submit(true));

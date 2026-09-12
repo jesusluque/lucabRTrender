@@ -3,6 +3,8 @@
 lrt_add_module(geom
     SOURCES
         src/Mesh.cpp
+        src/Skinner.cpp
+        src/Curves.cpp
     PUBLIC_LIBS
         lrt::core
         lrt::gpu

@@ -100,6 +100,7 @@ void HdLrtMesh::Sync(HdSceneDelegate* delegate, HdRenderParam* renderParam, HdDi
         a.faceVertexCounts = topology.GetFaceVertexCounts();
         a.faceVertexIndices = topology.GetFaceVertexIndices();
         a.holeIndices = topology.GetHoleIndices();
+        a.invisibleFaces = topology.GetInvisibleFaces();
         a.leftHanded = topology.GetOrientation() != HdTokens->rightHanded;
         for (const HdGeomSubset& subset : topology.GetGeomSubsets()) {
             if (subset.type == HdGeomSubset::TypeFaceSet) {
@@ -107,6 +108,52 @@ void HdLrtMesh::Sync(HdSceneDelegate* delegate, HdRenderParam* renderParam, HdDi
             }
         }
         a.points = delegate->Get(id, HdTokens->points);
+        // Skinned: the points are an ext computation's output. Its inputs --
+        // the aggregator's (rest points, bindings, blend shapes) and its own
+        // (the animation's transforms and weights) -- go to the engine, which
+        // skins on the device. Hydra never runs the computation.
+        for (const HdExtComputationPrimvarDescriptor& computed :
+             delegate->GetExtComputationPrimvarDescriptors(id, HdInterpolationVertex)) {
+            if (computed.name != HdTokens->points) {
+                continue;
+            }
+            const SdfPath& computation = computed.sourceComputationId;
+            lrt::usd::SkinningArrays skin;
+            const auto read = [&](const SdfPath& from, const TfToken& name) {
+                return delegate->GetExtComputationInput(from, name);
+            };
+            // The computation's own scene inputs.
+            for (const TfToken& name : delegate->GetExtComputationSceneInputNames(computation)) {
+                const VtValue value = read(computation, name);
+                const std::string& n = name.GetString();
+                if (n == "blendShapeWeights") skin.blendShapeWeights = value;
+                else if (n == "skinningXforms") skin.skinningXforms = value;
+                else if (n == "skinningDualQuats") { skin.skinningDualQuats = value; skin.dualQuaternion = true; }
+                else if (n == "skinningScaleXforms") skin.skinningScaleXforms = value;
+                else if (n == "skelLocalToWorld") skin.skelLocalToWorld = value;
+                else if (n == "primWorldToLocal") skin.primWorldToLocal = value;
+            }
+            // And what it takes from its aggregator, by the aggregator's outputs.
+            for (const HdExtComputationInputDescriptor& input :
+                 delegate->GetExtComputationInputDescriptors(computation)) {
+                const VtValue value = read(input.sourceComputationId, input.sourceComputationOutputName);
+                const std::string& n = input.name.GetString();
+                if (n == "restPoints") skin.restPoints = value;
+                else if (n == "geomBindXform") skin.geomBindXform = value;
+                else if (n == "influences") skin.influences = value;
+                else if (n == "numInfluencesPerComponent" && value.IsHolding<int>())
+                    skin.numInfluencesPerComponent = value.UncheckedGet<int>();
+                else if (n == "hasConstantInfluences" && value.IsHolding<bool>())
+                    skin.hasConstantInfluences = value.UncheckedGet<bool>();
+                else if (n == "blendShapeOffsets") skin.blendShapeOffsets = value;
+                else if (n == "blendShapeOffsetRanges") skin.blendShapeOffsetRanges = value;
+            }
+            if (!skin.restPoints.IsEmpty()) {
+                a.points = skin.restPoints;
+                a.skinning = std::move(skin);
+            }
+            break;
+        }
         if (shutter) {
             float times[2] = {0.0F, 0.0F};
             VtValue values[2];

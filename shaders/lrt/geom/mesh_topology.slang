@@ -39,6 +39,8 @@ StructuredBuffer<uint>     triangleStarts;  // per face: first triangle
 RWStructuredBuffer<uint>   triangles;       // 3 per triangle: point indices
 RWStructuredBuffer<uint>   triangleCorners; // 3 per triangle: face-vertex indices
 RWStructuredBuffer<uint>   triangleFaces;   // per triangle: authored face
+StructuredBuffer<uint>     invisibleFlags;  // per face: 1 where the face is invisible (kept, not drawn)
+RWStructuredBuffer<uint>   triangleHidden;  // per triangle: its face's flag
 ConstantBuffer<GeomParams> params;
 
 float pointValue(uint index) {
@@ -115,5 +117,6 @@ void meshTriangulate(uint3 tid: SV_DispatchThreadID) {
             triangleCorners[t * 3 + k] = inside ? corner[k] : 0u;
         }
         triangleFaces[t] = f;
+        triangleHidden[t] = invisibleFlags[f];
     }
 }

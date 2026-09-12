@@ -12,6 +12,7 @@
 #include <filesystem>
 #include <cstdio>
 #include <cstdlib>
+#include <tuple>
 #include <vector>
 
 #include <pxr/imaging/hio/image.h>
@@ -28,6 +29,7 @@
 #include "lrt/technique/Denoiser.h"
 #include "lrt/technique/PathTracer.h"
 #include "lrt/technique/Visibility.h"
+#include "lrt/world/BvhScene.h"
 #include "lrt/world/GpuScene.h"
 #include "lrt/world/Instancing.h"
 #include "lrt/world/RayTracingScene.h"
@@ -3332,5 +3334,151 @@ TEST_CASE("motion blur places a sliding edge at each shutter bucket's centre, ri
         std::printf("  no motion under 8 buckets against the still frame: relMSE %.2e, max relative %.2e\n",
                     diff->relMse, diff->maxRelative);
         CHECK(diff->relMse < 1e-8);
+    }
+}
+
+// Invisible faces: a grid with its odd faces invisible, drawn by the three
+// visibility routes through the cutout passes (which is where a hidden face
+// is skipped, whatever its material). Every pixel still drawn must show the
+// (instance, triangle) the full grid showed there -- hiding must not
+// renumber -- and none may belong to an odd face; and about half the
+// grid's pixels must be gone.
+TEST_CASE("invisible faces are skipped by every route without renumbering the faces that stay",
+          "[technique][visibility][hidden]") {
+    LRT_REQUIRE_GPU(gpu);
+    const gpu::Caps& caps = gpu->device->caps();
+    if (!caps.rasterization || !caps.rayQuery || !caps.accelerationStructure) {
+        SKIP("needs rasterisation and ray queries");
+    }
+    std::vector<std::filesystem::path> shaderPaths;
+    for (const std::string& path : gpu->device->shaderSearchPaths()) {
+        shaderPaths.emplace_back(path);
+    }
+    auto compiler = material::MaterialCompiler::create({LRT_MATERIALX_ROOT}, shaderPaths);
+    auto textures = material::TextureStore::create(*gpu->library);
+    auto builder = geom::MeshBuilder::create(*gpu->library);
+    auto scene = world::GpuScene::create(*gpu->library);
+    auto accel = world::RayTracingScene::create(*gpu->library);
+    auto bvh = world::BvhScene::create(*gpu->library);
+    auto raster = technique::VisibilityRaster::create(*gpu->library);
+    auto trace = technique::VisibilityTrace::create(*gpu->library);
+    auto walk = technique::VisibilityBvh::create(*gpu->library);
+    auto programs = technique::MaterialPrograms::create(*gpu->library);
+    auto check = gpu::ComputeKernel::create(*gpu->library, "lrt/test/hidden_check", "hiddenCheck");
+    if (!compiler) FAIL(compiler.error().toString());
+    if (!textures) FAIL(textures.error().toString());
+    if (!builder) FAIL(builder.error().toString());
+    if (!scene) FAIL(scene.error().toString());
+    if (!accel) FAIL(accel.error().toString());
+    if (!bvh) FAIL(bvh.error().toString());
+    if (!raster) FAIL(raster.error().toString());
+    if (!trace) FAIL(trace.error().toString());
+    if (!walk) FAIL(walk.error().toString());
+    if (!programs) FAIL(programs.error().toString());
+    if (!check) FAIL(check.error().toString());
+    REQUIRE((*textures)->commit());
+    const std::vector<technique::MaterialRecord> rows{{0, 0, 0, 0}};
+    auto records = gpu::Buffer::fromSpan<technique::MaterialRecord>(*gpu->device, rows, "materials.records");
+    const std::vector<float> blob{0.0F};
+    auto blobBuffer = gpu::Buffer::fromSpan<float>(*gpu->device, blob, "materials.blob");
+    REQUIRE(records);
+    REQUIRE(blobBuffer);
+
+    const uint32_t w = 241;
+    const uint32_t h = 181;
+    const render::Projection projection =
+        render::projectionFor(render::Camera::lookingAt({3.0, 4.0, 11.0}, {0.0, 0.0, 0.0}), w, h);
+    const int n = 16;
+    std::vector<float> points;
+    std::vector<int32_t> counts;
+    std::vector<int32_t> indices;
+    std::vector<int32_t> oddFaces;
+    for (int y = 0; y <= n; ++y) {
+        for (int x = 0; x <= n; ++x) {
+            const float fx = static_cast<float>(x) / n * 6.0F - 3.0F;
+            const float fy = static_cast<float>(y) / n * 6.0F - 3.0F;
+            points.insert(points.end(), {fx, 0.4F * std::sin(fx * 1.7F) * std::cos(fy * 1.3F), fy});
+        }
+    }
+    for (int y = 0; y < n; ++y) {
+        for (int x = 0; x < n; ++x) {
+            const int p = y * (n + 1) + x;
+            counts.push_back(4);
+            indices.insert(indices.end(), {p, p + n + 1, p + n + 2, p + 1});
+            if ((y * n + x) % 2 == 1) {
+                oddFaces.push_back(y * n + x);
+            }
+        }
+    }
+    const auto grid = [&](bool hideOdd) {
+        geom::MeshInput in;
+        in.source = "grid";
+        in.points = {std::as_bytes(std::span<const float>(points)), false};
+        in.faceVertexCounts = counts;
+        in.faceVertexIndices = indices;
+        if (hideOdd) {
+            in.invisibleFaces = oddFaces;
+        }
+        auto built = builder->build(in);
+        if (!built) FAIL(built.error().toString());
+        return std::make_shared<const geom::GpuMesh>(std::move(*built));
+    };
+    technique::MaterialFrame frame;
+    frame.programs = &*programs;
+    frame.scene = &*scene;
+    frame.records = &*records;
+    frame.blob = &*blobBuffer;
+    frame.textures = &**textures;
+    // The three routes' ids for a mesh, each through the cutout pass.
+    struct Ids {
+        technique::VisibilityTargets raster, rays, walked;
+    };
+    const auto routes = [&](const std::shared_ptr<const geom::GpuMesh>& mesh) {
+        world::MeshInstance instance;
+        instance.mesh = mesh;
+        instance.doubleSided = true;
+        REQUIRE(scene->update(std::span<const world::MeshInstance>(&instance, 1), projection));
+        REQUIRE(accel->build(*scene));
+        REQUIRE(bvh->build(*scene));
+        Ids ids;
+        gpu::CommandBatch batch(*gpu->device);
+        REQUIRE(raster->render(batch, *scene, projection, w, h, ids.raster, &frame));
+        REQUIRE(trace->render(batch, *accel, projection, w, h, ids.rays, &frame));
+        REQUIRE(walk->render(batch, *scene, *bvh, projection, w, h, ids.walked, &frame));
+        REQUIRE(batch.submit(true));
+        return ids;
+    };
+    const Ids full = routes(grid(false));
+    const Ids hidden = routes(grid(true));
+    CHECK(scene->anyHidden());
+    for (const auto& [name, a, b] : {std::tuple{"raster", &full.raster, &hidden.raster},
+                                     std::tuple{"rays", &full.rays, &hidden.rays},
+                                     std::tuple{"compute BVH", &full.walked, &hidden.walked}}) {
+        gpu::Buffer out = test::uintBuffer(*gpu->device, 4, "hidden.counts");
+        auto viewA = a->ids.view(0);
+        auto viewB = b->ids.view(0);
+        REQUIRE(viewA);
+        REQUIRE(viewB);
+        gpu::CommandBatch batch(*gpu->device);
+        check->dispatch(batch, {1, 1, 1}, [&](rhi::ShaderCursor cursor) {
+            cursor["full"].setBinding((*viewA).get());
+            cursor["hidden"].setBinding((*viewB).get());
+            cursor["triangleFaces"].setBinding(scene->triangleFaces().rhi());
+            cursor["counts"].setBinding(out.rhi());
+            cursor["params"]["width"].setData(w);
+            cursor["params"]["height"].setData(h);
+            cursor["params"]["firstTriangle"].setData(scene->firstTriangle(0));
+        });
+        REQUIRE(batch.submit(true));
+        uint32_t c[4] = {0, 0, 0, 0};
+        REQUIRE(out.read(*gpu->device, 0, sizeof(c), c));
+        std::printf("  %s: %u pixels drawn with the odd faces hidden (%u with every face); %u differ from the full "
+                    "grid's ids where it showed an even face, %u lie on an odd face\n",
+                    name, c[0], c[3], c[1], c[2]);
+        CHECK(c[3] > 4000);
+        CHECK(c[0] > c[3] / 3);
+        CHECK(c[0] < c[3] * 2 / 3);
+        CHECK(c[1] == 0);
+        CHECK(c[2] == 0);
     }
 }

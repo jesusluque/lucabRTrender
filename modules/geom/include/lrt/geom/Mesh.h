@@ -50,9 +50,17 @@ struct GpuPrimvar {
 struct MeshInput {
     std::string                source;
     scene::FloatStream         points;              ///< xyz per point, float or half
+    /// Positions already on the device, float4 a point (a Skinner's), taken
+    /// instead of `points`; `devicePoints` says how many.
+    const gpu::Buffer*         devicePositions = nullptr;
+    uint32_t                   devicePoints = 0;
     std::span<const int32_t>   faceVertexCounts;
     std::span<const int32_t>   faceVertexIndices;
     std::span<const int32_t>   holeIndices;
+    /// Faces kept in the topology but not drawn (Hydra's invisible faces):
+    /// unlike a hole, an invisible face keeps its triangles and their
+    /// numbering, so it can be shown again without a rebuild.
+    std::span<const int32_t>   invisibleFaces;
     bool                       leftHanded = false;
     /// Smooth normals are computed when true (a subdivision scheme that is
     /// not "none" or "bilinear", as Hydra decides) and no "normals" primvar
@@ -77,6 +85,8 @@ struct GpuMesh {
     gpu::Buffer   indices;          ///< uint, 3 per triangle: points
     gpu::Buffer   triangleCorners;  ///< uint, 3 per triangle: face-vertex indices
     gpu::Buffer   triangleFaces;    ///< uint per triangle: authored face
+    gpu::Buffer   triangleHidden;   ///< uint per triangle: 1 where its face is invisible
+    bool          hidden = false;   ///< any face invisible
     uint32_t      subsets = 0;      ///< GeomSubsets given
     gpu::Buffer   triangleSubsets;  ///< uint per triangle: 0, or k + 1 for the k-th subset (when subsets > 0)
     std::vector<GpuPrimvar> primvars;   ///< authored, and "normals" when computed

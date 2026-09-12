@@ -55,11 +55,32 @@ struct MeshSubset {
     pxr::SdfPath      material;
 };
 
+/// What skins a mesh, read from usdSkelImaging's ext computation prims (the
+/// aggregator's and the computation's inputs), as VtValues: uploaded as
+/// they are and skinned on the device (geom::Skinner).
+struct SkinningArrays {
+    pxr::VtValue restPoints;               ///< VtVec3fArray
+    pxr::VtValue geomBindXform;            ///< GfMatrix4f or GfMatrix4d
+    pxr::VtValue influences;               ///< VtVec2fArray (joint, weight)
+    int          numInfluencesPerComponent = 0;
+    bool         hasConstantInfluences = false;
+    pxr::VtValue blendShapeOffsets;        ///< VtVec4fArray
+    pxr::VtValue blendShapeOffsetRanges;   ///< VtVec2iArray, a point
+    pxr::VtValue blendShapeWeights;        ///< VtFloatArray, a sub-shape
+    pxr::VtValue skinningXforms;           ///< VtMatrix4fArray, a joint
+    pxr::VtValue skinningDualQuats;        ///< VtVec4fArray, two a joint, or VtQuatfArray pairs
+    pxr::VtValue skinningScaleXforms;      ///< VtMatrix3fArray, a joint (empty for none)
+    pxr::VtValue skelLocalToWorld;         ///< GfMatrix4d
+    pxr::VtValue primWorldToLocal;         ///< GfMatrix4d
+    bool         dualQuaternion = false;
+};
+
 struct MeshArrays {
     pxr::VtValue           points;              ///< VtVec3fArray or VtVec3hArray
     pxr::VtArray<int>      faceVertexCounts;
     pxr::VtArray<int>      faceVertexIndices;
     pxr::VtArray<int>      holeIndices;
+    pxr::VtArray<int>      invisibleFaces;   ///< Hydra's: kept in the topology, not drawn
     bool                   leftHanded = false;
     bool                   smoothNormals = true;
     /// Hydra marked the topology dirty: the mesh is a new one, not the last
@@ -71,8 +92,25 @@ struct MeshArrays {
     pxr::VtValue           pointsEnd;
     double                 pointsTimeStart = 0.0;   ///< the samples' times, in frames about the frame
     double                 pointsTimeEnd = 0.0;
+    /// The mesh is skinned: `points` are its rest points and these skin them.
+    std::optional<SkinningArrays> skinning;
     std::vector<PrimvarArrays> primvars;
     std::vector<MeshSubset>    subsets;
+};
+
+/// UsdGeomBasisCurves as Hydra holds it: the engine lays a tube over each
+/// span on the device and draws it as a mesh.
+struct CurveArrays {
+    pxr::VtValue           points;              ///< VtVec3fArray or VtVec3hArray
+    pxr::VtArray<int>      curveVertexCounts;
+    pxr::VtArray<int>      curveIndices;
+    pxr::TfToken           type;                ///< linear | cubic
+    pxr::TfToken           basis;               ///< bezier | bspline | catmullRom
+    pxr::TfToken           wrap;                ///< nonperiodic | periodic | pinned
+    pxr::VtValue           widths;              ///< VtFloatArray, or empty
+    uint32_t               widthsInterpolation = 0;   ///< HdInterpolation's values
+    bool                   topologyChanged = true;
+    std::vector<PrimvarArrays> primvars;
 };
 
 /// An instancer's primvars as Hydra holds them.
