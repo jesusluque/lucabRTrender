@@ -62,11 +62,17 @@ HdDirtyBits HdLrtMesh::GetInitialDirtyBitsMask() const {
 void HdLrtMesh::Sync(HdSceneDelegate* delegate, HdRenderParam* renderParam, HdDirtyBits* dirtyBits,
                      TfToken const&) {
     SdfPath const& id = GetId();
-    auto* engine = static_cast<HdLrtRenderParam*>(renderParam)->GetEngine();
+    auto* param = static_cast<HdLrtRenderParam*>(renderParam);
+    auto* engine = param->GetEngine();
     if (engine == nullptr) {
         *dirtyBits &= ~HdChangeTracker::AllSceneDirtyBits;
         return;
     }
+    // The camera's shutter, when it is open for a while: transforms and
+    // points are sampled at its open and close as well as at the frame.
+    const float shutterOpen = static_cast<float>(param->GetShutterOpen());
+    const float shutterClose = static_cast<float>(param->GetShutterClose());
+    const bool shutter = shutterClose > shutterOpen;
     _UpdateInstancer(delegate, dirtyBits);
     HdInstancer::_SyncInstancerAndParents(delegate->GetRenderIndex(), GetInstancerId());
     std::optional<std::vector<lrt::usd::InstancerLink>> instancing;
@@ -101,6 +107,17 @@ void HdLrtMesh::Sync(HdSceneDelegate* delegate, HdRenderParam* renderParam, HdDi
             }
         }
         a.points = delegate->Get(id, HdTokens->points);
+        if (shutter) {
+            float times[2] = {0.0F, 0.0F};
+            VtValue values[2];
+            const size_t n = delegate->SamplePrimvar(id, HdTokens->points, shutterOpen, shutterClose, 2, times, values);
+            if (n >= 2 && values[0] != values[n - 1]) {
+                a.pointsStart = values[0];
+                a.pointsEnd = values[n - 1];
+                a.pointsTimeStart = times[0];
+                a.pointsTimeEnd = times[n - 1];
+            }
+        }
         // Smooth normals where Storm computes them: a subdivision scheme that
         // is not none or bilinear, and no flat shading asked for.
         // Every numeric primvar, as it is (indices resolved on the device).
@@ -153,9 +170,23 @@ void HdLrtMesh::Sync(HdSceneDelegate* delegate, HdRenderParam* renderParam, HdDi
         look = l;
     }
     lrt::render::Mat4 transform;
+    std::optional<lrt::usd::MeshTransforms> shutterTransforms;
     const bool transformDirty = HdChangeTracker::IsTransformDirty(*dirtyBits, id);
     if (transformDirty) {
         transform = lrt::usd::fromUsd(delegate->GetTransform(id));
+        lrt::usd::MeshTransforms at;
+        if (shutter) {
+            float times[2] = {0.0F, 0.0F};
+            GfMatrix4d values[2];
+            const size_t n = delegate->SampleTransform(id, shutterOpen, shutterClose, 2, times, values);
+            if (n >= 2 && values[0] != values[n - 1]) {
+                at.start = lrt::usd::fromUsd(values[0]);
+                at.end = lrt::usd::fromUsd(values[n - 1]);
+                at.timeStart = times[0];
+                at.timeEnd = times[n - 1];
+            }
+        }
+        shutterTransforms = at;
     }
     std::optional<bool> visible;
     if (HdChangeTracker::IsVisibilityDirty(*dirtyBits, id)) {
@@ -163,7 +194,7 @@ void HdLrtMesh::Sync(HdSceneDelegate* delegate, HdRenderParam* renderParam, HdDi
         visible = IsVisible();
     }
     engine->setMesh(id, GetPrimId(), GetRenderTag(), std::move(arrays), transformDirty ? &transform : nullptr,
-                    visible, look, std::move(instancing));
+                    visible, look, std::move(instancing), shutterTransforms);
     *dirtyBits &= ~HdChangeTracker::AllSceneDirtyBits;
 }
 

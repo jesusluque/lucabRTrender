@@ -2,6 +2,7 @@
 #include <pxr/imaging/hd/retainedDataSource.h>
 #include <pxr/imaging/hd/sceneIndexPluginRegistry.h>
 #include <pxr/imaging/hdsi/lightLinkingSceneIndex.h>
+#include <pxr/imaging/hdsi/velocityMotionResolvingSceneIndex.h>
 
 #include "RenderDelegate.h"
 
@@ -47,6 +48,20 @@ void HdLrtRegisterSceneIndices() {
     // goes through plug's discovery, so a registry function alone would not
     // run at all -- measured, by tracing it and seeing nothing.
     static const bool once = [] {
+        // Velocities first, at the start of phase 0: a prim that authors
+        // `velocities` (and `accelerations`) gets its points and instance
+        // positions sampled at any shutter time from them, as UsdGeom's
+        // velocity interpolation rules say -- so the delegate's shutter
+        // samples read the same whether a stage authored samples or
+        // velocities. It sits just downstream of the stage and upstream of
+        // instancing's aggregation, which is where hdsi expects it.
+        HdSceneIndexPluginRegistry::GetInstance().RegisterSceneIndexForRenderer(
+            "lucabRTrender",
+            [](const std::string&, const HdSceneIndexBaseRefPtr& inputScene,
+               const HdContainerDataSourceHandle& inputArgs) -> HdSceneIndexBaseRefPtr {
+                return HdsiVelocityMotionResolvingSceneIndex::New(inputScene, inputArgs);
+            },
+            nullptr, 0, HdSceneIndexPluginRegistry::InsertionOrderAtStart);
         HdSceneIndexPluginRegistry::GetInstance().RegisterSceneIndexForRenderer(
             "lucabRTrender",
             [](const std::string&, const HdSceneIndexBaseRefPtr& inputScene,
@@ -113,7 +128,7 @@ HdRenderPassSharedPtr HdLrtRenderDelegate::CreateRenderPass(HdRenderIndex* index
 
 TF_DEFINE_PRIVATE_TOKENS(_lrtSettings, ((technique, "lrt:technique"))((settleStreams, "lrt:settleStreams"))
                                            ((visibility, "lrt:visibility"))((lightSamples, "lrt:lightSamples"))((chooseLights, "lrt:chooseLights"))
-                                           ((pathSamples, "lrt:pathSamples"))((pathBounces, "lrt:pathBounces"))((pathTotal, "lrt:pathTotal"))((denoise, "lrt:denoise"))((pathAdaptive, "lrt:pathAdaptive"))((pathError, "lrt:pathError"))
+                                           ((pathSamples, "lrt:pathSamples"))((pathBounces, "lrt:pathBounces"))((pathTotal, "lrt:pathTotal"))((denoise, "lrt:denoise"))((pathAdaptive, "lrt:pathAdaptive"))((pathError, "lrt:pathError"))((motionBuckets, "lrt:motionBuckets"))
                                            (raster)(rt)(automatic)(rays)(bvh));
 
 HdRenderSettingDescriptorList HdLrtRenderDelegate::GetRenderSettingDescriptors() const {
@@ -161,7 +176,11 @@ HdRenderSettingDescriptorList HdLrtRenderDelegate::GetRenderSettingDescriptors()
     error.name = "Adaptive: relative standard error a pixel stops at (rt)";
     error.key = _lrtSettings->pathError;
     error.defaultValue = VtValue(0.02f);
-    return {technique, settle, visibility, samples, choose, paths, bounces, total, denoise, adaptive, error};
+    HdRenderSettingDescriptor motion;
+    motion.name = "Motion blur: shutter slices, 1 to 8 (rt)";
+    motion.key = _lrtSettings->motionBuckets;
+    motion.defaultValue = VtValue(4);
+    return {technique, settle, visibility, samples, choose, paths, bounces, total, denoise, adaptive, error, motion};
 }
 
 lrt::usd::MeshVisibility HdLrtRenderDelegate::GetMeshVisibility() const {
@@ -213,6 +232,10 @@ uint32_t HdLrtRenderDelegate::GetPathSamples() const {
 
 uint32_t HdLrtRenderDelegate::GetPathBounces() const {
     return _UintSetting(GetRenderSetting(_lrtSettings->pathBounces), 1, 0);
+}
+
+uint32_t HdLrtRenderDelegate::GetMotionBuckets() const {
+    return std::min(_UintSetting(GetRenderSetting(_lrtSettings->motionBuckets), 4, 1), 8u);
 }
 
 bool HdLrtRenderDelegate::GetPathAdaptive() const {

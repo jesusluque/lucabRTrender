@@ -116,6 +116,9 @@ public:
     /// accumulates, which is what a moving camera wants.
     void setPathSamples(uint32_t samples);
     void setPathBounces(uint32_t bounces);
+    /// Motion blur's shutter slices for `rt`, 1 to 8; the shutter itself is
+    /// the camera's.
+    void setMotionBuckets(uint32_t buckets);
     void setPathTotal(uint32_t total);
     /// Denoise a path traced frame once it has gathered its total.
     void setDenoise(bool denoise);

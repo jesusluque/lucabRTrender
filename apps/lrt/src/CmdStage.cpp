@@ -100,7 +100,7 @@ void addStage(CLI::App& app) {
         std::vector<double> eye, target, up{0.0, 1.0, 0.0};
         double focal = 35.0, nearZ = 0.1, farZ = 100000.0;
         uint32_t frames = 1;
-        uint32_t pathSamples = 1, pathBounces = 1, pathTotal = 1;
+        uint32_t pathSamples = 1, pathBounces = 1, pathTotal = 1, motionBuckets = 4;
         bool denoise = false;
     };
     auto o = std::make_shared<Options>();
@@ -115,6 +115,8 @@ void addStage(CLI::App& app) {
     cmd->add_option("--path-bounces", o->pathBounces, "rt: bounces after the first hit");
     cmd->add_option("--path-total", o->pathTotal, "rt: paths a pixel the image is drawn until it holds");
     cmd->add_flag("--denoise", o->denoise, "rt: denoise the image once it holds its total (OIDN)");
+    cmd->add_option("--motion-buckets", o->motionBuckets,
+                    "rt: shutter slices for motion blur, 1 to 8 (the shutter is the camera's)");
     cmd->add_option("--eye", o->eye, "a camera of its own at x y z (with --target), not one on the stage")->expected(3);
     cmd->add_option("--target", o->target, "where that camera looks")->expected(3);
     cmd->add_option("--up", o->up, "its up vector")->expected(3);
@@ -143,6 +145,7 @@ void addStage(CLI::App& app) {
         (*renderer)->setPathBounces(o->pathBounces);
         (*renderer)->setPathTotal(o->pathTotal);
         (*renderer)->setDenoise(o->denoise);
+        (*renderer)->setMotionBuckets(o->motionBuckets);
         Result<usd::StageImage> image = Error(ErrorCode::InvalidArgument, "no image");
         std::vector<double> ms;
         for (uint32_t frame = 0; frame < std::max(o->frames, uint32_t{1}); ++frame) {

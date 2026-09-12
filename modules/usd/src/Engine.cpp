@@ -96,9 +96,19 @@ void Engine::setPoints(const pxr::SdfPath& id, std::optional<PointsArrays> raw,
 
 void Engine::setMesh(const pxr::SdfPath& id, int32_t primId, const pxr::TfToken& renderTag,
                      std::optional<MeshArrays> arrays, const render::Mat4* transform, std::optional<bool> visible,
-                     std::optional<MeshLook> look, std::optional<std::vector<InstancerLink>> instancing) {
+                     std::optional<MeshLook> look, std::optional<std::vector<InstancerLink>> instancing,
+                     std::optional<MeshTransforms> shutter) {
     const std::lock_guard<std::mutex> held(guard_);
     MeshEntry& entry = meshes_[id];
+    if (shutter.has_value()) {
+        entry.shutter = *shutter;
+    }
+    if (arrays.has_value()) {
+        entry.pendingStart = arrays->pointsStart;
+        entry.pendingEnd = arrays->pointsEnd;
+        entry.pointsTimeStart = arrays->pointsTimeStart;
+        entry.pointsTimeEnd = arrays->pointsTimeEnd;
+    }
     if (instancing.has_value()) {
         entry.instancing = std::move(*instancing);
         entry.chainDirty = true;
@@ -212,6 +222,20 @@ void Engine::setPathSamples(uint32_t samples) {
 
 void Engine::setPathBounces(uint32_t bounces) {
     if (pathBounces_.exchange(bounces) != bounces) {
+        revision_.fetch_add(1);
+    }
+}
+
+void Engine::setShutter(double open, double close) {
+    const bool changed = shutterOpen_.exchange(open) != open || shutterClose_.exchange(close) != close;
+    if (changed) {
+        revision_.fetch_add(1);
+    }
+}
+
+void Engine::setMotionBuckets(uint32_t buckets) {
+    const uint32_t clamped = std::min(std::max(buckets, 1u), 8u);
+    if (motionBuckets_.exchange(clamped) != clamped) {
         revision_.fetch_add(1);
     }
 }
@@ -353,8 +377,28 @@ Result<size_t> Engine::commit() {
             } else {
                 log::warn("hdLrt: {}: {}", id.GetString(), mesh.error().toString());
             }
+            // The shutter's meshes: the same topology, the points there.
+            entry.gpuStart.reset();
+            entry.gpuEnd.reset();
+            for (auto [pending, into] : {std::pair{&entry.pendingStart, &entry.gpuStart},
+                                         std::pair{&entry.pendingEnd, &entry.gpuEnd}}) {
+                if (pending->IsEmpty() || !entry.gpu) {
+                    continue;
+                }
+                geom::MeshInput sample = input;
+                sample.points = streamOf(*pending);
+                if (sample.points.values() != input.points.values()) {
+                    continue;
+                }
+                auto built = meshBuilder_->build(sample);
+                if (built) {
+                    *into = std::make_shared<const geom::GpuMesh>(std::move(*built));
+                }
+            }
         }
         entry.pending.reset();
+        entry.pendingStart = pxr::VtValue();
+        entry.pendingEnd = pxr::VtValue();
         ++uploaded;
     }
     for (auto& [id, entry] : splats_) {
@@ -716,6 +760,9 @@ Result<void> Engine::render(const render::Projection& projection, const render::
     std::vector<render::PointInstance> points;
     std::vector<lod::LodInstance> cuts;
     std::vector<lod::StreamingPool*> poolOf;   // per cut: its pool, if streamed
+    const uint32_t motionBuckets = technique == Technique::RayTraced ? motionBuckets_.load() : 1u;
+    const double shutterOpen = shutterOpen_.load();
+    const double shutterClose = shutterClose_.load();
     {
         const std::lock_guard<std::mutex> held(guard_);
         lamps.reserve(lights_.size());
@@ -859,6 +906,26 @@ Result<void> Engine::render(const render::Projection& projection, const render::
             world::MeshInstance instance;
             instance.mesh = entry.gpu;
             instance.objectToWorld = entry.objectToWorld;
+            if (motionBuckets > 1 && (entry.shutter.start.has_value() || entry.shutter.end.has_value() ||
+                                      entry.gpuStart != nullptr || entry.gpuEnd != nullptr)) {
+                // The samples' times: the transform's, or the points' where
+                // only they move. Where both move at different times, the
+                // transform's are taken and the points are placed at them --
+                // a compromise, noted in the docs.
+                world::MeshMotion motion;
+                motion.objectToWorldStart = entry.shutter.start.value_or(entry.objectToWorld);
+                motion.objectToWorldEnd = entry.shutter.end.value_or(entry.objectToWorld);
+                motion.meshStart = entry.gpuStart;
+                motion.meshEnd = entry.gpuEnd;
+                const bool transformMoves = entry.shutter.start.has_value() || entry.shutter.end.has_value();
+                motion.timeStart = transformMoves ? entry.shutter.timeStart : entry.pointsTimeStart;
+                motion.timeEnd = transformMoves ? entry.shutter.timeEnd : entry.pointsTimeEnd;
+                if (motion.timeEnd == motion.timeStart) {
+                    motion.timeStart = shutterOpen;
+                    motion.timeEnd = shutterClose;
+                }
+                instance.motion = motion;
+            }
             instance.primId = entry.primId;
             instance.displayColor = entry.look.displayColor;
             instance.displayOpacity = entry.look.displayOpacity;
@@ -956,7 +1023,7 @@ Result<void> Engine::render(const render::Projection& projection, const render::
         pathAuxValid_ = false;
     }
     if (meshLayer) {
-        LRT_TRY(scene_->update(meshInstances, projection, meshSets));
+        LRT_TRY(scene_->update(meshInstances, projection, meshSets, motionBuckets, shutterOpen, shutterClose));
         // The frame's lights, and what a shadow ray traces against: rays
         // shadow whatever route found the visibility, so the structure is
         // built even where the rasteriser drew. All of this uploads and

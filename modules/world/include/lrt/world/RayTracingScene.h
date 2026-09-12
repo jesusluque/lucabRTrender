@@ -40,6 +40,7 @@ private:
     gpu::ComputeKernel                                    descs_;
     uint64_t                                              generation_ = ~uint64_t{0};
     std::vector<uint64_t> meshRevisions_;   ///< per bottom level: the mesh revision it holds
+    std::vector<uint32_t> bottomMesh_;      ///< per bottom level: its mesh
     std::vector<rhi::AccelerationStructureBuildInput> bottomInputs_;   ///< per bottom level, for its refit
     gpu::Buffer updateScratch_;   ///< the largest refit scratch among the bottom levels
     std::vector<rhi::ComPtr<rhi::IAccelerationStructure>> bottom_;

@@ -59,6 +59,7 @@ public:
     /// least one, and bounces after the first hit ("lrt:pathBounces").
     [[nodiscard]] uint32_t GetPathSamples() const;
     [[nodiscard]] uint32_t GetPathBounces() const;
+    [[nodiscard]] uint32_t GetMotionBuckets() const;
     /// Paths a pixel at which a path traced frame is finished
     /// ("lrt:pathTotal"); one, the default, never accumulates.
     [[nodiscard]] uint32_t GetPathTotal() const;

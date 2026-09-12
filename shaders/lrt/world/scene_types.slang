@@ -34,8 +34,11 @@ public struct InstanceRecord {
     /// link is tested against. 0: none, which only an unlinked light reaches.
     public uint   categoriesLo;
     public uint   categoriesHi;
-    public uint   pad0;
-    public uint   pad1;
+    /// Motion blur: the acceleration structure mask this record answers to
+    /// (0xFF, or one bit for the shutter bucket it stands at) and where its
+    /// mesh's positions for that bucket begin, past the mesh's firstPoint.
+    public uint   mask;
+    public uint   pointsOffset;
 };
 
 public float3 rowsApply(float4 r0, float4 r1, float4 r2, float3 x, float w) {

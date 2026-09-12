@@ -28,6 +28,7 @@
 #include <pxr/usdImaging/usdImaging/stageSceneIndex.h>
 
 #include "RenderDelegate.h"
+#include "RenderParam.h"
 
 PXR_NAMESPACE_USING_DIRECTIVE
 
@@ -145,6 +146,9 @@ void StageRenderer::setPathSamples(uint32_t samples) {
 void StageRenderer::setPathBounces(uint32_t bounces) {
     impl_->delegate->SetRenderSetting(TfToken("lrt:pathBounces"), VtValue(static_cast<int>(bounces)));
 }
+void StageRenderer::setMotionBuckets(uint32_t buckets) {
+    impl_->delegate->SetRenderSetting(TfToken("lrt:motionBuckets"), VtValue(static_cast<int>(buckets)));
+}
 void StageRenderer::setPathAdaptive(bool adaptive) {
     impl_->delegate->SetRenderSetting(TfToken("lrt:pathAdaptive"), VtValue(adaptive));
 }
@@ -204,6 +208,18 @@ Result<void> StageRenderer::aim(const std::string& camera, double time, const st
     }
     if (!impl.stage->GetPrimAtPath(SdfPath(cameraPath)).IsA<UsdGeomCamera>()) {
         return Error::make(ErrorCode::NotFound, "no camera at '{}'", cameraPath);
+    }
+    // The camera's shutter, ahead of the first Sync, so the first frame
+    // samples at it rather than the second.
+    {
+        const UsdGeomCamera usdCamera(impl.stage->GetPrimAtPath(SdfPath(cameraPath)));
+        double open = 0.0;
+        double close = 0.0;
+        usdCamera.GetShutterOpenAttr().Get(&open, UsdTimeCode(time));
+        usdCamera.GetShutterCloseAttr().Get(&close, UsdTimeCode(time));
+        if (auto* param = static_cast<HdLrtRenderParam*>(impl.delegate->GetRenderParam()); param != nullptr) {
+            param->SetShutter(open, close);
+        }
     }
     impl.sceneIndices.stageSceneIndex->SetTime(UsdTimeCode(time));
     impl.sceneIndices.stageSceneIndex->ApplyPendingUpdates();

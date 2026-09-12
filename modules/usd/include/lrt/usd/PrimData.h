@@ -7,6 +7,7 @@
 #pragma once
 
 #include <array>
+#include <optional>
 #include <vector>
 #include <string>
 
@@ -64,6 +65,12 @@ struct MeshArrays {
     /// Hydra marked the topology dirty: the mesh is a new one, not the last
     /// one deformed.
     bool                   topologyChanged = true;
+    /// The points at the shutter's open and close, when they differ from
+    /// `points`: empty otherwise.
+    pxr::VtValue           pointsStart;
+    pxr::VtValue           pointsEnd;
+    double                 pointsTimeStart = 0.0;   ///< the samples' times, in frames about the frame
+    double                 pointsTimeEnd = 0.0;
     std::vector<PrimvarArrays> primvars;
     std::vector<MeshSubset>    subsets;
 };
@@ -79,6 +86,15 @@ struct InstancerArrays {
 
 /// One level of a prototype's instancing: the instancer, and which of its
 /// elements the level below (the prototype, or a nested instancer) takes.
+/// A prim's transform at the shutter's open and close, each only when it
+/// differs from the frame's.
+struct MeshTransforms {
+    std::optional<render::Mat4> start;
+    std::optional<render::Mat4> end;
+    double                      timeStart = 0.0;   ///< the samples' times, in frames about the frame
+    double                      timeEnd = 0.0;
+};
+
 struct InstancerLink {
     pxr::SdfPath      instancer;
     pxr::VtArray<int> indices;

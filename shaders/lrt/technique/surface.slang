@@ -69,9 +69,10 @@ public Surface surfaceFromWeights(uint4 seen, float3 weights, float3 viewDirecti
     const uint t = s.mesh.firstTriangle + s.triangle;
     s.points = uint3(indices[t * 3], indices[t * 3 + 1], indices[t * 3 + 2]);
     const InstanceRecord r = s.instance;
-    const float3 a = rowsApply(r.view0, r.view1, r.view2, positions[s.mesh.firstPoint + s.points.x].xyz, 1.0);
-    const float3 b = rowsApply(r.view0, r.view1, r.view2, positions[s.mesh.firstPoint + s.points.y].xyz, 1.0);
-    const float3 c = rowsApply(r.view0, r.view1, r.view2, positions[s.mesh.firstPoint + s.points.z].xyz, 1.0);
+    const uint base = s.mesh.firstPoint + r.pointsOffset;   // the bucket's positions, under motion
+    const float3 a = rowsApply(r.view0, r.view1, r.view2, positions[base + s.points.x].xyz, 1.0);
+    const float3 b = rowsApply(r.view0, r.view1, r.view2, positions[base + s.points.y].xyz, 1.0);
+    const float3 c = rowsApply(r.view0, r.view1, r.view2, positions[base + s.points.z].xyz, 1.0);
     s.weights = weights;
     s.viewDirection = viewDirection;
     s.viewPosition = a * weights.x + b * weights.y + c * weights.z;
@@ -98,9 +99,10 @@ public Surface surfaceAt(CameraParams camera, uint px, uint py, uint4 seen) {
     const MeshRecord mesh = meshes[r.mesh];
     const uint t = mesh.firstTriangle + seen.y;
     const uint3 points = uint3(indices[t * 3], indices[t * 3 + 1], indices[t * 3 + 2]);
-    const float3 a = rowsApply(r.view0, r.view1, r.view2, positions[mesh.firstPoint + points.x].xyz, 1.0);
-    const float3 b = rowsApply(r.view0, r.view1, r.view2, positions[mesh.firstPoint + points.y].xyz, 1.0);
-    const float3 c = rowsApply(r.view0, r.view1, r.view2, positions[mesh.firstPoint + points.z].xyz, 1.0);
+    const uint base = mesh.firstPoint + r.pointsOffset;
+    const float3 a = rowsApply(r.view0, r.view1, r.view2, positions[base + points.x].xyz, 1.0);
+    const float3 b = rowsApply(r.view0, r.view1, r.view2, positions[base + points.y].xyz, 1.0);
+    const float3 c = rowsApply(r.view0, r.view1, r.view2, positions[base + points.z].xyz, 1.0);
     float3 origin;
     float3 direction;
     viewRay(camera, float2(px, py) + 0.5, origin, direction);

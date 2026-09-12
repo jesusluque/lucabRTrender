@@ -26,7 +26,7 @@ struct InstanceRecord {
     float    world[12];
     float    colour[4];
     uint32_t mesh, primId, instanceId, flags;
-    uint32_t categoriesLo, categoriesHi, pad0, pad1;
+    uint32_t categoriesLo, categoriesHi, mask, pointsOffset;
 };
 static_assert(sizeof(MeshRecord) == 64);
 static_assert(sizeof(InstanceRecord) == 192);
@@ -47,6 +47,16 @@ static_assert(sizeof(SetRecord) == 96);
 struct PrimvarRecord {
     uint32_t interpolation, components, first, count;
 };
+
+struct MotionInput {
+    float    worldLo[12];
+    float    worldHi[12];
+    float    colour[4];
+    uint32_t mesh, primId, instanceId, flags;
+    uint32_t categoriesLo, categoriesHi, deforms, pad0;
+    float    time0, time1, pad1, pad2;
+};
+static_assert(sizeof(MotionInput) == 160);
 
 Result<gpu::Buffer> deviceBuffer(gpu::Device& device, uint64_t count, uint32_t element, const char* label,
                                  const void* data = nullptr) {
@@ -75,6 +85,12 @@ Result<GpuScene> GpuScene::create(gpu::ShaderLibrary& library) {
     if (!records) return std::move(records).error();
     scene.records_ = std::move(*records);
     auto clear = gpu::ComputeKernel::create(library, "lrt/geom/mesh_subsets", "subsetClear");
+    auto motionRecords = gpu::ComputeKernel::create(library, "lrt/world/motion", "motionRecords");
+    if (!motionRecords) return std::move(motionRecords).error();
+    auto positionsLerp = gpu::ComputeKernel::create(library, "lrt/world/motion", "positionsLerp");
+    if (!positionsLerp) return std::move(positionsLerp).error();
+    scene.motionRecords_ = std::move(*motionRecords);
+    scene.positionsLerp_ = std::move(*positionsLerp);
     if (!clear) return std::move(clear).error();
     scene.subsetClear_ = std::move(*clear);
     for (auto [into, module, entry] : {std::tuple{&scene.worldBoxes_, "lrt/world/scene_bounds", "instanceWorldBoxes"},
@@ -133,6 +149,7 @@ Result<void> GpuScene::repack() {
     ranges_.assign(meshes_.size(), {});
     meshRevisions_.assign(meshes_.size(), 0);
     primvarValueBase_.assign(meshes_.size(), 0);
+    deforms_.resize(meshes_.size(), false);
     uint64_t points = 0;
     uint64_t triangles = 0;
     for (size_t k = 0; k < meshes_.size(); ++k) {
@@ -150,7 +167,12 @@ Result<void> GpuScene::repack() {
         into = std::move(*made);
         return ok();
     };
-    LRT_TRY(make(positions_, points, 16, "scene.positions"));
+    bool anyDeforms = false;
+    for (const bool d : deforms_) {
+        anyDeforms = anyDeforms || d;
+    }
+    pointsStride_ = static_cast<uint32_t>(points);
+    LRT_TRY(make(positions_, points * (anyDeforms ? buckets_ : 1), 16, "scene.positions"));
     uint64_t primvarValues = 0;
     uint64_t primvarCount = 0;
     for (const auto& mesh : meshes_) {
@@ -289,11 +311,13 @@ Result<void> GpuScene::writeSlots() {
 }
 
 Result<void> GpuScene::update(std::span<const MeshInstance> instances, const render::Projection& projection,
-                              std::span<const InstanceSet> sets) {
+                              std::span<const InstanceSet> sets, uint32_t bucketsWanted, double shutterOpen,
+                              double shutterClose) {
     // The meshes, in first-appearance order; instances grouped by mesh.
     std::vector<std::shared_ptr<const geom::GpuMesh>> meshes;
     std::map<const geom::GpuMesh*, uint32_t> indexOf;
     std::vector<std::vector<uint32_t>> byMesh;
+    std::vector<bool> deforms;
     for (uint32_t i = 0; i < instances.size(); ++i) {
         const MeshInstance& instance = instances[i];
         if (instance.mesh == nullptr || instance.mesh->triangles == 0) {
@@ -303,9 +327,34 @@ Result<void> GpuScene::update(std::span<const MeshInstance> instances, const ren
         if (inserted) {
             meshes.push_back(instance.mesh);
             byMesh.emplace_back();
+            deforms.push_back(false);
         }
         byMesh[it->second].push_back(i);
+        if (bucketsWanted > 1 && instance.motion.has_value()) {
+            const auto fits = [&](const std::shared_ptr<const geom::GpuMesh>& m) {
+                return m != nullptr && m != instance.mesh && sameLayout(*instance.mesh, *m);
+            };
+            if (fits(instance.motion->meshStart) || fits(instance.motion->meshEnd)) {
+                deforms[it->second] = true;
+            }
+        }
     }
+    // Buckets only where something moves; the pools are laid out for them.
+    bool moves = false;
+    for (const MeshInstance& instance : instances) {
+        moves = moves || instance.motion.has_value();
+    }
+    const uint32_t buckets = moves ? std::min<uint32_t>(std::max<uint32_t>(bucketsWanted, 1), 8) : 1;
+    bool anyDeforms = false;
+    for (const bool d : deforms) {
+        anyDeforms = anyDeforms || d;
+    }
+    if (!anyDeforms) {
+        deforms.assign(deforms.size(), false);
+    }
+    const bool relayout = buckets != buckets_ || deforms != deforms_;
+    buckets_ = buckets;
+    deforms_ = deforms;
     for (const InstanceSet& set : sets) {
         if (set.mesh == nullptr || set.mesh->triangles == 0 || set.count == 0) {
             continue;
@@ -313,9 +362,13 @@ Result<void> GpuScene::update(std::span<const MeshInstance> instances, const ren
         if (indexOf.try_emplace(set.mesh.get(), static_cast<uint32_t>(meshes.size())).second) {
             meshes.push_back(set.mesh);
             byMesh.emplace_back();
+            deforms_.push_back(false);
         }
     }
-    if (meshes != meshes_) {
+    if (relayout) {
+        meshes_ = std::move(meshes);
+        LRT_TRY(repack());
+    } else if (meshes != meshes_) {
         // The same meshes deformed -- each slot the same mesh or one of its
         // topology key and layout -- keep the pools and take new positions
         // in place; anything else repacks.
@@ -373,10 +426,73 @@ Result<void> GpuScene::update(std::span<const MeshInstance> instances, const ren
             record.flags = (instance.doubleSided ? 1u : 0u) | (instance.material << 8);
             record.categoriesLo = static_cast<uint32_t>(instance.categories & 0xFFFFFFFFu);
             record.categoriesHi = static_cast<uint32_t>(instance.categories >> 32);
+            record.mask = 0xFFu;
+            record.pointsOffset = 0;
             records.push_back(record);
             ++draw.instances;
         }
         draws_.push_back(draw);
+    }
+    // Under motion, the same instances' inputs for the bucket copies, in the
+    // records' order: both transforms, and whether the mesh has positions
+    // per bucket.
+    std::vector<MotionInput> motionInputs;
+    if (buckets_ > 1) {
+        motionInputs.reserve(records.size());
+        for (uint32_t m = 0; m < meshes_.size() && m < byMesh.size(); ++m) {
+            for (const uint32_t i : byMesh[m]) {
+                const MeshInstance& instance = instances[i];
+                const InstanceRecord& record = records[motionInputs.size()];
+                MotionInput input{};
+                rows(instance.motion.has_value() ? instance.motion->objectToWorldStart : instance.objectToWorld,
+                     input.worldLo);
+                rows(instance.motion.has_value() ? instance.motion->objectToWorldEnd : instance.objectToWorld,
+                     input.worldHi);
+                std::copy(std::begin(record.colour), std::end(record.colour), input.colour);
+                input.mesh = record.mesh;
+                input.primId = record.primId;
+                input.instanceId = record.instanceId;
+                input.flags = record.flags;
+                input.categoriesLo = record.categoriesLo;
+                input.categoriesHi = record.categoriesHi;
+                input.deforms = deforms_[m] ? 1u : 0u;
+                input.time0 = static_cast<float>(instance.motion.has_value() ? instance.motion->timeStart : 0.0);
+                input.time1 = static_cast<float>(instance.motion.has_value() ? instance.motion->timeEnd : 1.0);
+                motionInputs.push_back(input);
+            }
+        }
+        // A deforming mesh's positions at each bucket, between its two meshes.
+        for (uint32_t m = 0; m < meshes_.size() && m < byMesh.size(); ++m) {
+            if (!deforms_[m] || byMesh[m].empty()) {
+                continue;
+            }
+            const MeshInstance& instance = instances[byMesh[m].front()];
+            const geom::GpuMesh& own = *meshes_[m];
+            const auto& startMesh = instance.motion->meshStart;
+            const auto& endMesh = instance.motion->meshEnd;
+            const geom::GpuMesh& lo = startMesh != nullptr && sameLayout(own, *startMesh) ? *startMesh : own;
+            const geom::GpuMesh& hi = endMesh != nullptr && sameLayout(own, *endMesh) ? *endMesh : own;
+            gpu::CommandBatch batch(*device_);
+            positionsLerp_.dispatch(batch, {lo.points * buckets_, 1, 1}, [&](rhi::ShaderCursor cursor) {
+                cursor["pointsLo"].setBinding(lo.positions.rhi());
+                cursor["pointsHi"].setBinding(hi.positions.rhi());
+                cursor["positions"].setBinding(positions_.rhi());
+                rhi::ShaderCursor p = cursor["lerpParams"];
+                p["count"].setData(lo.points);
+                p["firstPoint"].setData(ranges_[m].firstPoint);
+                p["buckets"].setData(buckets_);
+                p["pointsStride"].setData(pointsStride_);
+                p["time0"].setData(static_cast<float>(instance.motion->timeStart));
+                p["time1"].setData(static_cast<float>(instance.motion->timeEnd));
+                p["open"].setData(static_cast<float>(shutterOpen));
+                p["close"].setData(static_cast<float>(shutterClose));
+            });
+            LRT_TRY(batch.submit(true));
+            ++meshRevisions_[m];   // its structures follow the new positions each frame
+        }
+        if (anyDeforms) {
+            ++positionsRevision_;
+        }
     }
     // Each mesh's subset rows, from the first instance or set of it that has them.
     {
@@ -404,25 +520,64 @@ Result<void> GpuScene::update(std::span<const MeshInstance> instances, const ren
             subsetRowWords_ = std::move(rows);
         }
     }
-    // Sets after the single instances, their records written on the device.
+    // Sets after the single instances, their records written on the device;
+    // and after those, under motion, every single instance's bucket copies.
     uint64_t total = records.size();
     for (const InstanceSet& set : sets) {
         if (set.mesh != nullptr && set.mesh->triangles > 0) {
             total += set.count;
         }
     }
-    if (total > UINT32_MAX) {
+    const uint64_t withMotion = total + (buckets_ > 1 ? uint64_t{records.size()} * buckets_ : 0);
+    if (withMotion > UINT32_MAX) {
         return Error(ErrorCode::OutOfMemory, "more than 2^32 instances");
     }
     instanceCount_ = static_cast<uint32_t>(total);
-    if (instanceRecords_.count() < std::max<uint64_t>(total, 1)) {
-        auto made = deviceBuffer(*device_, std::max<uint64_t>(total, 1) * 3 / 2 + 1, sizeof(InstanceRecord),
+    if (buckets_ > 1) {
+        // The structure holds the sets (still, so answering to every bit) and
+        // the bucket copies; not the frame's single records.
+        tlasFirst_ = static_cast<uint32_t>(records.size());
+        tlasCount_ = static_cast<uint32_t>(withMotion - records.size());
+    } else {
+        tlasFirst_ = 0;
+        tlasCount_ = instanceCount_;
+    }
+    if (instanceRecords_.count() < std::max<uint64_t>(withMotion, 1)) {
+        auto made = deviceBuffer(*device_, std::max<uint64_t>(withMotion, 1) * 3 / 2 + 1, sizeof(InstanceRecord),
                                  "scene.instances");
         if (!made) return std::move(made).error();
         instanceRecords_ = std::move(*made);
     }
     if (!records.empty()) {
         LRT_TRY(instanceRecords_.write(*device_, 0, records.size() * sizeof(InstanceRecord), records.data()));
+    }
+    if (buckets_ > 1 && !motionInputs.empty()) {
+        if (motionInputs_.count() < motionInputs.size()) {
+            auto made = deviceBuffer(*device_, motionInputs.size() * 3 / 2 + 1, sizeof(MotionInput), "scene.motion");
+            if (!made) return std::move(made).error();
+            motionInputs_ = std::move(*made);
+        }
+        LRT_TRY(motionInputs_.write(*device_, 0, motionInputs.size() * sizeof(MotionInput), motionInputs.data()));
+        const std::array<float, 12> view = projection.worldToView.rows3x4();
+        const uint32_t count = static_cast<uint32_t>(motionInputs.size());
+        gpu::CommandBatch batch(*device_);
+        motionRecords_.dispatch(batch, {count * buckets_, 1, 1}, [&](rhi::ShaderCursor cursor) {
+            cursor["motionInputs"].setBinding(motionInputs_.rhi());
+            cursor["records"].setBinding(instanceRecords_.rhi());
+            rhi::ShaderCursor p = cursor["params"];
+            p["count"].setData(count);
+            p["buckets"].setData(buckets_);
+            p["first"].setData(static_cast<uint32_t>(total));
+            p["pointsStride"].setData(pointsStride_);
+            p["open"].setData(static_cast<float>(shutterOpen));
+            p["close"].setData(static_cast<float>(shutterClose));
+            static constexpr const char* kNames[12] = {"v00", "v01", "v02", "v03", "v10", "v11",
+                                                      "v12", "v13", "v20", "v21", "v22", "v23"};
+            for (size_t k = 0; k < 12; ++k) {
+                p[kNames[k]].setData(view[k]);
+            }
+        });
+        LRT_TRY(batch.submit(true));
     }
     // Every set's records in one dispatch. Their chains are pooled, copied
     // on the device when the sets' chains change; per frame only the sets'

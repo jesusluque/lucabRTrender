@@ -26,12 +26,13 @@ struct PathParams {
     uint adaptive;     // 1: a converged pixel takes no more paths
     float errorTarget; // relative standard error of the mean a pixel stops at
     uint minSamples;   // and not before this many
-    uint ownRays;      // 1: the tracer casts its own primary rays (lens, distortion)
+    uint ownRays;      // 1: the tracer casts its own primary rays (lens, distortion, motion)
     float lensRadius;  // scene units; 0 for a pinhole
     float focusDistance;
     float distortionK1;
     float distortionK2;
-    uint pad2; uint pad3; uint pad4;
+    uint buckets;      // motion blur: shutter slices; a sample's rays answer to one slice's mask bit
+    uint pad3; uint pad4;
 };
 
 Texture2D<uint4>               visibility;   // (instance + 1, triangle); row 0 on top
@@ -106,14 +107,14 @@ struct PathHit {
     float2 barycentrics;  // of the committed triangle: where the ray met it
 };
 
-PathHit traceNearestFrom(float3 origin, float3 direction, float tMin) {
+PathHit traceNearestFrom(float3 origin, float3 direction, float tMin, uint mask) {
     RayDesc ray;
     ray.Origin = origin;
     ray.Direction = direction;
     ray.TMin = tMin;
     ray.TMax = 3.0e38;
     RayQuery<RAY_FLAG_FORCE_OPAQUE | RAY_FLAG_CULL_BACK_FACING_TRIANGLES> query;
-    query.TraceRayInline(scene, RAY_FLAG_FORCE_OPAQUE | RAY_FLAG_CULL_BACK_FACING_TRIANGLES, 0xFF, ray);
+    query.TraceRayInline(scene, RAY_FLAG_FORCE_OPAQUE | RAY_FLAG_CULL_BACK_FACING_TRIANGLES, mask, ray);
     query.Proceed();
     PathHit hit;
     if (query.CommittedStatus() == COMMITTED_TRIANGLE_HIT) {
@@ -128,7 +129,7 @@ PathHit traceNearestFrom(float3 origin, float3 direction, float tMin) {
     return hit;
 }
 
-bool pathOccluded(float3 p, float3 n, float3 wi, float distance, uint shadowCategory) {
+bool pathOccluded(float3 p, float3 n, float3 wi, float distance, uint shadowCategory, uint mask) {
     const float scale = max(1.0, length(p));
     const float3 away = dot(n, wi) < 0.0 ? -n : n;
     RayDesc ray;
@@ -141,13 +142,13 @@ bool pathOccluded(float3 p, float3 n, float3 wi, float distance, uint shadowCate
     }
     if (shadowCategory == kLightUnlinked) {
         RayQuery<RAY_FLAG_FORCE_OPAQUE | RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH> query;
-        query.TraceRayInline(scene, RAY_FLAG_FORCE_OPAQUE | RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH, 0xFF, ray);
+        query.TraceRayInline(scene, RAY_FLAG_FORCE_OPAQUE | RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH, mask, ray);
         query.Proceed();
         return query.CommittedStatus() == COMMITTED_TRIANGLE_HIT;
     }
     for (uint step = 0; step < 16; ++step) {
         RayQuery<RAY_FLAG_FORCE_OPAQUE> query;
-        query.TraceRayInline(scene, RAY_FLAG_FORCE_OPAQUE, 0xFF, ray);
+        query.TraceRayInline(scene, RAY_FLAG_FORCE_OPAQUE, mask, ray);
         query.Proceed();
         if (query.CommittedStatus() != COMMITTED_TRIANGLE_HIT) {
             return false;
@@ -175,7 +176,7 @@ struct PathHit {
     float2 barycentrics;
 };
 
-PathHit traceNearestFrom(float3 origin, float3 direction, float tMin) {
+PathHit traceNearestFrom(float3 origin, float3 direction, float tMin, uint mask) {
     PathHit hit;
     hit.seen = uint4(0);
     hit.t = 0.0;
@@ -183,7 +184,7 @@ PathHit traceNearestFrom(float3 origin, float3 direction, float tMin) {
     return hit;
 }
 
-bool pathOccluded(float3 p, float3 n, float3 wi, float distance, uint shadowCategory) {
+bool pathOccluded(float3 p, float3 n, float3 wi, float distance, uint shadowCategory, uint mask) {
     return false;
 }
 
@@ -268,7 +269,17 @@ Shaded shadeHit(uint2 pixel, PathHit hit, float3 from, float3 direction) {
 /// distorted radially in ndc, then a thin lens bends it: every ray through the
 /// pixel meets the pixel's ray at the depth in focus, and leaves the lens from
 /// a point drawn uniformly on its disk. Rigid rows take it to world.
-Shaded shadeLensSample(uint2 pixel, uint sample) {
+/// The shutter slice a sample's rays answer to: every ray of one path is
+/// traced at one time.
+uint sampleMask(uint2 pixel, uint sample) {
+    if (path.buckets <= 1) {
+        return 0xFF;
+    }
+    const float t = random(pixel, sample, 0u, 17u);
+    return 1u << min(uint(t * float(path.buckets)), path.buckets - 1);
+}
+
+Shaded shadeLensSample(uint2 pixel, uint sample, uint mask) {
     Shaded out;
     out.valid = false;
     out.depth = 0.0;
@@ -297,7 +308,7 @@ Shaded shadeLensSample(uint2 pixel, uint sample) {
     const float3 directionWorld = normalize(float3(dot(toWorld.row0.xyz, direction),
                                                    dot(toWorld.row1.xyz, direction),
                                                    dot(toWorld.row2.xyz, direction)));
-    const PathHit hit = traceNearestFrom(originWorld, directionWorld, camera.nearZ);
+    const PathHit hit = traceNearestFrom(originWorld, directionWorld, camera.nearZ, mask);
     if (hit.seen.x == 0) {
         return out;
     }
@@ -307,7 +318,7 @@ Shaded shadeLensSample(uint2 pixel, uint sample) {
 /// One light, sampled and weighed: next event estimation, with the density of
 /// the material's own sampling folded in by the power heuristic so the two
 /// strategies do not double count.
-float3 gatherLight(Shaded sh, uint2 pixel, uint sample, uint bounce) {
+float3 gatherLight(Shaded sh, uint2 pixel, uint sample, uint bounce, uint mask) {
     if (lightCount == 0) {
         return float3(0.0);
     }
@@ -330,7 +341,8 @@ float3 gatherLight(Shaded sh, uint2 pixel, uint sample, uint bounce) {
         return float3(0.0);
     }
     if ((light.flags & kLightShadow) != 0 &&
-        pathOccluded(sh.inputs.positionWorld, sh.inputs.normalWorld, ls.wi, ls.distance, light.shadowCategory)) {
+        pathOccluded(sh.inputs.positionWorld, sh.inputs.normalWorld, ls.wi, ls.distance, light.shadowCategory,
+                     mask)) {
         return float3(0.0);
     }
     const float density = ls.pdf * choice.probability;
@@ -372,7 +384,7 @@ void tracePaths(uint3 group: SV_GroupID, uint index: SV_GroupIndex) {
     // depend on the sample, and each path casts its own; the aux then carry
     // the first sample's hit.
     const bool ownRays = kTraces && path.ownRays != 0;
-    const Shaded first = ownRays ? shadeLensSample(tid, 0u) : shadeAt(tid, seen);
+    const Shaded first = ownRays ? shadeLensSample(tid, 0u, sampleMask(tid, 0u)) : shadeAt(tid, seen);
     if (path.writeAux != 0) {
         auxAlbedo[at] = first.valid ? float4(stackAlbedo(first.stack, first.toEye), 1.0) : float4(0.0);
         auxNormal[at] = first.valid ? float4(first.inputs.normalWorld, 1.0) : float4(0.0);
@@ -382,7 +394,8 @@ void tracePaths(uint3 group: SV_GroupID, uint index: SV_GroupIndex) {
     float  hitDepth = 0.0;
     float  squares = 0.0;   // sum of each sample's luminance squared
     for (uint sample = 0; sample < samples && (first.valid || ownRays); ++sample) {
-        Shaded sh = ownRays && sample > 0 ? shadeLensSample(tid, sample) : first;
+        const uint mask = sampleMask(tid, sample);
+        Shaded sh = ownRays && sample > 0 ? shadeLensSample(tid, sample, mask) : first;
         if (!sh.valid) {
             continue;   // a lens ray that found nothing: transparent, and counted
         }
@@ -391,7 +404,7 @@ void tracePaths(uint3 group: SV_GroupID, uint index: SV_GroupIndex) {
         // the path finds, and it is this surface's opacity the pixel carries.
         const float opacity = sh.stack.opacity;
         alpha += opacity;
-        float3 carried = sh.stack.emission + gatherLight(sh, tid, sample, 0u);
+        float3 carried = sh.stack.emission + gatherLight(sh, tid, sample, 0u, mask);
         float3 throughput = float3(1.0);
         // The bounces. Each one samples the material, traces where it points,
         // and gathers that surface's light through what the path has kept.
@@ -412,7 +425,8 @@ void tracePaths(uint3 group: SV_GroupID, uint index: SV_GroupIndex) {
             const float3 n = sh.inputs.normalWorld;
             const float scale = max(1.0, length(p));
             const float3 away = dot(n, ms.wi) < 0.0 ? -n : n;
-            const PathHit hit = traceNearestFrom(p + (away + ms.wi) * (1.0e-3 * scale), ms.wi, 1.0e-3 * scale);
+            const PathHit hit =
+                traceNearestFrom(p + (away + ms.wi) * (1.0e-3 * scale), ms.wi, 1.0e-3 * scale, mask);
             if (hit.seen.x == 0) {
                 break;
             }
@@ -423,7 +437,7 @@ void tracePaths(uint3 group: SV_GroupID, uint index: SV_GroupIndex) {
             // What the bounce found: its own emission weighed against the
             // light sampling that could have found it, and its direct light.
             carried += throughput * next.stack.emission;
-            carried += throughput * gatherLight(next, tid, sample, bounce + 1u);
+            carried += throughput * gatherLight(next, tid, sample, bounce + 1u, mask);
             sh = next;
         }
         total += carried * opacity;
@@ -660,10 +674,13 @@ Result<void> PathTracer::trace(gpu::CommandBatch& batch, const VisibilityTargets
         cursor["path"]["adaptive"].setData(uint32_t{settings.adaptive ? 1u : 0u});
         cursor["path"]["errorTarget"].setData(settings.errorTarget);
         cursor["path"]["minSamples"].setData(settings.minSamples);
-        const bool ownRays = !projection.orthographic &&
-                             (projection.lensRadius > 0.0 || projection.distortionK1 != 0.0 ||
-                              projection.distortionK2 != 0.0);
+        const uint32_t buckets = frame.scene != nullptr ? frame.scene->buckets() : 1u;
+        const bool ownRays = (!projection.orthographic &&
+                              (projection.lensRadius > 0.0 || projection.distortionK1 != 0.0 ||
+                               projection.distortionK2 != 0.0)) ||
+                             buckets > 1;
         cursor["path"]["ownRays"].setData(uint32_t{ownRays ? 1u : 0u});
+        cursor["path"]["buckets"].setData(buckets);
         cursor["path"]["lensRadius"].setData(static_cast<float>(projection.lensRadius));
         cursor["path"]["focusDistance"].setData(static_cast<float>(projection.focusDistance));
         cursor["path"]["distortionK1"].setData(static_cast<float>(projection.distortionK1));

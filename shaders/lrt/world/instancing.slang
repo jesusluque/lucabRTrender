@@ -226,7 +226,7 @@ void instanceRecords(uint3 tid: SV_DispatchThreadID) {
     record.flags = set.flags;
     record.categoriesLo = set.categoriesLo;
     record.categoriesHi = set.categoriesHi;
-    record.pad0 = 0;
-    record.pad1 = 0;
+    record.mask = 0xFF;   // still: in every shutter slice
+    record.pointsOffset = 0;
     records[params.first + i] = record;
 }

@@ -1904,6 +1904,96 @@ allows.
 and instances move every frame); a mesh with changed topology still
 repacks every pool, not only its own.
 
+### Motion blur: the shutter in buckets, and time samples from Hydra
+
+**What a bucket is.** Metal has no acceleration structure with motion in
+it, and a ray query cannot be handed a time; so the shutter is cut into
+`buckets` slices (1 to 8), and each slice gets what the scene looks like
+at its centre. One top-level structure holds every slice at once: a moving
+instance appears once per slice, its instance mask one bit (`1 << b`) and
+its transform interpolated to the slice's time; a still instance appears
+once, answering to every bit. A path draws a time per sample, takes the
+slice it falls in, and every ray of that path -- primary, shadow, bounce
+-- traces with that slice's mask. Eight bits of mask are why eight is the
+most. Between the two shutter samples everything is linear: a transform's
+rows (exact for a translation, an approximation for a turn) and a point.
+
+**Where it lives.** `MeshInstance::motion` (`MeshMotion`: the transform at
+the shutter's open and close, and meshes built from the points there when
+it deforms, under the instance's own topology key). `GpuScene::update`
+takes the bucket count; when something moves the records get a copy per
+slice after the frame's own (`motion.slang`: `motionRecords` writes them
+on the device, view and normal matrices included), `tlasFirst`/`tlasCount`
+say which records the structure holds, and the first `instanceCount` stay
+what the rasteriser and the compute BVH draw -- the frame at the frame's
+time, without blur. A deforming mesh's positions are laid out once per
+slice in the pool (`pointsStride` apart, `positionsLerp` between its two
+meshes), its bottom level is built once per slice over that slice's
+positions, and its records carry `pointsOffset` so the surface is rebuilt
+from the slice's positions (`InstanceRecord.mask` and `pointsOffset` took
+the record's two pads). `RayTracingScene` keeps one handle entry a slice a
+mesh, a still mesh's all the same, and `instance_descs` takes the slice
+from the record's mask. The path tracer casts its own primary rays under
+motion, as it does under a lens.
+
+**Checked against the staircase the buckets make** (`motion_check.slang`):
+a uniformly lit plane whose edge slides 57 pixels along x over the
+shutter, so a pixel's coverage is the fraction of slices at whose centre
+the edge is past it. At 1024 samples a pixel and eight slices, 0 of 7381
+pixels beyond 8% of the staircase (worst 5.2%; the coverage's standard
+error is at most 1.6%) -- the same with the plane's points sliding under a
+still transform, which exercises the per-slice positions and bottom levels;
+the same at two slices; and with no motion under eight slices the frame is
+the still frame bit for bit.
+
+**Through Hydra.** The camera's `shutter:open`/`shutter:close` reach the
+delegate through `HdLrtRenderParam` -- set by the pass from the `HdCamera`
+it draws, and by `StageRenderer::aim` from the stage ahead of the first
+Sync, since Sync runs before the pass and a shutter learnt there is a
+frame late; when the pass finds it changed it marks every rprim's
+transform and points dirty. With a shutter open for a while, `HdLrtMesh`
+samples the transform (`SampleTransform`) and the points (`SamplePrimvar`)
+about its open and close as well as at the frame, and the engine builds the
+shutter's meshes under the same topology key. What Hydra hands back are the
+**authored samples that bracket the shutter, at their own times** -- a
+stage with samples at frames 0 and 1 drawn at 0.5 under a shutter of a
+quarter frame either way returns the samples at -0.5 and +0.5 -- not the
+values at the shutter's ends; so each sample's time travels with it
+(`MeshMotion::timeStart`/`timeEnd`, `MeshTransforms`, the points' times)
+and the device places each bucket's centre between them (`bucketFactor`).
+A first version took the two samples for the shutter's ends and blurred
+over the whole frame. `lrt:motionBuckets` (default 4;
+`StageRenderer::setMotionBuckets`, `lrt stage --motion-buckets`) is the
+slice count. Checked with a square sliding between two frames under a
+shutter of half a frame about frame 0.5, path traced in eight slices:
+against the same stage with the shutter closed, relMSE 1.15 with the
+transform sliding and the same 1.15 with the points sliding, the two
+stages being the same motion. (A first version read `shutter:open` as a
+float and got nothing: the attribute is a double.)
+
+**Velocities.** `HdsiVelocityMotionResolvingSceneIndex` is registered
+ahead of the delegate's chain (phase 0, at the start, before light
+linking), so a prim that authors `velocities` and `accelerations` has its
+points and instance positions sampled at any shutter time from them; the
+delegate's sampling above reads the same whether a stage authored samples
+or velocities. Checked: a square with one sample of points and a velocity
+of two units a frame, against the square with the two samples that
+velocity reaches, both under the same shutter -- relMSE 0, bit for bit.
+What the scene index does, measured: it extrapolates from the value the
+frame reads, about the frame's time (`p(frame) + v (t - frame) / tcps`),
+so the velocity stage authors its sample at the frame drawn; a sample at
+frame 0 read at frame 0.5 had been held and then extrapolated about 0.5,
+a frame's worth off the samples.
+
+**Not done.** Instancers' and lights' motion is not sampled (a
+PointInstancer's prototypes and a light stand at the frame's time under a
+shutter); the camera's own motion neither. The raster technique draws the
+frame's time, no blur. A turn between the two shutter samples is
+interpolated as rows, not as a rotation. Two samples only: a shutter that
+spans more than two authored samples takes the outer two. Where a prim's
+transform and points both move at different sample times, the transform's
+times are taken for both.
+
 ## Linux, on the 94 (M11's first half)
 
 ### The first table, after the port was reconciled with engine

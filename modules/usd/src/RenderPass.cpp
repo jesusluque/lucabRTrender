@@ -1,6 +1,8 @@
 // Copyright (c) 2026 lucabRTrender contributors.
 #include "RenderPass.h"
 
+#include "RenderParam.h"
+
 #include <pxr/imaging/hd/camera.h>
 
 #include <algorithm>
@@ -52,6 +54,23 @@ void HdLrtRenderPass::_Execute(HdRenderPassStateSharedPtr const& state, TfTokenV
         if (camera->GetLensDistortionType() == HdCameraTokens->standard) {
             projection.distortionK1 = static_cast<double>(camera->GetLensDistortionK1());
             projection.distortionK2 = static_cast<double>(camera->GetLensDistortionK2());
+        }
+        // The shutter, for Sync to sample at. Sync ran before this pass, so a
+        // change here reaches the prims on the next frame: everything with a
+        // transform or points is marked to sample again.
+        if (auto* param = _delegate != nullptr ? static_cast<HdLrtRenderParam*>(_delegate->GetRenderParam())
+                                               : nullptr;
+            param != nullptr) {
+            const double open = camera->GetShutterOpen();
+            const double close = camera->GetShutterClose();
+            _engine->setShutter(open, close);
+            if (open != param->GetShutterOpen() || close != param->GetShutterClose()) {
+                param->SetShutter(open, close);
+                HdChangeTracker& tracker = GetRenderIndex()->GetChangeTracker();
+                for (const SdfPath& id : GetRenderIndex()->GetRprimIds()) {
+                    tracker.MarkRprimDirty(id, HdChangeTracker::DirtyTransform | HdChangeTracker::DirtyPoints);
+                }
+            }
         }
     }
 
@@ -122,6 +141,7 @@ void HdLrtRenderPass::_Execute(HdRenderPassStateSharedPtr const& state, TfTokenV
         _engine->setDenoise(_delegate->GetDenoise());
         _engine->setPathAdaptive(_delegate->GetPathAdaptive());
         _engine->setPathError(_delegate->GetPathError());
+        _engine->setMotionBuckets(_delegate->GetMotionBuckets());
     }
     if (auto drawn =
             _engine->render(projection, settings, *_targets, technique, settle, &renderTags, request, visibility);

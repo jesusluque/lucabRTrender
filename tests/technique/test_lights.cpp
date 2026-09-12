@@ -43,13 +43,15 @@ std::filesystem::path scratch(const std::string& name) {
     return dir / name;
 }
 
-std::shared_ptr<const geom::GpuMesh> lambertSquare(geom::MeshBuilder& builder, float half) {
+std::shared_ptr<const geom::GpuMesh> lambertSquare(geom::MeshBuilder& builder, float half, float shiftX = 0.0F,
+                                                   uint64_t topology = 0) {
     static std::vector<float> points;
-    points = {-half, -half, 0, half, -half, 0, half, half, 0, -half, half, 0};
+    points = {-half + shiftX, -half, 0, half + shiftX, -half, 0, half + shiftX, half, 0, -half + shiftX, half, 0};
     static const std::vector<int32_t> counts{4};
     static const std::vector<int32_t> indices{0, 1, 2, 3};
     geom::MeshInput in;
     in.source = "square";
+    in.topology = topology;
     in.points = {std::as_bytes(std::span<const float>(points)), false};
     in.faceVertexCounts = counts;
     in.faceVertexIndices = indices;
@@ -3023,8 +3025,18 @@ struct LensFrame {
     uint32_t    height = 0;
 };
 
+/// The plane moves `motionShiftX` along x over the shutter when that is not
+/// 0: as a transform (rigid) or, `deform`, as its points under the same
+/// transform; drawn in `buckets` shutter slices.
+struct PlaneMotion {
+    double   shiftX = 0.0;
+    bool     deform = false;
+    uint32_t buckets = 1;
+};
+
 LensFrame renderLensPlane(test::Gpu& gpu, const render::Projection& projection, uint32_t w, uint32_t h,
-                          double planeZ, double half, double rightEdgeX, uint32_t samples) {
+                          double planeZ, double half, double rightEdgeX, uint32_t samples,
+                          PlaneMotion motion = {}) {
     std::vector<std::filesystem::path> shaderPaths;
     for (const std::string& path : gpu.device->shaderSearchPaths()) {
         shaderPaths.emplace_back(path);
@@ -3069,10 +3081,21 @@ LensFrame renderLensPlane(test::Gpu& gpu, const render::Projection& projection, 
     REQUIRE(records);
     REQUIRE(blobBuffer);
     world::MeshInstance instance;
-    instance.mesh = lambertSquare(*builder, static_cast<float>(half));
+    instance.mesh = lambertSquare(*builder, static_cast<float>(half), 0.0F, 11);
     instance.objectToWorld = aofx::xform::translation({rightEdgeX - half, 0.0, planeZ});
     instance.material = 1;
-    REQUIRE(scene->update(std::span<const world::MeshInstance>(&instance, 1), projection));
+    if (motion.shiftX != 0.0 || motion.buckets > 1) {
+        world::MeshMotion m;
+        m.objectToWorldStart = instance.objectToWorld;
+        if (motion.deform) {
+            m.objectToWorldEnd = instance.objectToWorld;
+            m.meshEnd = lambertSquare(*builder, static_cast<float>(half), static_cast<float>(motion.shiftX), 11);
+        } else {
+            m.objectToWorldEnd = aofx::xform::translation({rightEdgeX - half + motion.shiftX, 0.0, planeZ});
+        }
+        instance.motion = m;
+    }
+    REQUIRE(scene->update(std::span<const world::MeshInstance>(&instance, 1), projection, {}, motion.buckets));
     REQUIRE(accel->build(*scene));
     // A sun down -z: the plane faces +z, so its irradiance is uniform.
     light::Light sun;
@@ -3230,4 +3253,84 @@ TEST_CASE("radial lens distortion puts the edge of a plane where the distorted r
     CHECK(c[0] == h);
     CHECK(c[3] > h / 2);
     CHECK(c[1] == 0);
+}
+
+// Motion blur, against the staircase its buckets make. The plane's edge
+// slides along x over the shutter -- as a transform, and as its points under
+// a still transform -- and every pixel the edge crosses must read the
+// fraction of buckets at whose centre the edge is past it. Then two buckets
+// (linear between the shutter samples, exact for a translation), and no
+// motion at all under eight buckets, which must be the still frame.
+TEST_CASE("motion blur places a sliding edge at each shutter bucket's centre, rigid and deforming alike",
+          "[technique][path][motion]") {
+    LRT_REQUIRE_GPU(gpu);
+    const gpu::Caps& caps = gpu->device->caps();
+    if (!caps.rasterization || !caps.rayQuery || !caps.accelerationStructure) {
+        SKIP("needs rasterisation and ray queries");
+    }
+    const uint32_t w = 161;
+    const uint32_t h = 121;
+    render::Camera camera = render::Camera::lookingAt({0.0, 0.0, 0.0}, {0.0, 0.0, -1.0});
+    camera.lens.focal = 35.0;
+    const render::Projection projection = render::projectionFor(camera, w, h);
+    const double z = 4.0;
+    const double edgeX = -0.6;
+    const double shift = 1.0;   // world units over the shutter: 57 pixels
+    auto made = gpu::ComputeKernel::create(*gpu->library, "lrt/test/motion_check", "motionEdge");
+    if (!made) FAIL(made.error().toString());
+    const auto check = [&](const LensFrame& frame, uint32_t buckets, float tolerance, const char* what) {
+        gpu::Buffer counts = test::uintBuffer(*gpu->device, 2, "motion.counts");
+        gpu::Buffer worst = test::uintBuffer(*gpu->device, 1, "motion.worst");
+        const float edge0 = static_cast<float>(projection.centreX + projection.focalX * edgeX / z);
+        const float edge1 = static_cast<float>(projection.centreX + projection.focalX * (edgeX + shift) / z);
+        {
+            gpu::CommandBatch batch(*gpu->device);
+            made->dispatch(batch, {1, 1, 1}, [&](rhi::ShaderCursor cursor) {
+                cursor["image"].setBinding(frame.colour.rhi());
+                cursor["counts"].setBinding(counts.rhi());
+                cursor["worst"].setBinding(worst.rhi());
+                rhi::ShaderCursor m = cursor["motion"];
+                m["width"].setData(w);
+                m["height"].setData(h);
+                m["edge0"].setData(edge0);
+                m["edge1"].setData(edge1);
+                m["buckets"].setData(buckets);
+                m["plateau"].setData(static_cast<float>(edge0 - 6.0));
+                m["tolerance"].setData(tolerance);
+            });
+            REQUIRE(batch.submit(true));
+        }
+        uint32_t c[2] = {0, 0};
+        float e = 0.0F;
+        REQUIRE(counts.read(*gpu->device, 0, sizeof(c), c));
+        REQUIRE(worst.read(*gpu->device, 0, sizeof(e), &e));
+        std::printf("  %s, %u buckets: edge from column %.1f to %.1f, %u pixels checked, %u beyond %.0f%% of the "
+                    "staircase, worst %.4f\n",
+                    what, buckets, edge0, edge1, c[0], c[1], tolerance * 100.0F, static_cast<double>(e));
+        CHECK(c[0] > 2000);
+        CHECK(c[1] == 0);
+    };
+    // 1024 samples: a coverage's standard error is at most 0.5 / 32; five of those.
+    {
+        const LensFrame rigid = renderLensPlane(*gpu, projection, w, h, -z, 8.0, edgeX, 1024, {shift, false, 8});
+        test::dumpPpm(*gpu, "motion_rigid", rigid.colour, w, h);
+        check(rigid, 8, 0.08F, "rigid translation");
+    }
+    {
+        const LensFrame deforming = renderLensPlane(*gpu, projection, w, h, -z, 8.0, edgeX, 1024, {shift, true, 8});
+        check(deforming, 8, 0.08F, "deforming points");
+    }
+    {
+        const LensFrame two = renderLensPlane(*gpu, projection, w, h, -z, 8.0, edgeX, 1024, {shift, false, 2});
+        check(two, 2, 0.08F, "rigid translation");
+    }
+    {
+        const LensFrame still = renderLensPlane(*gpu, projection, w, h, -z, 8.0, edgeX, 16);
+        const LensFrame bucketed = renderLensPlane(*gpu, projection, w, h, -z, 8.0, edgeX, 16, {0.0, false, 8});
+        auto diff = render::compareHdr(*gpu->library, still.colour, bucketed.colour, w, h);
+        REQUIRE(diff);
+        std::printf("  no motion under 8 buckets against the still frame: relMSE %.2e, max relative %.2e\n",
+                    diff->relMse, diff->maxRelative);
+        CHECK(diff->relMse < 1e-8);
+    }
 }

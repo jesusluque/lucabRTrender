@@ -92,6 +92,13 @@ struct MeshEntry {
     std::shared_ptr<const geom::GpuMesh>   gpu;
     uint64_t                               topologyKey = 0;   ///< the key its GpuMesh was built with
     render::Mat4                           objectToWorld = render::Mat4::identity();
+    /// Motion blur: the prim at the shutter's open and close, where they
+    /// differ from the frame -- transforms, and meshes built from the points
+    /// there under the same topology key.
+    MeshTransforms                         shutter;
+    pxr::VtValue                           pendingStart, pendingEnd;   ///< points to build gpuStart/gpuEnd from
+    double                                 pointsTimeStart = 0.0, pointsTimeEnd = 0.0;
+    std::shared_ptr<const geom::GpuMesh>   gpuStart, gpuEnd;
     MeshLook                               look;
     std::vector<pxr::SdfPath>              subsetMaterials;   ///< per GeomSubset the mesh was built with
     uint32_t                               primId = 0;
@@ -183,7 +190,8 @@ public:
     void setMesh(const pxr::SdfPath& id, int32_t primId, const pxr::TfToken& renderTag,
                  std::optional<MeshArrays> arrays, const render::Mat4* transform, std::optional<bool> visible,
                  std::optional<MeshLook> look,
-                 std::optional<std::vector<InstancerLink>> instancing = std::nullopt);
+                 std::optional<std::vector<InstancerLink>> instancing = std::nullopt,
+                 std::optional<MeshTransforms> shutter = std::nullopt);
     /// A material's network as a MaterialX document (null where hdMtlx could not
     /// read it: its meshes show displayColor). Compiled at the next commit.
     void setMaterial(const pxr::SdfPath& id, std::shared_ptr<void> mtlxDocument);
@@ -204,6 +212,12 @@ public:
     /// frame affords.
     void setPathSamples(uint32_t samples);
     void setPathBounces(uint32_t bounces);
+    /// Motion blur's shutter slices (1 to 8) for a path traced frame whose
+    /// prims move over the camera's shutter; one is no blur.
+    void setMotionBuckets(uint32_t buckets);
+    /// The camera's shutter, in frames about the frame: what the buckets
+    /// span, and what the prims' samples are placed against.
+    void setShutter(double open, double close);
     /// Paths a pixel at which a path traced frame is finished. One -- the
     /// default -- is a frame that never accumulates, which is what a viewport
     /// showing a moving camera wants.
@@ -321,6 +335,9 @@ private:
     std::atomic<bool>                         chooseLights_{false};
     std::atomic<uint32_t>                     pathSamples_{1};
     std::atomic<uint32_t>                     pathBounces_{1};
+    std::atomic<uint32_t>                     motionBuckets_{4};
+    std::atomic<double>                       shutterOpen_{0.0};
+    std::atomic<double>                       shutterClose_{0.0};
     std::atomic<uint32_t>                     pathTotal_{1};
     std::atomic<bool>                         pathAdaptive_{false};
     std::atomic<float>                        pathError_{0.02F};

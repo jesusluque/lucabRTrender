@@ -28,9 +28,28 @@ class ShaderLibrary;
 
 namespace lrt::world {
 
+/// Where an instance is at the shutter's open and close, when it moves: its
+/// transforms there, and its meshes built from the points there (the same
+/// topology key and layout as its own, or they are ignored) when it
+/// deforms; a null mesh is the instance's own. The instance's own transform
+/// and mesh stay what the frame draws without blur.
+struct MeshMotion {
+    render::Mat4                         objectToWorldStart = render::Mat4::identity();
+    render::Mat4                         objectToWorldEnd = render::Mat4::identity();
+    std::shared_ptr<const geom::GpuMesh> meshStart;
+    std::shared_ptr<const geom::GpuMesh> meshEnd;
+    /// When the start and the end are, in the units the shutter is given in
+    /// (Hydra hands the authored samples about the shutter, not the
+    /// shutter's own ends; the device interpolates between them to each
+    /// bucket's time).
+    double                               timeStart = 0.0;
+    double                               timeEnd = 1.0;
+};
+
 struct MeshInstance {
     std::shared_ptr<const geom::GpuMesh> mesh;
     render::Mat4                         objectToWorld = render::Mat4::identity();
+    std::optional<MeshMotion>            motion;
     uint32_t                             primId = 0;       ///< the primId AOV
     uint32_t                             instanceId = 0;   ///< the instanceId AOV
     std::array<float, 3>                 displayColor{0.18F, 0.18F, 0.18F};
@@ -73,10 +92,25 @@ public:
 
     /// This frame's instances, seen from `projection`. Instances of the same
     /// mesh become consecutive records (one draw each run).
+    /// With `buckets` above one, the shutter is cut into that many slices
+    /// and the records and positions get a copy per slice (motion.slang):
+    /// `tlasFirst`/`tlasCount` say which records a ray tracing structure
+    /// holds, each answering to its slice's mask bit; the first
+    /// `instanceCount` records are the frame's own, at the open, which the
+    /// rasteriser and the compute BVH draw.
     [[nodiscard]] Result<void> update(std::span<const MeshInstance> instances, const render::Projection& projection,
-                                      std::span<const InstanceSet> sets = {});
+                                      std::span<const InstanceSet> sets = {}, uint32_t buckets = 1,
+                                      double shutterOpen = 0.0, double shutterClose = 1.0);
 
     [[nodiscard]] uint32_t instanceCount() const noexcept { return instanceCount_; }
+    [[nodiscard]] uint32_t buckets() const noexcept { return buckets_; }
+    /// The records a ray tracing structure is built over.
+    [[nodiscard]] uint32_t tlasFirst() const noexcept { return tlasFirst_; }
+    [[nodiscard]] uint32_t tlasCount() const noexcept { return tlasCount_; }
+    /// Positions a bucket apart in the pool, for a mesh that deforms.
+    [[nodiscard]] uint32_t pointsStride() const noexcept { return pointsStride_; }
+    /// Whether mesh `m` has positions per bucket (an instance of it deforms).
+    [[nodiscard]] bool meshDeforms(uint32_t m) const { return deforms_[m]; }
     /// The world box around every instance's mesh box, folded on the device;
     /// nothing when the scene is empty.
     [[nodiscard]] Result<std::optional<scene::Bounds>> worldBounds() const;
@@ -128,6 +162,13 @@ private:
     [[nodiscard]] static bool sameLayout(const geom::GpuMesh& a, const geom::GpuMesh& b) noexcept;
     uint64_t                                           positionsRevision_ = 0;
     std::vector<uint64_t>                              meshRevisions_;
+    uint32_t                                           buckets_ = 1;
+    uint32_t                                           tlasFirst_ = 0;
+    uint32_t                                           tlasCount_ = 0;
+    uint32_t                                           pointsStride_ = 0;
+    std::vector<bool>                                  deforms_;   ///< per mesh: positions per bucket
+    gpu::ComputeKernel                                 motionRecords_, positionsLerp_;
+    gpu::Buffer                                        motionInputs_;
     std::vector<uint64_t>                              primvarValueBase_;   ///< per mesh: its first value in primvarValues_
 
     gpu::Device*                                       device_ = nullptr;

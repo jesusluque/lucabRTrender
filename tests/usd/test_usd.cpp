@@ -2706,3 +2706,153 @@ TEST_CASE("time sampled points deform a mesh in place through Hydra, and every r
     CHECK(rays->over2 < uint64_t{w} * h / 50);
     CHECK(bvh->over2 < uint64_t{w} * h / 50);
 }
+
+// Motion blur through Hydra: a square sliding between two frames under a
+// camera whose shutter is open about the frame, path traced in eight
+// slices. The blurred frame differs from the frame the same stage gives
+// with the shutter closed; and the same with the square's points sliding
+// instead of its transform. The staircase itself is checked in the
+// technique; here the shutter, the samples and the buckets have to arrive.
+TEST_CASE("a camera's shutter blurs a moving mesh through Hydra, rigid and deforming",
+          "[usd][gpu][mesh][path][motion]") {
+    LRT_REQUIRE_GPU(gpu);
+    const gpu::Caps& caps = gpu->device->caps();
+    if (!caps.rasterization || !caps.rayQuery || !caps.accelerationStructure) {
+        SKIP("needs rasterisation and ray queries");
+    }
+    const std::string sun =
+        "def DistantLight \"Sun\"\n{\n    float inputs:intensity = 3\n    bool inputs:shadow:enable = 0\n}\n";
+    const auto stageWith = [&](const char* name, bool shutter, bool deform) {
+        const fs::path path = scratch(name);
+        std::ofstream out(path);
+        out << "#usda 1.0\n(\n    upAxis = \"Y\"\n    startTimeCode = 0\n    endTimeCode = 1\n)\n"
+               "def Mesh \"Square\"\n{\n"
+               "    int[] faceVertexCounts = [4]\n"
+               "    int[] faceVertexIndices = [0, 1, 2, 3]\n";
+        if (deform) {
+            out << "    point3f[] points.timeSamples = {\n"
+                   "        0: [(-1.5, -1, -5), (-0.5, -1, -5), (-0.5, 1, -5), (-1.5, 1, -5)],\n"
+                   "        1: [(0.5, -1, -5), (1.5, -1, -5), (1.5, 1, -5), (0.5, 1, -5)],\n    }\n";
+        } else {
+            out << "    point3f[] points = [(-0.5, -1, -5), (0.5, -1, -5), (0.5, 1, -5), (-0.5, 1, -5)]\n"
+                   "    double3 xformOp:translate.timeSamples = {\n        0: (-1, 0, 0),\n        1: (1, 0, 0),\n    }\n"
+                   "    uniform token[] xformOpOrder = [\"xformOp:translate\"]\n";
+        }
+        out << "    uniform token subdivisionScheme = \"none\"\n"
+               "    color3f[] primvars:displayColor = [(0.8, 0.8, 0.8)] ( interpolation = \"constant\" )\n}\n"
+               "def Camera \"Camera\"\n{\n"
+               "    float focalLength = 35\n"
+               "    float horizontalAperture = 24.576\n    float verticalAperture = 18.432\n"
+               "    float2 clippingRange = (0.1, 1000)\n";
+        if (shutter) {
+            out << "    double shutter:open = -0.25\n    double shutter:close = 0.25\n";
+        }
+        out << "}\n" << sun;
+        return path;
+    };
+    const uint32_t w = 160;
+    const uint32_t h = 121;
+    const auto frame = [&](const fs::path& path) {
+        auto renderer = usd::StageRenderer::open(path);
+        if (!renderer) FAIL(renderer.error().toString());
+        (*renderer)->setPathSamples(64);
+        (*renderer)->setPathTotal(64);
+        (*renderer)->setPathBounces(0);
+        (*renderer)->setMotionBuckets(8);
+        auto image = (*renderer)->render("/Camera", 0.5, w, h, "rt");
+        if (!image) FAIL(image.error().toString());
+        gpu::BufferDesc desc;
+        desc.bytes = image->rgba.size() * sizeof(float);
+        desc.elementBytes = 16;
+        auto buffer = gpu::Buffer::create(*gpu->device, desc, image->rgba.data());
+        REQUIRE(buffer);
+        return *buffer;
+    };
+    for (const bool deform : {false, true}) {
+        const gpu::Buffer sharp = frame(stageWith(deform ? "blur_points_closed.usda" : "blur_closed.usda", false, deform));
+        const gpu::Buffer blurred = frame(stageWith(deform ? "blur_points_open.usda" : "blur_open.usda", true, deform));
+        auto diff = render::compareHdr(*gpu->library, sharp, blurred, w, h);
+        REQUIRE(diff);
+        std::vector<float> blank(static_cast<size_t>(w) * h * 4, 0.0F);
+        gpu::BufferDesc desc;
+        desc.bytes = blank.size() * sizeof(float);
+        desc.elementBytes = 16;
+        auto blankBuffer = gpu::Buffer::create(*gpu->device, desc, blank.data());
+        REQUIRE(blankBuffer);
+        auto drawn = render::compareHdr(*gpu->library, blurred, *blankBuffer, w, h);
+        REQUIRE(drawn);
+        std::printf("  %s through Hydra: shutter open against closed relMSE %.2e (blurred frame against blank %.2e)\n",
+                    deform ? "sliding points" : "sliding transform", diff->relMse, drawn->relMse);
+        CHECK(drawn->relMse > 1.0);
+        CHECK(diff->relMse > 1e-2);
+    }
+}
+
+// Velocities: a mesh that authors one sample of points and `velocities`
+// must blur as one that authors the two samples those velocities reach --
+// UsdGeom's velocity interpolation, resolved by hdsi's scene index ahead
+// of the delegate, so the shutter samples read the same either way.
+TEST_CASE("authored velocities blur a mesh as the equivalent time samples do", "[usd][gpu][mesh][path][motion][velocity]") {
+    LRT_REQUIRE_GPU(gpu);
+    const gpu::Caps& caps = gpu->device->caps();
+    if (!caps.rasterization || !caps.rayQuery || !caps.accelerationStructure) {
+        SKIP("needs rasterisation and ray queries");
+    }
+    // 24 time codes a second: a velocity of 48 units a second slides the
+    // square 2 units a frame, from x -1 at frame 0 to x 1 at frame 1. The
+    // velocity stage authors its one sample at the frame drawn, 0.5: the
+    // scene index extrapolates from the sample the frame reads.
+    const auto stageWith = [&](const char* name, bool velocities) {
+        const fs::path path = scratch(name);
+        std::ofstream out(path);
+        out << "#usda 1.0\n(\n    upAxis = \"Y\"\n    startTimeCode = 0\n    endTimeCode = 1\n"
+               "    timeCodesPerSecond = 24\n)\n"
+               "def Mesh \"Square\"\n{\n"
+               "    int[] faceVertexCounts = [4]\n"
+               "    int[] faceVertexIndices = [0, 1, 2, 3]\n";
+        if (velocities) {
+            out << "    point3f[] points.timeSamples = {\n"
+                   "        0.5: [(-0.5, -1, -5), (0.5, -1, -5), (0.5, 1, -5), (-0.5, 1, -5)],\n    }\n"
+                   "    vector3f[] velocities.timeSamples = {\n"
+                   "        0.5: [(48, 0, 0), (48, 0, 0), (48, 0, 0), (48, 0, 0)],\n    }\n";
+        } else {
+            out << "    point3f[] points.timeSamples = {\n"
+                   "        0: [(-1.5, -1, -5), (-0.5, -1, -5), (-0.5, 1, -5), (-1.5, 1, -5)],\n"
+                   "        1: [(0.5, -1, -5), (1.5, -1, -5), (1.5, 1, -5), (0.5, 1, -5)],\n    }\n";
+        }
+        out << "    uniform token subdivisionScheme = \"none\"\n"
+               "    color3f[] primvars:displayColor = [(0.8, 0.8, 0.8)] ( interpolation = \"constant\" )\n}\n"
+               "def Camera \"Camera\"\n{\n"
+               "    float focalLength = 35\n"
+               "    float horizontalAperture = 24.576\n    float verticalAperture = 18.432\n"
+               "    float2 clippingRange = (0.1, 1000)\n"
+               "    double shutter:open = -0.25\n    double shutter:close = 0.25\n}\n"
+               "def DistantLight \"Sun\"\n{\n    float inputs:intensity = 3\n    bool inputs:shadow:enable = 0\n}\n";
+        return path;
+    };
+    const uint32_t w = 160;
+    const uint32_t h = 121;
+    const auto frame = [&](const fs::path& path) {
+        auto renderer = usd::StageRenderer::open(path);
+        if (!renderer) FAIL(renderer.error().toString());
+        (*renderer)->setPathSamples(64);
+        (*renderer)->setPathTotal(64);
+        (*renderer)->setPathBounces(0);
+        (*renderer)->setMotionBuckets(8);
+        auto image = (*renderer)->render("/Camera", 0.5, w, h, "rt");
+        if (!image) FAIL(image.error().toString());
+        gpu::BufferDesc desc;
+        desc.bytes = image->rgba.size() * sizeof(float);
+        desc.elementBytes = 16;
+        auto buffer = gpu::Buffer::create(*gpu->device, desc, image->rgba.data());
+        REQUIRE(buffer);
+        return *buffer;
+    };
+    const gpu::Buffer sampled = frame(stageWith("velocity_samples.usda", false));
+    const gpu::Buffer velocities = frame(stageWith("velocity_authored.usda", true));
+    auto diff = render::compareHdr(*gpu->library, sampled, velocities, w, h);
+    REQUIRE(diff);
+    std::printf("  velocities against the equivalent samples: relMSE %.2e, max relative %.2e\n", diff->relMse,
+                diff->maxRelative);
+    CHECK(diff->relMse < 1e-6);
+}

@@ -35,9 +35,10 @@ public MaterialInputs materialInputsAt(CameraParams camera, ViewToWorld toWorld,
                                       float time) {
     MaterialInputs inputs;
     const InstanceRecord r = s.instance;
-    const float3 objectA = positions[s.mesh.firstPoint + s.points.x].xyz;
-    const float3 objectB = positions[s.mesh.firstPoint + s.points.y].xyz;
-    const float3 objectC = positions[s.mesh.firstPoint + s.points.z].xyz;
+    const uint base = s.mesh.firstPoint + s.instance.pointsOffset;
+    const float3 objectA = positions[base + s.points.x].xyz;
+    const float3 objectB = positions[base + s.points.y].xyz;
+    const float3 objectC = positions[base + s.points.z].xyz;
     inputs.positionObject = objectA * s.weights.x + objectB * s.weights.y + objectC * s.weights.z;
     inputs.positionWorld = applyRows(toWorld, s.viewPosition, 1.0);
     inputs.viewPosition = applyRows(toWorld, float3(0.0), 1.0);

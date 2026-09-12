@@ -74,12 +74,18 @@ Result<void> RayTracingScene::build(const GpuScene& scene, bool refit) {
         meshRevisions_.clear();
         uint64_t updateScratch = 0;
         std::vector<uint32_t> handles;
+        // One structure a mesh, or one a bucket for a mesh that deforms; the
+        // handle table has an entry a bucket either way, a still mesh's all
+        // the same.
+        const uint32_t buckets = scene.buckets();
         for (uint32_t m = 0; m < scene.meshCount(); ++m) {
             const geom::GpuMesh& mesh = scene.mesh(m);
+            const uint32_t copies = scene.meshDeforms(m) ? buckets : 1;
+            for (uint32_t b = 0; b < copies; ++b) {
             rhi::AccelerationStructureBuildInput input = {};
             input.type = rhi::AccelerationStructureBuildInputType::Triangles;
-            input.triangles.vertexBuffers[0] =
-                rhi::BufferOffsetPair(scene.positions().rhi(), uint64_t{scene.firstPoint(m)} * 16);
+            input.triangles.vertexBuffers[0] = rhi::BufferOffsetPair(
+                scene.positions().rhi(), (uint64_t{b} * scene.pointsStride() + scene.firstPoint(m)) * 16);
             input.triangles.vertexBufferCount = 1;
             input.triangles.vertexFormat = rhi::Format::RGB32Float;
             input.triangles.vertexCount = mesh.points;
@@ -99,11 +105,15 @@ Result<void> RayTracingScene::build(const GpuScene& scene, bool refit) {
                                        &updateScratch);
             if (!made) return std::move(made).error();
             const uint64_t handle = (*made)->getHandle().value;
-            handles.push_back(static_cast<uint32_t>(handle));
-            handles.push_back(static_cast<uint32_t>(handle >> 32));
+            for (uint32_t h = 0; h < (copies == 1 ? buckets : 1u); ++h) {
+                handles.push_back(static_cast<uint32_t>(handle));
+                handles.push_back(static_cast<uint32_t>(handle >> 32));
+            }
             bottom_.push_back(std::move(*made));
             bottomInputs_.push_back(input);
+            bottomMesh_.push_back(m);
             meshRevisions_.push_back(scene.meshRevision(m));
+            }
         }
         auto scratch = deviceBuffer(device, updateScratch, 1, "scene.as.updateScratch");
         if (!scratch) return std::move(scratch).error();
@@ -116,26 +126,27 @@ Result<void> RayTracingScene::build(const GpuScene& scene, bool refit) {
     } else if (refit) {
         // The pools stand; a mesh deformed in place refits its structure over
         // the same triangles -- one submit each, since they share the scratch.
-        for (uint32_t m = 0; m < scene.meshCount(); ++m) {
-            if (scene.meshRevision(m) == meshRevisions_[m]) {
+        for (uint32_t s = 0; s < bottom_.size(); ++s) {
+            const uint32_t m = bottomMesh_[s];
+            if (scene.meshRevision(m) == meshRevisions_[s]) {
                 continue;
             }
             rhi::AccelerationStructureBuildDesc build;
-            build.inputs = &bottomInputs_[m];
+            build.inputs = &bottomInputs_[s];
             build.inputCount = 1;
             build.mode = rhi::AccelerationStructureBuildMode::Update;
             build.flags = rhi::AccelerationStructureBuildFlags::PreferFastTrace |
                           rhi::AccelerationStructureBuildFlags::AllowUpdate;
             gpu::CommandBatch batch(device);
-            batch.encoder()->buildAccelerationStructure(build, bottom_[m], bottom_[m],
+            batch.encoder()->buildAccelerationStructure(build, bottom_[s], bottom_[s],
                                                         rhi::BufferOffsetPair(updateScratch_.rhi(), 0), 0, nullptr);
             batch.markDirty();
             LRT_TRY(batch.submit(true));
-            meshRevisions_[m] = scene.meshRevision(m);
+            meshRevisions_[s] = scene.meshRevision(m);
         }
     }
 
-    const uint32_t count = scene.instanceCount();
+    const uint32_t count = scene.tlasCount();
     const auto type = rhi::getAccelerationStructureInstanceDescType(device.rhi());
     const size_t stride = rhi::getAccelerationStructureInstanceDescSize(type);
     const uint32_t layout = type == rhi::AccelerationStructureInstanceDescType::Metal   ? 2u
@@ -154,6 +165,8 @@ Result<void> RayTracingScene::build(const GpuScene& scene, bool refit) {
             cursor["handles"].setBinding(handles_.rhi());
             cursor["descs"].setBinding(instanceDescs_.rhi());
             cursor["params"]["count"].setData(count);
+            cursor["params"]["base"].setData(scene.tlasFirst());
+            cursor["params"]["buckets"].setData(scene.buckets());
             cursor["params"]["layout"].setData(layout);
             cursor["params"]["words"].setData(static_cast<uint32_t>(stride / 4));
             // Counter-clockwise is the front, as USD's right-handed meshes
