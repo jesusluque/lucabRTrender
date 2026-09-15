@@ -3494,8 +3494,8 @@ backend, computed there; no pixels travel between them.
 |---|---|---|---|
 | Cases | 188 | 188 | 188 |
 | Passed | 188 | 180 | 96 |
-| Failed | 0 | 0 | 2 |
-| Skipped, with reason | 0 | 8 | 90 |
+| Failed | 0 | 0 | 1 |
+| Skipped, with reason | 0 | 8 | 91 |
 
 **Vulkan's eight skips** are the host's and the hardware's, not the
 renderer's: the Metal-only tracked buffer, `lrt view`'s window on a headless
@@ -3506,7 +3506,7 @@ lights, motion, skinning, subdivision, curves, volumes, render settings,
 Kitchen_set against Storm through EGL, OCIO and the denoiser -- passes on the
 L4 exactly as on Metal.
 
-**CUDA's 90 skips** are what a device without rasterisation and without
+**CUDA's 91 skips** are what a device without rasterisation and without
 OptiX cannot answer: 47 "no rasterisation on this device", the rest needing
 rasterisation and ray queries together (motion, volumes, the lens, light
 linking, the Storm oracle, the host's engine), plus points as discs, the
@@ -3517,6 +3517,8 @@ capability in its skip message.
 closures, which "Open on this backend" describes. The run before this one
 had a second: the layers case composites rasterised passes and said "the
 render pass drew nothing" instead of skipping; it names the capability now.
+Measured with `LRT_BACKEND=vulkan|cuda scripts/remote-test.sh` at commit
+2bf4589, and `ctest --preset macos-arm64-debug` on the Mac.
 
 ### Vulkan on the L4
 
