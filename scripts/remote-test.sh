@@ -25,19 +25,24 @@ mkdir -p "build/remote/${preset}"
 scp -q "${host}:${remote_dir}/build/${preset}/Testing/Temporary/LastTest.log" "build/remote/${preset}/LastTest.log" || true
 
 # The table: one line a test, with the skip's reason from the log.
-python3 - "$@" <<'PY'
+python3 - "${preset}" <<'PY2'
 import re, sys
+preset = sys.argv[1]
 lines = open('/tmp/lrt-remote-ctest.txt', encoding='utf-8', errors='replace').read().splitlines()
 try:
-    log = open('build/remote/' + (sys.argv[2] if len(sys.argv) > 2 else 'linux-x86_64-debug') + '/LastTest.log', encoding='utf-8', errors='replace').read()
+    log = open(f'build/remote/{preset}/LastTest.log', encoding='utf-8', errors='replace').read()
 except OSError:
     log = ''
+# LastTest.log opens each test with "N/M Testing: NAME"; Catch2's skip reads
+# "SKIPPED:", "explicitly with message:", then the message indented, wrapped
+# over as many lines as it takes, up to a blank line.
 reasons = {}
-for block in log.split('----------------------------------------------------------'):
-    name = re.search(r'Testing: (.+)', block)
-    skip = re.search(r'SKIPPED:\s*\n(?:explicitly with message:\s*\n)?\s*(.+)', block)
-    if name and skip:
-        reasons[name.group(1).strip()] = skip.group(1).strip()
+blocks = re.split(r'^\d+/\d+ Testing: ', log, flags=re.M)
+for block in blocks[1:]:
+    name, _, body = block.partition('\n')
+    skip = re.search(r'SKIPPED:\s*\n(?:explicitly with message:\s*\n)?((?:[ \t]+\S.*\n?)+)', body)
+    if skip:
+        reasons[name.strip()] = ' '.join(part.strip() for part in skip.group(1).splitlines())
 passed = failed = skipped = 0
 for line in lines:
     m = re.match(r'\s*\d+/\d+ Test\s+#\d+: (.+?) \.+\s*(\**)(Passed|Failed|Skipped|Timeout|Not Run)', line)
@@ -52,5 +57,5 @@ for line in lines:
     else:
         failed += 1
         print(f'  FAILED   {name}')
-print(f'== {passed} passed, {failed} failed, {skipped} skipped with a reason each')
-PY
+print(f'== {passed} passed, {failed} failed, {skipped} skipped')
+PY2

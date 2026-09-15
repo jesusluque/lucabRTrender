@@ -1849,7 +1849,7 @@ radian sun reads 0 of 8281 pixels beyond 2%, worst 0.01%.
   "does this direction reach light k, and with what radiance" beside
   `lightPdf`, which does not exist. Until then the disjointness above is the
   argument, and a weight here would be the defect again.
-## Complete USD: animation and movement (M7, in progress)
+## Complete USD: animation and movement (M7)
 
 ### Deformation in place, and refit instead of rebuild
 
@@ -2940,6 +2940,44 @@ measured above.
   million on the L4, the counter having started from what the device last
   left there -- the same lesson the engine's hole flags taught, arriving in
   the tests.
+
+### The two devices at the end of M9 (commit c94f497)
+
+Parity here means the same GPU-computed metric on each machine,
+computed on that machine; no pixels travel between them.
+
+| | Metal (Apple M5 Pro) | CUDA (NVIDIA L4, no OptiX) |
+|---|---|---|
+| Cases | 168 | 168 |
+| Passed | 167 | 89 |
+| Failed | 1: openFXplayer's bundles are ABI 23, this host speaks 22 | 12, the known ones below |
+| Skipped, with reason | 0 | 67 |
+
+CUDA's 67 skips, by the reason each gives: 43 "no rasterisation on this
+device", 13 "needs rasterisation and ray queries" (two of them "to compare
+all three routes"), 2 "needs both rasterisation and ray queries", 4 points
+drawn as discs because the device does not rasterise, and one each for no
+window session, no openFXplayer build, Kitchen_set not on the machine, a
+Metal-only tracked buffer, chunks being the hardware route's, and one with
+an empty message. Every one names a capability CUDA without OptiX lacks, or
+an asset or host that is not there.
+
+CUDA's 12 failures are the ones "Open on this backend" already explains:
+the float4 store into an 8-bit texture (and what decodes through it: PNG,
+UDIM, the lobes against genglsl, the two Hydra splat cases), and the
+Gaussian ray tracer's six cases. None is new.
+
+New on both devices: `lrt_volume_tests` -- the NanoVDB layout counted
+voxel for voxel, and the medium's Beer-Lambert, majorant and leaf-walk
+checks -- passes on CUDA as on Metal, so PNanoVDB as Slang holds on both.
+The path-traced volume tests need ray queries, so they skip on CUDA.
+
+**Vulkan is not measured.** slang-rhi's Vulkan backend is built on the 94,
+but the machine has only Mesa's Vulkan drivers, and `lvp` (lavapipe) runs
+on the CPU, which is no device for this table. With NVIDIA's Vulkan driver
+(`libnvidia-gl-580-server`) installed, `LRT_BACKEND=vulkan
+scripts/remote-test.sh` runs the same suite on the L4 with rasterisation and
+ray queries -- the column most of CUDA's skips would move to.
 
 ### A note on WebGPU
 
