@@ -48,6 +48,10 @@ struct PathSettings {
     /// With no lights, light the first hit from the eye as the raster's
     /// shading does (what a host asks of a stage without lights).
     bool     headlight = false;
+    /// Weigh next event estimation and the material's sampling of the lights
+    /// by the power heuristic (false: next event estimation alone lights a
+    /// surface, as before MIS; a comparison's other half).
+    bool     mis = true;
 };
 
 /// How much of a frame has converged, for the adaptive gate: pixels the

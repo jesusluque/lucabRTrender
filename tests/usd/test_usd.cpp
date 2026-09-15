@@ -2093,6 +2093,127 @@ TEST_CASE("a stage without lights draws the same under rt as under the raster's 
     CHECK(diff->max <= 1);
 }
 
+// Multiple importance sampling (M6): next event estimation and the
+// material's own sampling, weighed by the power heuristic, on the case that
+// needs both -- a glossy metal floor under a large rect light, whose
+// highlight light sampling alone finds by luck. Two things are checked. That
+// it is the same image: a deep frame with MIS against a deep frame without,
+// within the noise either still carries. And that it is a better estimate of
+// it: at equal paths, the error against the deep frame without MIS falls
+// several times over.
+TEST_CASE("MIS weighs light and material sampling into the same image with less noise on a glossy floor",
+          "[usd][gpu][mesh][path][mis]") {
+    LRT_REQUIRE_GPU(gpu);
+    const gpu::Caps& caps = gpu->device->caps();
+    if (!caps.rasterization || !caps.rayQuery || !caps.accelerationStructure) {
+        SKIP("needs rasterisation and ray queries");
+    }
+    struct Light {
+        const char* name;
+        const char* prim;
+        double      atLeast;   // how many times less error MIS must reach
+        const char* surface = "            float inputs:metallic = 1\n            float inputs:roughness = 0.2\n";
+        /// How far the deep frames may part, over the shallow light-sampling
+        /// frame's error: light sampling of a dome on a glossy floor is heavy
+        /// tailed, and its deep frame carries fireflies that a relative MSE
+        /// weighs by their square -- measured apart by 3.4e-2 at 8192 against
+        /// 32768 paths while MIS at the two agreed to 1.8e-6. Its sameness
+        /// is the rough floor's to show, where light sampling converges.
+        /// Two independent deep frames of 8192 paths part by their summed
+        /// noise, errNee * 32 / 8192 each: errNee / 128, a factor of two
+        /// under the rough floor's bound.
+        double      sameOver = 32.0;
+    };
+    const Light cases[] = {
+        {"rect", "def RectLight \"Panel\"\n{\n"
+                 "    float inputs:intensity = 4\n    float inputs:width = 4\n    float inputs:height = 2\n"
+                 "    double3 xformOp:translate = (0, 2.5, -4)\n"
+                 "    double xformOp:rotateX = -90\n"
+                 "    uniform token[] xformOpOrder = [\"xformOp:translate\", \"xformOp:rotateX\"]\n}\n", 3.0},
+        {"dome", "def DomeLight \"Sky\"\n{\n    float inputs:intensity = 1\n}\n", 3.0,
+         "            float inputs:metallic = 1\n            float inputs:roughness = 0.2\n", 2.0},
+        {"dome, rough", "def DomeLight \"Sky\"\n{\n    float inputs:intensity = 1\n}\n", 0.8,
+         "            float inputs:metallic = 0\n            float inputs:roughness = 1\n", 64.0},
+        {"sphere", "def SphereLight \"Bulb\"\n{\n"
+                   "    float inputs:intensity = 20\n    float inputs:radius = 0.8\n"
+                   "    double3 xformOp:translate = (0, 2.5, -4)\n"
+                   "    uniform token[] xformOpOrder = [\"xformOp:translate\"]\n}\n", 1.5},
+    };
+    for (const Light& light : cases) {
+    std::string file = std::string("mis_") + light.name + ".usda";
+    std::replace(file.begin(), file.end(), ' ', '_');
+    std::replace(file.begin(), file.end(), ',', '_');
+    const fs::path path = scratch(file);
+    {
+        std::ofstream out(path);
+        out << "#usda 1.0\n(\n    upAxis = \"Y\"\n)\n"
+               "def Mesh \"Floor\" (\n    prepend apiSchemas = [\"MaterialBindingAPI\"]\n)\n{\n"
+               "    int[] faceVertexCounts = [4]\n"
+               "    int[] faceVertexIndices = [0, 1, 2, 3]\n"
+               "    point3f[] points = [(-6, 0, 3), (6, 0, 3), (6, 0, -9), (-6, 0, -9)]\n"
+               "    uniform token subdivisionScheme = \"none\"\n"
+               "    rel material:binding = </Materials/Metal>\n}\n"
+            << light.prim
+            << "def Camera \"Camera\"\n{\n"
+               "    float focalLength = 24\n"
+               "    float horizontalAperture = 24.576\n    float verticalAperture = 18.432\n"
+               "    float2 clippingRange = (0.1, 1000)\n"
+               "    double3 xformOp:translate = (0, 1.2, 2)\n"
+               "    double xformOp:rotateX = -12\n"
+               "    uniform token[] xformOpOrder = [\"xformOp:translate\", \"xformOp:rotateX\"]\n}\n"
+               "def Scope \"Materials\"\n{\n"
+               "    def Material \"Metal\"\n    {\n"
+               "        token outputs:surface.connect = </Materials/Metal/Preview.outputs:surface>\n"
+               "        def Shader \"Preview\"\n        {\n"
+               "            uniform token info:id = \"UsdPreviewSurface\"\n"
+               "            color3f inputs:diffuseColor = (0.9, 0.9, 0.9)\n"
+            << light.surface
+            << "            token outputs:surface\n        }\n    }\n}\n";
+    }
+    const uint32_t w = 64, h = 48;
+    const auto frame = [&](bool mis, uint32_t total) {
+        auto renderer = usd::StageRenderer::open(path);
+        if (!renderer) FAIL(renderer.error().toString());
+        (*renderer)->setPathMis(mis);
+        (*renderer)->setPathSamples(std::min<uint32_t>(total, 256));
+        (*renderer)->setPathTotal(total);
+        (*renderer)->setPathBounces(1);
+        auto image = (*renderer)->render("/Camera", 0.0, w, h, "rt");
+        if (!image) FAIL(image.error().toString());
+        gpu::BufferDesc desc;
+        desc.bytes = image->rgba.size() * sizeof(float);
+        desc.elementBytes = 16;
+        auto made = gpu::Buffer::create(*gpu->device, desc, image->rgba.data());
+        REQUIRE(made);
+        return std::move(*made);
+    };
+    const gpu::Buffer deepNee = frame(false, 8192);
+    const gpu::Buffer deepMis = frame(true, 8192);
+    const gpu::Buffer nee = frame(false, 32);
+    const gpu::Buffer mis = frame(true, 32);
+    auto same = render::compareHdr(*gpu->library, deepMis, deepNee, w, h);
+    auto errNee = render::compareHdr(*gpu->library, nee, deepNee, w, h);
+    auto errMis = render::compareHdr(*gpu->library, mis, deepNee, w, h);
+    REQUIRE(same);
+    REQUIRE(errNee);
+    REQUIRE(errMis);
+    std::vector<float> blank(size_t{w} * h * 4, 0.0F);
+    auto empty = gpu::Buffer::fromSpan<float>(*gpu->device, blank, "blank");
+    REQUIRE(empty);
+    auto lit = render::compareHdr(*gpu->library, deepNee, *empty, w, h);
+    REQUIRE(lit);
+    std::printf("  %-11s: deep MIS against deep light sampling relMSE %.3e; at 32 paths against the deep frame, light "
+                "sampling alone %.3e, MIS %.3e (%.1f times less); the frame against blank %.2e\n",
+                light.name, same->relMse, errNee->relMse, errMis->relMse,
+                errNee->relMse / std::max(errMis->relMse, 1e-30), lit->relMse);
+    CHECK(lit->relMse > 0.1);
+    // Same image: the deep frames differ by their own noise, which the
+    // shallow light-sampling frame carries 256 times more of.
+    CHECK(same->relMse < errNee->relMse / light.sameOver);
+    CHECK(errMis->relMse < errNee->relMse / light.atLeast);
+    }
+}
+
 // The traced technique over a mesh, through Hydra: what used to trace splats
 // and return now path traces the surfaces. A plane alone under one light has
 // nothing for a bounce to find, so the traced frame and the raster frame are

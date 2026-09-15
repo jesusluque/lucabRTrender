@@ -213,6 +213,16 @@ public float lightPdfImaged(LightRecord l, float3 p, float3 n, float3 wi) {
     return lightPdf(l, p, n, wi);
 }
 
+/// lightHit, with a dome's image.
+public LightHit lightHitImaged(LightRecord l, float3 p, float3 wi) {
+    LightHit h = lightHit(l, p, wi);
+    if (h.valid && l.kind == kLightDome) {
+        h.radiance *= domeImage(l, wi);
+        h.valid = any(h.radiance > float3(0.0));
+    }
+    return h;
+}
+
 /// What a dome puts in a direction nothing was drawn in.
 public float3 domeBackground(LightRecord l, float3 wi) {
     return lightEmission(l) * domeImage(l, wi);

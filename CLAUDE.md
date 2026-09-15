@@ -120,7 +120,8 @@ How the pieces fit:
 - **Lights.** A light is sampled where it stands -- the cone a sphere or a
   sun subtends, the surface of a disk or a rectangle, the hemisphere above
   the surface for a dome -- and `lightPdf` gives that density for any
-  direction, which is what a chi-square checks and what MIS will need.
+  direction, which is what a chi-square checks and what the path tracer's
+  MIS weighs by; `lightHit` is the other direction, a ray meeting a light.
   Shading loops over every light at every pixel: `lrt:lightSamples` says how
   many samples each one gets, and one is what an interactive frame takes.
 - **Levels of detail.**

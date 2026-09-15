@@ -144,6 +144,7 @@ void HdLrtRenderPass::_Execute(HdRenderPassStateSharedPtr const& state, TfTokenV
         _engine->setPathTotal(_delegate->GetPathTotal());
         _engine->setDenoise(_delegate->GetDenoise());
         _engine->setPathAdaptive(_delegate->GetPathAdaptive());
+        _engine->setPathMis(_delegate->GetPathMis());
         _engine->setPathError(_delegate->GetPathError());
         _engine->setMotionBuckets(_delegate->GetDisableMotionBlur() ? 1u : _delegate->GetMotionBuckets());
     }

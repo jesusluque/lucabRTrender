@@ -35,7 +35,8 @@ struct PathParams {
     float distortionK1;
     float distortionK2;
     uint buckets;      // motion blur: shutter slices; a sample's rays answer to one slice's mask bit
-    uint pad3; uint pad4;
+    uint mis;          // 1: the lights' and the material's strategies are weighed (power heuristic)
+    uint pad4;
 };
 
 Texture2D<uint4>               visibility;   // (instance + 1, triangle); row 0 on top
@@ -506,6 +507,35 @@ void primaryRay(uint2 pixel, uint sample, out float3 originWorld, out float3 dir
                                       dot(toWorld.row2.xyz, direction)));
 }
 
+/// Light k's probability of being chosen at p, n, as gatherLight chooses.
+float lightChoiceProbability(uint k, float3 p, float3 n) {
+    if (path.chooseLights == 2) {
+        return lightPdfChoiceAny(iesValues, lightNodeBase, lightTreeNodes, lightUnboundedCount, lights, k, p, n);
+    }
+    const float power = lights[lightCount - 1].cumulative;
+    if (!(power > 0.0)) {
+        return 0.0;
+    }
+    const float before = k == 0 ? 0.0 : lights[k - 1].cumulative;
+    return max(lights[k].cumulative - before, 1.0e-9) / power;
+}
+
+/// Lights past this many are not met by the material's rays: each bounce
+/// tests its direction against every light, and a frame of thousands would
+/// pay that per vertex. Their next event estimates keep a weight of one.
+static const uint kMisLightLimit = 64;
+
+/// Whether light l is reached by both strategies and weighed between them.
+/// Not for a light whose shadow ignores what a ray would stop at: one that
+/// casts none, or one whose shadow links leave some occluders out -- the
+/// material's ray is stopped by any surface, so the two strategies would
+/// see different visibilities. Not through media: a volume between would
+/// have to dim the material's ray as it dims the shadow ray.
+bool misWeighs(LightRecord l) {
+    return path.mis != 0 && !kVolumes && lightCount <= kMisLightLimit && (l.flags & kLightShadow) != 0 &&
+           l.shadowCategory == kLightUnlinked;
+}
+
 float3 gatherLight(Shaded sh, uint2 pixel, uint sample, uint bounce, uint mask, out uint group) {
     group = 0;
     if (lightCount == 0) {
@@ -554,21 +584,21 @@ float3 gatherLight(Shaded sh, uint2 pixel, uint sample, uint bounce, uint mask, 
                                                ls.distance, rng);
     }
     const float density = ls.pdf * choice.probability;
-    // No weight. The two strategies cover disjoint sets of emitters, so there
-    // is nothing to share: next event estimation covers the analytic lights of
-    // the light table, and sampling the material covers emissive geometry. A
-    // light in the table has no geometry for a sampled direction to hit, and a
-    // bounce ray that escapes breaks without gathering the dome it passed
-    // through -- so a weight here would scale this estimator down and nothing
-    // would pay the remainder back. Measured before it was removed: a white
-    // furnace under an imageless dome, where the dome's density and the
-    // Lambert lobe's are the same function, read 0.5453 of what unweighted
-    // NEE reads.
-    //
-    // Real MIS belongs with mesh lights, where the two strategies genuinely
-    // overlap; it needs a "does this direction reach light k, and with what
-    // radiance" beside lightPdf, which does not exist yet.
-    return f * ls.radiance * transmittance / density;
+    // Weighed against the material's strategy by the power heuristic where
+    // that strategy reaches this light too: at a vertex the path leaves by
+    // sampling its material, whose ray gathers what it meets of the lights
+    // (lightHit) with the complementary weight. A delta light, a light the
+    // material's ray does not weigh (misWeighs), and the last vertex, which
+    // samples no material, keep a weight of one. The weight was once taken
+    // with no complement at all, and a white furnace under an imageless dome
+    // -- the dome's density and the Lambert lobe's the same function -- read
+    // 0.5453 of what it should; the complement is what makes it whole.
+    float weight = 1.0;
+    if (!ls.delta && kTraces && bounce < path.bounces && misWeighs(light)) {
+        const float other = stackPdf(sh.stack, sh.toEye, ls.wi);
+        weight = density * density / (density * density + other * other);
+    }
+    return f * ls.radiance * transmittance * weight / density;
 }
 
 /// The same at a point inside a medium: the phase function for the lobes,
@@ -771,6 +801,39 @@ void tracePaths(uint3 group: SV_GroupID, uint index: SV_GroupIndex) {
             o = p + (away + ms.wi) * (1.0e-3 * scale);
             d = ms.wi;
             const PathHit hit = traceNearestFrom(o, d, 1.0e-3 * scale, mask);
+            // The material's strategy for the lights: what of each light this
+            // direction meets before the surface it found (or, escaping, a
+            // dome's or a distant light's), weighed against the density next
+            // event estimation would have drawn it with.
+            if (path.mis != 0 && !kVolumes && lightCount <= kMisLightLimit) {
+                const bool escaped = hit.seen.x == 0;
+                const float reached = hit.t + dot(o - p, d);
+                for (uint k = 0; k < lightCount; ++k) {
+                    const LightRecord light = lights[k];
+                    if (!misWeighs(light) || !lightLinked(light.lightCategory, cur.categoriesLo, cur.categoriesHi)) {
+                        continue;
+                    }
+                    const LightHit lh = lightHitImaged(light, p, d);
+                    // A dome or a distant light (t infinite) only where the ray
+                    // escapes; a light at a distance, if nothing is before it.
+                    // (Comparing an escape's infinity with the light's own once
+                    // dropped every dome here: 1e30 is not less than 1e30.)
+                    const bool infinite = lh.t >= 1.0e29;
+                    if (!lh.valid || (infinite && !escaped) || (!infinite && !escaped && lh.t >= reached)) {
+                        continue;
+                    }
+                    float weight = 1.0;
+                    if (!ms.delta) {
+                        const float other = lightChoiceProbability(k, p, n) * lightPdfImaged(light, p, n, d);
+                        weight = ms.pdf * ms.pdf / (ms.pdf * ms.pdf + other * other);
+                    }
+                    const float3 reachedLight = throughput * lh.radiance * weight;
+                    carried += reachedLight;
+                    if (kLightGroups) {
+                        addGroup(groups, light.group, reachedLight * opacity);
+                    }
+                }
+            }
             // Rebuilt from where the ray met the triangle, its eye where the
             // bounce left from; shaded when the next vertex comes to it.
             found = foundHit(hit, p, d);
@@ -1028,6 +1091,7 @@ Result<void> PathTracer::trace(gpu::CommandBatch& batch, const VisibilityTargets
         }
         cursor["path"]["adaptive"].setData(uint32_t{settings.adaptive ? 1u : 0u});
         cursor["path"]["headlight"].setData(uint32_t{settings.headlight ? 1u : 0u});
+        cursor["path"]["mis"].setData(uint32_t{settings.mis ? 1u : 0u});
         cursor["path"]["errorTarget"].setData(settings.errorTarget);
         cursor["path"]["minSamples"].setData(settings.minSamples);
         const uint32_t buckets = frame.scene != nullptr ? frame.scene->buckets() : 1u;

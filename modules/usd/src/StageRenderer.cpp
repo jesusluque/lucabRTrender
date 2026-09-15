@@ -476,6 +476,10 @@ void StageRenderer::setRefineLevel(uint32_t level) {
 void StageRenderer::setMotionBuckets(uint32_t buckets) {
     impl_->delegate->SetRenderSetting(TfToken("lrt:motionBuckets"), VtValue(static_cast<int>(buckets)));
 }
+void StageRenderer::setPathMis(bool mis) {
+    impl_->delegate->SetRenderSetting(TfToken("lrt:pathMis"), VtValue(mis));
+}
+
 void StageRenderer::setPathAdaptive(bool adaptive) {
     impl_->delegate->SetRenderSetting(TfToken("lrt:pathAdaptive"), VtValue(adaptive));
 }

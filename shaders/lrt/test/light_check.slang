@@ -21,7 +21,7 @@ RWStructuredBuffer<uint>         bins;       // per sample: its bin, or thetaBin
 RWStructuredBuffer<float>        observed;   // per bin
 RWStructuredBuffer<float>        expected;   // per bin
 RWStructuredBuffer<float4>       result;
-RWStructuredBuffer<uint>         mismatches;   // [samples whose reported pdf differs from lightPdf]
+RWStructuredBuffer<uint>         mismatches;   // [samples whose reported pdf differs from lightPdf, whose direction lightHit does not find as sampled]
 RWStructuredBuffer<uint>         roundTrip;    // [uv that do not survive a turn through a direction]
 RWStructuredBuffer<float>        pyramid;      // [worst relative gap between a parent and its four children]
 StructuredBuffer<float4>         image;        // a rendered frame, for the link counters
@@ -287,6 +287,7 @@ void lightRoundTrip(uint3 tid: SV_DispatchThreadID) {
 [numthreads(1, 1, 1)]
 void lightConsistent(uint3 tid: SV_DispatchThreadID) {
     uint differ = 0;
+    uint hitsDiffer = 0;
     float worstRelative = 0.0;
     for (uint i = 0; i < params.samples; ++i) {
         const LightSample s = sampleLightImaged(lights[0], params.point.xyz, params.normal.xyz, sampleAt(i));
@@ -310,8 +311,23 @@ void lightConsistent(uint3 tid: SV_DispatchThreadID) {
         const float relative = abs(density - s.pdf) / max(s.pdf, 1.0e-9);
         worstRelative = max(worstRelative, relative);
         differ += relative > 1.0e-3 ? 1u : 0u;
+        // And the direction found again by the ray: the light met, at the
+        // distance the sample was drawn at, with the radiance it reported.
+        const LightHit h = lightHitImaged(lights[0], params.point.xyz, s.wi);
+        bool agrees = h.valid;
+        if (agrees) {
+            const float3 gap = abs(h.radiance - s.radiance) / max(abs(s.radiance), float3(1.0e-9));
+            agrees = all(gap <= float3(1.0e-3));
+            if (s.distance < 1.0e29) {
+                agrees = agrees && abs(h.t - s.distance) <= 1.0e-3 * max(s.distance, 1.0e-3);
+            } else {
+                agrees = agrees && h.t >= 1.0e29;
+            }
+        }
+        hitsDiffer += agrees ? 0u : 1u;
     }
     mismatches[0] = differ;
+    mismatches[1] = hitsDiffer;
     worst[0] = worstRelative;
 }
 

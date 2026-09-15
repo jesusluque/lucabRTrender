@@ -457,6 +457,99 @@ public float lightPdf(LightRecord l, float3 p, float3 n, float3 wi) {
     }
 }
 
+/// Where the ray from `p` along `wi` meets `l`, if it does: the distance
+/// (kLightInfinity for a dome or a distant light, which only an escaping ray
+/// reaches) and the radiance arriving -- the same radiance `sampleLight`
+/// reports for that direction. What a material's sampled direction adds when
+/// the two strategies are weighed. A delta light is never met. A dome's
+/// image is lights_image.slang's to apply.
+public struct LightHit {
+    public float  t;
+    public float3 radiance;
+    public bool   valid;
+};
+
+public LightHit lightHit(LightRecord l, float3 p, float3 wi) {
+    LightHit h;
+    h.t = kLightInfinity;
+    h.radiance = float3(0.0);
+    h.valid = false;
+    const float3 emission = lightEmission(l);
+    switch (l.kind) {
+    case kLightDistant: {
+        const float cosMax = cos(0.5 * max(l.sizeX, 0.0));
+        if (cosMax >= 1.0 || dot(wi, lightAxisZ(l)) < cosMax) {
+            return h;
+        }
+        h.radiance = emission / (2.0 * 3.14159265358979 * (1.0 - cosMax));
+        break;
+    }
+    case kLightDome:
+        h.radiance = emission;
+        break;
+    case kLightSphere: {
+        const float radius = max(l.sizeX, 0.0);
+        const float3 offset = lightOrigin(l) - p;
+        const float distance2 = dot(offset, offset);
+        if (radius <= 0.0 || distance2 <= radius * radius) {
+            return h;
+        }
+        const float b = dot(wi, offset);
+        const float discriminant = b * b - (distance2 - radius * radius);
+        if (discriminant < 0.0) {
+            return h;
+        }
+        const float t = b - sqrt(discriminant);
+        if (!(t > 0.0)) {
+            return h;
+        }
+        h.t = t;
+        h.radiance = emission;
+        break;
+    }
+    case kLightDisk:
+    case kLightRect: {
+        const float3 normal = -lightAxisZ(l);
+        const float denominator = dot(wi, -normal);
+        if (denominator <= 0.0) {
+            return h;   // the back of a one-sided light, or along its plane
+        }
+        const float3 centre = lightOrigin(l);
+        const float t = dot(centre - p, -normal) / denominator;
+        if (!(t > 0.0)) {
+            return h;
+        }
+        const float3 at = p + wi * t - centre;
+        const float x = dot(at, lightAxisX(l));
+        const float y = dot(at, lightAxisY(l));
+        const bool inside = l.kind == kLightDisk ? x * x + y * y <= l.sizeX * l.sizeX
+                                                 : abs(x) <= 0.5 * l.sizeX && abs(y) <= 0.5 * l.sizeY;
+        if (!inside) {
+            return h;
+        }
+        h.t = t;
+        h.radiance = emission;
+        break;
+    }
+    case kLightCylinder: {
+        float t;
+        float3 normal;
+        float along;
+        if (!cylinderHit(l, p, wi, t, normal, along)) {
+            return h;
+        }
+        h.t = t;
+        h.radiance = emission;
+        break;
+    }
+    default:
+        return h;
+    }
+    h.radiance *= lightCone(l, wi) * iesIntensity(l, wi);
+    h.valid = any(h.radiance > float3(0.0));
+    return h;
+}
+
 /// One sample of `l` as seen from `p`, whose surface faces `n`. Only a dome
 /// reads the normal: the rest are somewhere rather than everywhere.
 public LightSample sampleLight(LightRecord l, float3 p, float3 n, float2 u) {

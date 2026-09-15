@@ -387,7 +387,7 @@ TEST_CASE("each light's samples follow the density it reports", "[technique][lig
     auto expected = gpu::Buffer::fromSpan<float>(*gpu->device, zeros, "light.expected");
     const std::vector<float> resultZeros(8, 0.0F);
     auto result = gpu::Buffer::fromSpan<float>(*gpu->device, resultZeros, "light.result");
-    gpu::Buffer mismatches = test::uintBuffer(*gpu->device, 1, "light.mismatches");
+    gpu::Buffer mismatches = test::uintBuffer(*gpu->device, 2, "light.mismatches");
     gpu::Buffer worstPdf = test::uintBuffer(*gpu->device, 1, "light.worstPdf");
     gpu::Buffer mapping = test::uintBuffer(*gpu->device, 1, "light.mapping");
     REQUIRE(observed);
@@ -458,8 +458,10 @@ TEST_CASE("each light's samples follow the density it reports", "[technique][lig
         // Pearson's statistic has mean dof and variance 2 dof.
         const float z = (chi2 - dof) / std::sqrt(2.0F * dof);
         uint32_t differ = 0;
+        uint32_t hitsDiffer = 0;
         float worstRelative = 0.0F;
         REQUIRE(mismatches.read(*gpu->device, 0, sizeof(differ), &differ));
+        REQUIRE(mismatches.read(*gpu->device, 4, sizeof(hitsDiffer), &hitsDiffer));
         REQUIRE(worstPdf.read(*gpu->device, 0, sizeof(worstRelative), &worstRelative));
         std::printf("  %-13s: chi2 %.1f on %.0f dof (z %.2f), pdf integral %.4f against %.4f drawn; %u samples "
                     "disagree with lightPdf (worst %.2e)\n",
@@ -474,6 +476,11 @@ TEST_CASE("each light's samples follow the density it reports", "[technique][lig
             CHECK(mapped == 0);
         }
         CHECK(differ == 0);
+        // Every sampled direction is found again by lightHit, where and as
+        // bright as the sample said: what the material's strategy adds is
+        // the same light.
+        std::printf("  %-13s: %u samples lightHit does not find as sampled\n", c.name, hitsDiffer);
+        CHECK(hitsDiffer == 0);
         CHECK(std::abs(z) < 4.0F);
         // The pdf integrates to the fraction of samples the light drew.
         CHECK(std::abs(integral - drawn) < 0.02F);
@@ -548,7 +555,7 @@ TEST_CASE("a dome with a sun in it samples what its density describes",
     auto observed = gpu::Buffer::fromSpan<float>(*gpu->device, zeros, "dome.observed");
     auto expected = gpu::Buffer::fromSpan<float>(*gpu->device, zeros, "dome.expected");
     auto result = gpu::Buffer::fromSpan<float>(*gpu->device, std::vector<float>(8, 0.0F), "dome.result");
-    gpu::Buffer mismatches = test::uintBuffer(*gpu->device, 1, "dome.mismatches");
+    gpu::Buffer mismatches = test::uintBuffer(*gpu->device, 2, "dome.mismatches");
     gpu::Buffer worstPdf = test::uintBuffer(*gpu->device, 1, "dome.worstPdf");
     gpu::Buffer mapping = test::uintBuffer(*gpu->device, 1, "dome.mapping");
     auto pyramid = gpu::Buffer::fromSpan<float>(*gpu->device, std::vector<float>(1, 0.0F), "dome.pyramid");
@@ -591,6 +598,10 @@ TEST_CASE("a dome with a sun in it samples what its density describes",
     float worstRelative = 0.0F;
     REQUIRE(result->read(*gpu->device, 0, sizeof(r), r));
     REQUIRE(mismatches.read(*gpu->device, 0, sizeof(differ), &differ));
+    uint32_t hitsDiffer = 0;
+    REQUIRE(mismatches.read(*gpu->device, 4, sizeof(hitsDiffer), &hitsDiffer));
+    std::printf("  dome with a sun: %u samples lightHit does not find as sampled\n", hitsDiffer);
+    CHECK(hitsDiffer == 0);
     REQUIRE(worstPdf.read(*gpu->device, 0, sizeof(worstRelative), &worstRelative));
     const float chi2 = r[4];
     const float dof = r[5];

@@ -136,6 +136,9 @@ public:
     void setDenoise(bool denoise);
     /// Adaptive sampling, and the relative error a pixel stops at.
     void setPathAdaptive(bool adaptive);
+    /// Weigh light sampling and material sampling by the power heuristic
+    /// (the default), or light a surface by light sampling alone.
+    void setPathMis(bool mis);
     void setPathError(float error);
 
     /// How many paths a pixel the frame on the device holds, and whether it

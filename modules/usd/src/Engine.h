@@ -244,6 +244,7 @@ public:
     /// falls below `error`; the frame is gathered when every covered pixel
     /// has stopped or `pathTotal` is reached, whichever first.
     void setPathAdaptive(bool adaptive);
+    void setPathMis(bool mis);
     void setPathError(float error);
 
     /// How many paths a pixel the path traced frame on screen has gathered,
@@ -385,6 +386,7 @@ private:
     std::atomic<double>                       shutterClose_{0.0};
     std::atomic<uint32_t>                     pathTotal_{1};
     std::atomic<bool>                         pathAdaptive_{false};
+    std::atomic<bool>                         pathMis_{true};
     std::atomic<float>                        pathError_{0.02F};
     technique::PathProgress                   pathProgress_;   ///< after the last adaptive pass
     uint32_t                                  pathSeed_ = 0;   ///< which samples a path traced frame takes
@@ -411,6 +413,7 @@ private:
         uint32_t     samples = 0;
         uint32_t     bounces = 0;
         bool         adaptive = false;
+        bool         mis = true;
         float        error = 0.0F;
         uint64_t     revision = 0;
         uint64_t     tags = 0;         ///< a hash of the render tags drawn: purposes that change start the mean again
@@ -429,7 +432,7 @@ private:
                    nearZ == o.nearZ && farZ == o.farZ && orthographic == o.orthographic &&
                    lensRadius == o.lensRadius && focusDistance == o.focusDistance &&
                    distortionK1 == o.distortionK1 && distortionK2 == o.distortionK2 && width == o.width &&
-                   height == o.height && samples == o.samples && bounces == o.bounces && adaptive == o.adaptive &&
+                   height == o.height && samples == o.samples && bounces == o.bounces && adaptive == o.adaptive && mis == o.mis &&
                    error == o.error && revision == o.revision && tags == o.tags && traced == o.traced;
         }
     };

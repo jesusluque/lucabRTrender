@@ -232,7 +232,7 @@ HdRenderPassSharedPtr HdLrtRenderDelegate::CreateRenderPass(HdRenderIndex* index
 
 TF_DEFINE_PRIVATE_TOKENS(_lrtSettings, ((technique, "lrt:technique"))((settleStreams, "lrt:settleStreams"))
                                            ((visibility, "lrt:visibility"))((lightSamples, "lrt:lightSamples"))((chooseLights, "lrt:chooseLights"))
-                                           ((pathSamples, "lrt:pathSamples"))((pathBounces, "lrt:pathBounces"))((pathTotal, "lrt:pathTotal"))((denoise, "lrt:denoise"))((pathAdaptive, "lrt:pathAdaptive"))((pathError, "lrt:pathError"))((motionBuckets, "lrt:motionBuckets"))((disableMotionBlur, "lrt:disableMotionBlur"))((disableDepthOfField, "lrt:disableDepthOfField"))
+                                           ((pathSamples, "lrt:pathSamples"))((pathBounces, "lrt:pathBounces"))((pathTotal, "lrt:pathTotal"))((denoise, "lrt:denoise"))((pathAdaptive, "lrt:pathAdaptive"))((pathMis, "lrt:pathMis"))((pathError, "lrt:pathError"))((motionBuckets, "lrt:motionBuckets"))((disableMotionBlur, "lrt:disableMotionBlur"))((disableDepthOfField, "lrt:disableDepthOfField"))
                                            (raster)(rt)(automatic)(rays)(bvh));
 
 HdRenderSettingDescriptorList HdLrtRenderDelegate::GetRenderSettingDescriptors() const {
@@ -280,11 +280,15 @@ HdRenderSettingDescriptorList HdLrtRenderDelegate::GetRenderSettingDescriptors()
     error.name = "Adaptive: relative standard error a pixel stops at (rt)";
     error.key = _lrtSettings->pathError;
     error.defaultValue = VtValue(0.02f);
+    HdRenderSettingDescriptor mis;
+    mis.name = "Weigh light sampling and material sampling (MIS) (rt)";
+    mis.key = _lrtSettings->pathMis;
+    mis.defaultValue = VtValue(true);
     HdRenderSettingDescriptor motion;
     motion.name = "Motion blur: shutter slices, 1 to 8 (rt)";
     motion.key = _lrtSettings->motionBuckets;
     motion.defaultValue = VtValue(4);
-    return {technique, settle, visibility, samples, choose, paths, bounces, total, denoise, adaptive, error, motion};
+    return {technique, settle, visibility, samples, choose, paths, bounces, total, denoise, adaptive, error, mis, motion};
 }
 
 lrt::usd::MeshVisibility HdLrtRenderDelegate::GetMeshVisibility() const {
@@ -340,6 +344,11 @@ uint32_t HdLrtRenderDelegate::GetPathBounces() const {
 
 uint32_t HdLrtRenderDelegate::GetMotionBuckets() const {
     return std::min(_UintSetting(GetRenderSetting(_lrtSettings->motionBuckets), 4, 1), 8u);
+}
+
+bool HdLrtRenderDelegate::GetPathMis() const {
+    const VtValue value = GetRenderSetting(_lrtSettings->pathMis);
+    return !value.IsHolding<bool>() || value.UncheckedGet<bool>();
 }
 
 bool HdLrtRenderDelegate::GetPathAdaptive() const {

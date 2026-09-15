@@ -328,6 +328,7 @@ void Engine::setPathTotal(uint32_t total) { pathTotal_.store(std::max(total, 1u)
 void Engine::setDenoise(bool denoise) { denoise_.store(denoise); }
 
 void Engine::setPathAdaptive(bool adaptive) { pathAdaptive_.store(adaptive); }
+void Engine::setPathMis(bool mis) { pathMis_.store(mis); }
 
 void Engine::setPathError(float error) { pathError_.store(std::max(error, 1.0e-4F)); }
 
@@ -1557,6 +1558,7 @@ Result<void> Engine::render(const render::Projection& projection, const render::
             paths.samples = pathSamples_.load();
             paths.bounces = pathBounces_.load();
             paths.adaptive = pathAdaptive_.load();
+            paths.mis = pathMis_.load();
             paths.errorTarget = pathError_.load();
             paths.headlight = frame.lights == nullptr || frame.lights->count() == 0;
             PathState now;
@@ -1577,6 +1579,7 @@ Result<void> Engine::render(const render::Projection& projection, const render::
             now.samples = paths.samples;
             now.bounces = paths.bounces;
             now.adaptive = paths.adaptive;
+            now.mis = paths.mis;
             now.error = paths.errorTarget;
             now.revision = revision_.load();
             if (renderTags != nullptr) {

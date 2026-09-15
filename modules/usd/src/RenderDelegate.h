@@ -78,6 +78,8 @@ public:
     /// Adaptive sampling ("lrt:pathAdaptive") and its relative error target
     /// ("lrt:pathError").
     [[nodiscard]] bool GetPathAdaptive() const;
+    /// "lrt:pathMis": light and material sampling weighed (true, the default).
+    [[nodiscard]] bool GetPathMis() const;
     [[nodiscard]] float GetPathError() const;
     /// `lrt:visibility`: "automatic" (default), "raster", "rays" or "bvh".
     [[nodiscard]] lrt::usd::MeshVisibility GetMeshVisibility() const;

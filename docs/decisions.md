@@ -1392,8 +1392,8 @@ enough that what is left is the light and not the noise.
     lights at all. Flat, because the cost of a sample is small beside the
     frame it sits in -- which is also why the loop is affordable at one
     sample and the default.
-- **No MIS.** Lights are sampled, the material is not sampled back at them.
-  That is the path tracer's, M6.
+- **MIS is the path tracer's** (M6, below): the raster's shading samples the
+  lights alone.
 - **The two dome densities are not combined.** A dome is sampled either by
   its image or around the surface, whichever its variation calls for, and
   never both with MIS weighing between them: that is the path tracer's, M6.
@@ -1495,10 +1495,10 @@ is in the lights section.
   `material_surface.slang`, its material evaluated into the same lobe stack,
   and its direct light gathered by next event estimation with the light chosen
   by power -- all of it the machinery M5 left behind.
-- **No MIS, on purpose.** Next event estimation covers the analytic lights of
-  the light table and sampling the material covers emissive geometry: disjoint
-  sets, so neither strategy is weighed against the other. There was a power
-  heuristic here, and it was wrong -- see below.
+- **MIS, since the usd-wg end to end** (the section after M6's "not done").
+  At first next event estimation covered the analytic lights and sampling
+  the material covered emissive geometry, disjoint sets with no weight; a
+  one-sided power heuristic had been wrong -- see below.
 - **The bounce** samples the material (`stackSample`), traces where it points,
   shades what it lands on, and carries that surface's emission and direct
   light back through the path's throughput.
@@ -1863,10 +1863,56 @@ radian sun reads 0 of 8281 pixels beyond 2%, worst 0.01%.
   condition had been unmet since meshes arrived. Medians of `lrt stage
   --frames` and `lrt view --frames` are what is recorded, where there is
   something to compare against.
-- **Real MIS**, for when the two strategies overlap: mesh lights. It needs a
-  "does this direction reach light k, and with what radiance" beside
-  `lightPdf`, which does not exist. Until then the disjointness above is the
-  argument, and a weight here would be the defect again.
+- **Emissive geometry by next event estimation**: meshes that emit are still
+  reached by the material's sampling alone.
+
+### Multiple importance sampling
+
+**The missing piece was the other direction.** `lightHit(l, p, wi)` (and
+`lightHitImaged`, with a dome's image) says where a ray from p along wi
+meets a light and the radiance it carries: a sphere's near root, a disk's
+or a rect's plane within the shape, a cylinder's lateral surface, and for a
+dome or a distant light's cone an infinite distance only an escaping ray
+reaches -- the shaping cone and the IES profile applied as `sampleLight`
+applies them. Checked in the chi-square tests beside `lightPdf`: every
+sampled direction of the sphere, disk, rect, sun, dome, cylinder and a dome
+with an image is found again by `lightHit` at the sampled distance and with
+the sampled radiance, 0 mismatches each.
+
+**The weights.** At a vertex the path leaves by sampling its material, next
+event estimation's sample of light k is weighed by the power heuristic
+against `stackPdf` in its direction, and the material's sampled ray -- after
+it is traced -- gathers every light it meets before the surface it found
+(or, escaping, the domes and distant lights), each weighed against the
+density next event estimation would have drawn that direction with: the
+light's choice probability at p (by power, or `lightPdfChoiceAny` under the
+light BVH) times `lightPdfImaged`. A delta light and a delta lobe keep a
+weight of one, as does the last vertex, which samples no material.
+`lrt:pathMis` (default on; `StageRenderer::setPathMis`) switches it off.
+
+**What is left out, and why.** A light that casts no shadow, or whose shadow
+links leave occluders out, keeps its weight of one: the material's ray is
+stopped by any surface and would see another visibility. So is every light
+in a frame with volumes (a medium would have to dim the material's ray as it
+dims the shadow ray), and in a frame of more than 64 lights, since each
+bounce tests its direction against every light.
+
+**A defect before it passed:** an escaping ray's distance and a dome's
+were the same 1e30, and `t >= reached` dropped every dome. Deep MIS then
+converged (8192 against 32768 paths, 2e-5 apart) to an image off by 100% at
+the 99th percentile -- visible only by comparing it with a deep frame of
+light sampling alone.
+
+**Checked** on a floor of metal (roughness 0.2) under each light, one
+bounce, 64x48: deep frames of 8192 paths with and without MIS agree within
+their noise, and at 32 paths against the deep frame without, MIS is 4.5
+times less error under a 4x2 rect, 57.7 times under an imageless dome and
+2.4 times under a sphere of radius 0.8. The glossy dome's deep frame without
+MIS is heavy tailed (8192 against 32768 paths, 3.4e-2 apart), so its
+sameness is shown on a rough diffuse floor under the same dome, where light
+sampling converges: deep frames 2.6e-7 apart, their summed noise about
+4e-7, and MIS 1.1 times less error there, as expected where the material's
+density and the dome's are the same function.
 ## Complete USD: animation and movement (M7)
 
 ### Deformation in place, and refit instead of rebuild
