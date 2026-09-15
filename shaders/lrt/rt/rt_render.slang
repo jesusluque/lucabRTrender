@@ -22,7 +22,7 @@ void rtRender(uint3 tid: SV_DispatchThreadID) {
     if (px >= params.width || py >= params.height) {
         return;
     }
-    RayDesc ray = primaryRay(px, py);
+    LrtRay ray = primaryRay(px, py);
     Integrator<ProxyTriangles> integrator;
     Cursor cursor;
     integrator.begin(cursor);
@@ -30,7 +30,12 @@ void rtRender(uint3 tid: SV_DispatchThreadID) {
         integrator.beginSegment(cursor);
         // Back faces culled: a proxy counts where the ray enters it.
         RayQuery<RAY_FLAG_CULL_BACK_FACING_TRIANGLES> query;
-        query.TraceRayInline(scene, RAY_FLAG_CULL_BACK_FACING_TRIANGLES, 0xFF, ray);
+        RayDesc traced;
+        traced.Origin = ray.Origin;
+        traced.Direction = ray.Direction;
+        traced.TMin = ray.TMin;
+        traced.TMax = ray.TMax;
+        query.TraceRayInline(scene, RAY_FLAG_CULL_BACK_FACING_TRIANGLES, 0xFF, traced);
         while (query.Proceed()) {
             // Primitive and instance index: the id waits for the record's end.
             if (integrator.offer(cursor, query.CandidateTriangleRayT(), query.CandidatePrimitiveIndex(),

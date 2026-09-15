@@ -13,6 +13,7 @@ set(LRT_USD_SOURCES
     src/Volume.cpp
     src/Curves.cpp
     src/RenderPass.cpp
+    src/Resample.cpp
     src/RenderDelegate.cpp)
 set(LRT_USD_LIBS usd usdGeom usdVol usdShade usdLux usdRender usdSkel usdImaging usdSkelImaging
     hd hdx hdsi hdMtlx hio cameraUtil gf tf vt sdf plug lrt::gpu)

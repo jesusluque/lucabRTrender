@@ -561,10 +561,10 @@ Result<void> StageRenderer::aim(const std::string& camera, double time, const st
             param->SetShutter(open, close);
             // Everything synced about the old shutter samples again: every
             // prim's transform and primvars dirtied, which reaches meshes,
-            // instancers, lights and the camera alike.
-            if (changed) {
-                impl.bindingPurposes->DirtyAll(HdDataSourceLocatorSet{HdXformSchema::GetDefaultLocator(),
-                                                                      HdPrimvarsSchema::GetDefaultLocator()});
+            // instancers, lights and the camera alike -- through the
+            // delegate's own scene index, as a host's pass does it.
+            if (changed && !impl.delegate->ResampleAllPrims()) {
+                return Error(ErrorCode::InternalError, "the renderer's resampling scene index is not in the chain");
             }
         }
     }

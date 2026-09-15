@@ -177,10 +177,8 @@ Result<uint32_t> TextureStore::loadFile(const std::string& path, ColourSpace spa
     info.height = h;
 
     // 8-bit sRGB stays 8-bit behind an sRGB view; anything else sRGB is
-    // decoded to light; floats keep their precision. A device whose store
-    // into an 8-bit texture does not convert (CUDA) holds 8-bit images as
-    // half floats, decoded to light like the rest.
-    const bool eightBit = layout.component == 0 && device_->caps().unormStores;
+    // decoded to light; floats keep their precision.
+    const bool eightBit = layout.component == 0;
     gpu::TextureDesc desc;
     desc.width = w;
     desc.height = h;
@@ -201,10 +199,29 @@ Result<uint32_t> TextureStore::loadFile(const std::string& path, ColourSpace spa
     if (!buffer) return std::move(buffer).error();
     auto level0 = texture->view(0);
     if (!level0) return std::move(level0).error();
+    // Where a store into the texture does not convert (CUDA), the kernel packs
+    // the texels into a buffer and the buffer is copied into level 0.
+    const uint32_t packedKind = device_->caps().convertingStores ? 0u : gpu::packedKindOf(desc.format);
+    if (!device_->caps().convertingStores && packedKind == 0) {
+        return Error::make(ErrorCode::Unsupported, "'{}': this device's stores do not convert and no kernel packs "
+                                                   "its format", path);
+    }
+    gpu::Buffer packed;
+    if (packedKind != 0) {
+        gpu::BufferDesc packedDesc;
+        packedDesc.bytes = uint64_t{w} * h * texture->texelBytes();
+        packedDesc.elementBytes = 4;
+        packedDesc.label = "texture.packed";
+        auto made = gpu::Buffer::create(*device_, packedDesc);
+        if (!made) return std::move(made).error();
+        packed = std::move(*made);
+    }
     gpu::CommandBatch batch(*device_);
     decode_.dispatch(batch, {w, h, 1}, [&](rhi::ShaderCursor cursor) {
         cursor["bytes"].setBinding(buffer->rhi());
         cursor["level"].setBinding((*level0).get());
+        cursor["packed"].setBinding(packedKind != 0 ? packed.rhi() : nullptr);
+        cursor["params"]["packedKind"].setData(packedKind);
         rhi::ShaderCursor p = cursor["params"];
         p["width"].setData(w);
         p["height"].setData(h);
@@ -212,6 +229,12 @@ Result<uint32_t> TextureStore::loadFile(const std::string& path, ColourSpace spa
         p["component"].setData(layout.component);
         p["toLinear"].setData(uint32_t{srgb && !eightBit ? 1u : 0u});
     });
+    if (packedKind != 0) {
+        const uint32_t rowPitch = w * texture->texelBytes();
+        batch.encoder()->copyBufferToTexture(texture->rhi(), 0, 0, {0, 0, 0}, packed.rhi(), 0,
+                                             uint64_t{rowPitch} * h, rowPitch, {w, h, 1});
+        batch.markDirty();
+    }
     LRT_TRY(mips_->generate(batch, *texture, srgb && eightBit));
     LRT_TRY(batch.submit(true));
 

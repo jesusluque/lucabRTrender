@@ -6,6 +6,7 @@
 #pragma once
 
 #include "lrt/core/Result.h"
+#include "lrt/gpu/Buffer.h"
 #include "lrt/gpu/ComputeKernel.h"
 
 namespace lrt::gpu {
@@ -26,6 +27,7 @@ public:
     [[nodiscard]] Result<void> generate(CommandBatch& batch, const Texture& texture, bool srgb = false) const;
 
 private:
+    Device*       device_ = nullptr;
     ComputeKernel downsample_;
 };
 

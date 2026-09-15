@@ -164,6 +164,10 @@ Outputs engineOutputs(usd::StageRenderer& renderer, const render::Camera& camera
 TEST_CASE("Kitchen_set's geometry matches Storm's on every visibility route: prim ids, depth and eye normals",
           "[usd][gpu][oracle][storm]") {
     LRT_REQUIRE_GPU(gpu);
+    const gpu::Caps& caps = gpu->device->caps();
+    if (!caps.rasterization || !caps.rayQuery) {
+        SKIP("needs rasterisation and ray queries, to compare all three routes with Storm's");
+    }
     const fs::path kitchen = fs::path(std::getenv("HOME")) / "tools/assets/Kitchen_set/Kitchen_set.usd";
     if (!fs::exists(kitchen)) {
         SKIP("Pixar's Kitchen_set is not at " << kitchen.string());

@@ -483,11 +483,12 @@ TEST_CASE("a float4 written to an 8-bit texture comes back as the colour it wrot
     std::printf("  eight-bit texel: %.4f %.4f %.4f %.4f (wrote %.4f %.4f %.4f %.4f)\n", double(read[0]),
                 double(read[1]), double(read[2]), double(read[3]), double(wrote[0]), double(wrote[1]),
                 double(wrote[2]), double(wrote[3]));
-    if (!gpu->device->caps().unormStores) {
-        // The device says its store does not convert, and the texture store
-        // keeps 8-bit images in float textures there. What is checked is that
-        // the capability tells the truth: the texel is not the colour.
-        INFO("Caps::unormStores is false, so this store must not convert; read back: "
+    if (!gpu->device->caps().convertingStores) {
+        // The device says its store does not convert, and every kernel that
+        // writes a texture packs its texels into a buffer there instead. What
+        // is checked is that the capability tells the truth: the texel is not
+        // the colour.
+        INFO("Caps::convertingStores is false, so this store must not convert; read back: "
              << read[0] << ", " << read[1] << ", " << read[2] << ", " << read[3]);
         bool converted = true;
         for (uint32_t k = 0; k < 4; ++k) {
@@ -497,7 +498,7 @@ TEST_CASE("a float4 written to an 8-bit texture comes back as the colour it wrot
         return;
     }
     INFO("A float4 stored through an RWTexture2D must arrive as the texture's format on a device whose "
-         "Caps::unormStores says so. CUDA's surface store does not convert (surf2Dwrite<float4> writes the "
+         "Caps::convertingStores says so. CUDA's surface store does not convert (surf2Dwrite<float4> writes the "
          "float4's own bytes), which is why that capability is false there. Read back: "
          << read[0] << ", " << read[1] << ", " << read[2] << ", " << read[3]);
     for (uint32_t k = 0; k < 4; ++k) {

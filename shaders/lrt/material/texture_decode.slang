@@ -13,11 +13,13 @@ struct DecodeParams {
     uint channels;     // 1 grey, 2 grey and alpha, 3 rgb, 4 rgba
     uint component;    // 0 unorm8, 1 unorm16, 2 float16, 3 float32
     uint toLinear;     // 1: the components are sRGB-encoded and the texture holds light
-    uint pad0; uint pad1; uint pad2;
+    uint packedKind;   // 0: written to the texture; else lrtPackTexel's kind
+    uint pad1; uint pad2;
 };
 
 StructuredBuffer<uint>       bytes;   // packed little-endian, rows top first
 RWTexture2D<float4>          level;
+RWStructuredBuffer<uint>     packed;   // where the store does not convert
 ConstantBuffer<DecodeParams> params;
 
 uint byteAt(uint index) {
@@ -68,5 +70,9 @@ void textureDecode(uint3 tid: SV_DispatchThreadID) {
     if (params.toLinear != 0) {
         texel.rgb = float3(decodeSrgb(texel.r), decodeSrgb(texel.g), decodeSrgb(texel.b));
     }
-    level[tid.xy] = texel;
+    if (params.packedKind != 0) {
+        lrtPackTexel(packed, params.packedKind, tid.y * params.width + tid.x, texel);
+    } else {
+        level[tid.xy] = texel;
+    }
 }

@@ -44,7 +44,7 @@ void rtBvhRender(uint3 tid: SV_DispatchThreadID) {
     if (px >= params.width || py >= params.height) {
         return;
     }
-    RayDesc ray = primaryRay(px, py);
+    LrtRay ray = primaryRay(px, py);
     Integrator<BvhParticles> integrator;
     Cursor cursor;
     integrator.begin(cursor);

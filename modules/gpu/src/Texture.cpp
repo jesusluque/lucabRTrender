@@ -8,6 +8,18 @@
 
 namespace lrt::gpu {
 
+uint32_t packedKindOf(rhi::Format format) noexcept {
+    switch (format) {
+    case rhi::Format::RGBA8Unorm:
+    case rhi::Format::RGBA8UnormSrgb:
+    case rhi::Format::BGRA8Unorm:
+    case rhi::Format::BGRA8UnormSrgb: return 1;
+    case rhi::Format::RGBA16Float: return 2;
+    case rhi::Format::RGBA32Float: return 3;
+    default: return 0;
+    }
+}
+
 uint32_t mipChain(uint32_t width, uint32_t height, uint32_t depth) noexcept {
     uint32_t levels = 1;
     uint32_t largest = std::max({width, height, depth});

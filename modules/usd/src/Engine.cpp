@@ -365,6 +365,7 @@ void Engine::setShutter(double open, double close) {
     const bool changed = shutterOpen_.exchange(open) != open || shutterClose_.exchange(close) != close;
     if (changed) {
         revision_.fetch_add(1);
+        shutterSettle_.store(2);   // this frame, and the one that resamples
     }
 }
 
@@ -389,6 +390,9 @@ uint32_t Engine::pathAccumulated() const noexcept {
 }
 
 bool Engine::pathConverged() const noexcept {
+    if (shutterSettle_.load() > 0) {
+        return false;   // the prims are still being resampled about it
+    }
     if (!pathState_.traced) {
         return true;   // nothing being gathered
     }
@@ -1059,6 +1063,11 @@ Result<void> Engine::render(const render::Projection& projection, const render::
                             MeshVisibility visibility) {
     lastTargets_ = &targets;
     aovsValid_ = false;
+    // A frame drawn since the shutter changed: this one draws the prims as
+    // they were sampled, the next draws them resampled (docs: the shutter).
+    if (const int settling = shutterSettle_.load(); settling > 0) {
+        shutterSettle_.store(settling - 1);
+    }
     {
         bool anyMesh = false;
         {

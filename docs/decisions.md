@@ -2175,9 +2175,28 @@ bulb's own transform sliding so -- relMSE 0, max 0; with the chain's
 samples withheld the instanced frame parted from it by 3.1e-4, the still
 light's distance.
 
-**Not done.** A host driving the plugin
-itself (not `StageRenderer`) has only the pass's tracker marks when its
-camera's shutter changes. The raster technique draws the
+**A host driving the plugin gets the same.** The pass's change tracker
+marks could never do it -- under scene index emulation they do not reach
+prims a scene index owns, and without emulation (UsdImagingGLEngine's
+chain) `MarkRprimDirty` is refused outright as "requires emulation". So the
+delegate registers a pass-through scene index of its own for this renderer
+(`HdLrtResampleSceneIndex`, phase 4 at the end), which every chain built
+for `lucabRTrender` holds, and finds it by walking the inputs of the
+terminal scene index the render index hands it. `StageRenderer` uses the
+same call. A shutter changed after the prims synced leaves two frames
+unconverged, whatever they hold: the one that drew the old samples and the
+one that resamples -- otherwise a host that draws until `IsConverged` stops
+at the stale frame. Checked in `lrt_host_tests`, an executable that runs
+`UsdImagingGLEngine` -- usdview's engine -- on the plugin loaded by name:
+the frame after the edit is the fresh engine's on the edited stage (relMSE
+0, max 0) and differs from the sharp one by 1.31. That executable links no
+`lrt::usd`: with the delegate's classes in the executable as well as in the
+plugin, a template instantiated in both (`make_shared` of the render pass)
+binds to the executable's copy, and the pass then fails to recognise the
+plugin's own render buffers -- measured, as an image of zeros with five AOV
+bindings and no outputs.
+
+**Not done.** The raster technique draws the
 frame's time, no blur. A turn between the two shutter samples is
 interpolated as rows, not as a rotation. Two samples only: a shutter that
 spans more than two authored samples takes the outer two. Where a prim's
@@ -3389,12 +3408,28 @@ in opposite places.**
 So the packed route trades a CUDA bug for a Metal one, and was reverted after
 being measured; Metal is back to its 451 assertions exactly.
 
-**What the texture store does about it.** `Caps::unormStores` says whether
-the store converts, false on CUDA, and the probe checks the capability tells
-the truth either way -- on CUDA that the texel is *not* the colour. Where it
-is false the store holds 8-bit images in `RGBA16Float`, decoded to light
-when sRGB like 16-bit images, and mips average them as floats: twice the
-memory for an 8-bit image, on CUDA only, and no store asked to convert.
+**What every kernel that writes a texture does about it.**
+`Caps::convertingStores` says whether a float4 store arrives as the texture's
+format, false on CUDA, and the probe checks the capability tells the truth
+either way -- on CUDA that the texel is *not* the colour. Where it is false
+the kernels pack each texel into a buffer instead (`lrtPackTexel` in
+packing.slang: four 8-bit unorms in a word, four halves in two, four floats
+in four) and the buffer is copied into the texture with
+`copyBufferToTexture`, which asks neither backend to reinterpret anything.
+The decode does it for level 0 and the mip generator for every level; the
+textures keep the formats they have on Metal. That is the fix the section
+above said was left: 8-bit images, their mips and their sRGB views are right
+on CUDA now, and the PNG, UDIM and Hydra tests that shade through them pass.
+
+**`RayDesc` is not a type on every target.** The compute BVH route shares its
+ray with the hardware route, and `RayDesc` exists only where the target has
+ray tracing: on CUDA without OptiX nvrtc answered "identifier RayDesc is
+undefined" and the whole route failed to compile, which is why the splat ray
+tracer's six cases and two Hydra cases failed here. `rt_integrate.slang`
+carries its own `LrtRay` (the same four fields) and the hardware route fills
+a `RayDesc` from it at the trace. The compute route now runs on CUDA: its
+images match the GPU reference (p99 0, max 1 of 47500), and the comparisons
+against the rasteriser skip as the device has none.
 
 `lrt_gpu_tests` keeps the probes that establish all of the above, and they
 pass on both backends bar the one that names the defect.
@@ -3536,9 +3571,14 @@ a WebGPU build would take the engine's records, not Hydra's prims.
 
 ### Not done
 
-- The texture surface write itself on CUDA: 8-bit images go into half-float
-  textures there instead (`Caps::unormStores`), which costs memory, not
-  pixels.
+- **open_pbr_surface on CUDA.** Of the twelve materials the lobe library is
+  checked against MaterialX's genglsl closures with, eleven agree here to
+  2e-5 and `open_pbr_surface` (six lobes, coat and fuzz) does not: every
+  component differs, ours 1.339 where genglsl's is 0.054. The same source on
+  Metal and on Vulkan agrees, so it is what the CUDA target makes of one of
+  the two, and it is not the build stack's statics -- Slang puts a module's
+  `static` globals in the per-thread kernel context on CUDA as on Metal
+  (checked on the emitted code). Not found yet.
 - A release build and any timing beyond the sort's own.
 - gpe on Vulkan: gpe has no Vulkan backend, so its tests and aofx's host
   run on CUDA and Metal only.

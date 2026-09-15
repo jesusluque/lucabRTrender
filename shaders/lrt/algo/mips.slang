@@ -8,6 +8,8 @@
 // level 0's mean however the sizes fall (Nvidia, "Non-Power-of-Two Mipmapping").
 module mips;
 
+import lrt.common.packing;
+
 struct MipParams {
     uint sourceWidth;
     uint sourceHeight;
@@ -15,7 +17,8 @@ struct MipParams {
     uint height;
     uint srgb;   // 1: texels hold sRGB-encoded colour; averaged as light, stored encoded
     uint levels; // 255 for an 8-bit target: stored as its nearest code; 0 for a float target
-    uint pad1; uint pad2;
+    uint packedKind;   // 0: written to the texture; else lrtPackTexel's kind
+    uint pad2;
 };
 
 float decodeSrgb(float x) {
@@ -28,6 +31,7 @@ float encodeSrgb(float x) {
 
 Texture2D<float4>         source;
 RWTexture2D<float4>       target;
+RWStructuredBuffer<uint>  packed;   // where the store does not convert
 ConstantBuffer<MipParams> params;
 
 struct Taps {
@@ -87,5 +91,9 @@ void mipDownsample(uint3 tid: SV_DispatchThreadID) {
         const float levels = float(params.levels);
         sum = (round(saturate(sum) * levels) + 0.25) / levels;
     }
-    target[tid.xy] = sum;
+    if (params.packedKind != 0) {
+        lrtPackTexel(packed, params.packedKind, tid.y * params.width + tid.x, sum);
+    } else {
+        target[tid.xy] = sum;
+    }
 }

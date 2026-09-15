@@ -70,11 +70,12 @@ struct Caps {
     /// locations (Metal's vertex_id and instance_id). Elsewhere Slang
     /// subtracts them, and a shader adds SV_Start*Location back.
     bool drawIdsIncludeStart = false;
-    /// A float4 stored through an RWTexture2D into an 8-bit unorm texture
-    /// arrives as the texture's format. CUDA's surface store writes the
-    /// float's own bytes instead, so 8-bit images go into a float texture
-    /// there (tests/gpu/test_textures.cpp measures it).
-    bool unormStores = false;
+    /// A float4 stored through an RWTexture2D arrives as the texture's
+    /// format. CUDA's surface store writes the float's own bytes instead
+    /// (tests/gpu/test_textures.cpp measures it), so where this is false a
+    /// kernel packs the texels into a buffer and the buffer is copied into
+    /// the texture.
+    bool convertingStores = false;
     uint32_t optixVersion = 0;
 };
 

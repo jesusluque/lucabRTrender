@@ -33,6 +33,11 @@ struct TextureDesc {
     std::string       label;
 };
 
+/// How a kernel writes a texel of `format` into a buffer (packing.slang's
+/// `lrtPackTexel`): 1 four 8-bit unorms, 2 four halves, 3 four floats, 0 a
+/// format no kernel packs. Only for a device whose stores do not convert.
+[[nodiscard]] uint32_t packedKindOf(rhi::Format format) noexcept;
+
 /// Levels from `width` x `height` x `depth` down to 1x1x1, each half the last
 /// rounded down.
 [[nodiscard]] uint32_t mipChain(uint32_t width, uint32_t height, uint32_t depth = 1) noexcept;

@@ -14,6 +14,11 @@
 #include <pxr/imaging/hdsi/velocityMotionResolvingSceneIndex.h>
 
 #include "RenderDelegate.h"
+#include "Resample.h"
+
+#include <pxr/imaging/hd/primvarsSchema.h>
+
+#include <pxr/imaging/hd/xformSchema.h>
 #include "Camera.h"
 
 #include "Light.h"
@@ -155,6 +160,15 @@ void HdLrtRegisterSceneIndices() {
                 return HdsiMaterialPrimvarTransferSceneIndex::New(inputScene);
             },
             nullptr, 3, HdSceneIndexPluginRegistry::InsertionOrderAtStart);
+        // Last: the delegate's own pass-through, which sends the notices the
+        // scene does not carry (a shutter changed) to everything downstream.
+        HdSceneIndexPluginRegistry::GetInstance().RegisterSceneIndexForRenderer(
+            "lucabRTrender",
+            [](const std::string&, const HdSceneIndexBaseRefPtr& inputScene,
+               const HdContainerDataSourceHandle&) -> HdSceneIndexBaseRefPtr {
+                return HdLrtResampleSceneIndex::New(inputScene);
+            },
+            nullptr, 4, HdSceneIndexPluginRegistry::InsertionOrderAtEnd);
         // Render settings prims keep the `lrt:` namespaced settings and
         // their products reach the bprim; the other renderers' are dropped.
         HdSceneIndexPluginRegistry::GetInstance().RegisterSceneIndexForRenderer(
@@ -169,6 +183,17 @@ void HdLrtRegisterSceneIndices() {
     (void)once;
 }
 
+
+void HdLrtRenderDelegate::SetTerminalSceneIndex(const HdSceneIndexBaseRefPtr& terminalSceneIndex) {
+    HdRenderDelegate::SetTerminalSceneIndex(terminalSceneIndex);
+    _terminal = terminalSceneIndex;
+}
+
+bool HdLrtRenderDelegate::ResampleAllPrims() const {
+    const HdSceneIndexBaseRefPtr terminal(_terminal);
+    return terminal && HdLrtResampleUpstream(terminal, HdDataSourceLocatorSet{HdXformSchema::GetDefaultLocator(),
+                                                                              HdPrimvarsSchema::GetDefaultLocator()}) > 0;
+}
 
 HdLrtRenderDelegate::HdLrtRenderDelegate() { _Setup(); }
 

@@ -8,6 +8,7 @@
 #include <memory>
 
 #include <pxr/imaging/hd/renderDelegate.h>
+#include <pxr/imaging/hd/sceneIndex.h>
 
 #include "Engine.h"
 #include "RenderParam.h"
@@ -25,6 +26,13 @@ public:
     TfTokenVector const& GetSupportedBprimTypes() const override;
     TfTokenVector        GetRenderSettingsNamespaces() const override;
     HdRenderParam* GetRenderParam() const override { return _param.get(); }
+
+    /// Kept, so that a change the scene does not carry can be sent through it.
+    void SetTerminalSceneIndex(const HdSceneIndexBaseRefPtr& terminalSceneIndex) override;
+    /// Every prim's transform and primvars sampled again -- the shutter
+    /// changed -- through the HdLrtResampleSceneIndex in the host's chain.
+    /// False when none is there (a chain not built for this renderer).
+    bool ResampleAllPrims() const;
     HdResourceRegistrySharedPtr GetResourceRegistry() const override { return _registry; }
 
     HdRenderPassSharedPtr CreateRenderPass(HdRenderIndex* index,
@@ -96,6 +104,7 @@ private:
     std::unique_ptr<lrt::usd::Engine>  _engine;
     std::unique_ptr<HdLrtRenderParam>  _param;
     HdResourceRegistrySharedPtr        _registry;
+    HdSceneIndexBasePtr                _terminal;   ///< weak: the render index owns it
 };
 
 /// Registers the scene indices this renderer needs (light linking), once.

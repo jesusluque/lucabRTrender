@@ -83,3 +83,23 @@ public static const float kSH0 = 0.28209479177387814;
 
 /// Harmonic words per splat for `restPerColour` basis functions (3, 8, 15).
 public uint shWordsFor(uint restPerColour) { return (restPerColour * 3 + 1) / 2; }
+
+/// A texel written as the texture's own bytes, for a device whose store into
+/// a texture does not convert (CUDA: surf2Dwrite writes the float4's bytes).
+/// `kind`: 1 four 8-bit unorms in one word, 2 four halves in two, 3 four
+/// floats in four. The words are the texture's rows packed, row 0 first,
+/// which is what copyBufferToTexture takes.
+public void lrtPackTexel(RWStructuredBuffer<uint> packed, uint kind, uint index, float4 texel) {
+    if (kind == 1) {
+        const uint4 bytes = uint4(round(saturate(texel) * 255.0));
+        packed[index] = bytes.x | (bytes.y << 8) | (bytes.z << 16) | (bytes.w << 24);
+    } else if (kind == 2) {
+        packed[index * 2] = (f32tof16(texel.x) & 0xFFFFu) | ((f32tof16(texel.y) & 0xFFFFu) << 16);
+        packed[index * 2 + 1] = (f32tof16(texel.z) & 0xFFFFu) | ((f32tof16(texel.w) & 0xFFFFu) << 16);
+    } else {
+        packed[index * 4] = asuint(texel.x);
+        packed[index * 4 + 1] = asuint(texel.y);
+        packed[index * 4 + 2] = asuint(texel.z);
+        packed[index * 4 + 3] = asuint(texel.w);
+    }
+}

@@ -456,6 +456,12 @@ private:
     };
     PathState                                 pathState_;
     std::atomic<uint64_t>                     revision_{1};   ///< raised by anything a path would see
+    /// Frames still to draw before what is gathered is the shutter's: a
+    /// shutter changed after the prims synced is answered by dirtying them
+    /// (RenderPass), and they carry their new samples only from the next
+    /// Sync -- so this frame and the one that resamples are not converged,
+    /// however many paths they hold.
+    std::atomic<int>                          shutterSettle_{0};
     /// A bit per category name, as they are first seen: a prim's mask and a
     /// light's link have to agree on the numbering, and this is the only
     /// place that sees both. Past 64 names a category cannot be represented

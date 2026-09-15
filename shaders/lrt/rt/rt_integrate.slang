@@ -70,9 +70,20 @@ public RWStructuredBuffer<float4> colour;
 public RWStructuredBuffer<float>  depth;
 public ConstantBuffer<RtParams>   params;
 
+/// A ray, as both routes carry it. Not `RayDesc`: that type exists on a
+/// target only where ray tracing does, and the compute BVH route is meant to
+/// run where there is none (CUDA without OptiX -- measured, nvrtc: "identifier
+/// RayDesc is undefined"). The hardware route fills a RayDesc from this.
+public struct LrtRay {
+    public float3 Origin;
+    public float  TMin;
+    public float3 Direction;
+    public float  TMax;
+};
+
 /// The ray through pixel (px, py) in world space. Its direction has view
 /// z = 1, so t is view depth for every ray.
-public RayDesc primaryRay(uint px, uint py) {
+public LrtRay primaryRay(uint px, uint py) {
     const float2 pixel = float2(float(px) + 0.5, float(py) + 0.5);
     float3 viewOrigin = float3(0.0);
     float3 viewDirection;
@@ -86,7 +97,7 @@ public RayDesc primaryRay(uint px, uint py) {
     }
     const float3x3 toWorld = float3x3(params.v00, params.v01, params.v02, params.v10, params.v11,
                                       params.v12, params.v20, params.v21, params.v22);
-    RayDesc ray;
+    LrtRay ray;
     ray.Origin = mul(toWorld, viewOrigin) + float3(params.v03, params.v13, params.v23);
     ray.Direction = mul(toWorld, viewDirection);
     ray.TMin = params.nearZ;
@@ -95,7 +106,7 @@ public RayDesc primaryRay(uint px, uint py) {
 }
 
 /// The ray in an instance's cloud space. Not normalised: t means the same.
-public void toCloud(RayDesc ray, uint instance, out float3 origin, out float3 direction) {
+public void toCloud(LrtRay ray, uint instance, out float3 origin, out float3 direction) {
     const float4 w0 = instanceData[instance * 3];
     const float4 w1 = instanceData[instance * 3 + 1];
     const float4 w2 = instanceData[instance * 3 + 2];
@@ -288,7 +299,7 @@ public struct Integrator<P : IPrimitives> {
     /// starts. `last`: no segment follows, whatever is pending goes on.
     [mutating]
     [ForceInline]
-    public bool endSegment(inout Cursor cursor, inout RayDesc ray, bool last) {
+    public bool endSegment(inout Cursor cursor, inout LrtRay ray, bool last) {
         const float closed = cursor.closed;
         const uint recordCount = cursor.count;
         const bool exhausted = closed >= kOpen;

@@ -67,19 +67,23 @@ void HdLrtRenderPass::_Execute(HdRenderPassStateSharedPtr const& state, TfTokenV
             projection.distortionK2 = static_cast<double>(camera->GetLensDistortionK2());
         }
         // The shutter, for Sync to sample at. Sync ran before this pass, so a
-        // change here reaches the prims on the next frame: everything with a
-        // transform or points is marked to sample again.
+        // change here reaches the prims on the next frame: every prim's
+        // transform and primvars dirtied through the delegate's scene index,
+        // which every chain built for this renderer holds.
         if (auto* param = _delegate != nullptr ? static_cast<HdLrtRenderParam*>(_delegate->GetRenderParam())
                                                : nullptr;
             param != nullptr) {
-            const double open = camera->GetShutterOpen();
-            const double close = camera->GetShutterClose();
+            // A product that switched motion blur off draws the frame, so
+            // its prims are sampled at the frame and not about the shutter.
+            const bool blurs = _delegate == nullptr || !_delegate->GetDisableMotionBlur();
+            const double open = blurs ? camera->GetShutterOpen() : 0.0;
+            const double close = blurs ? camera->GetShutterClose() : 0.0;
             _engine->setShutter(open, close);
             if (open != param->GetShutterOpen() || close != param->GetShutterClose()) {
                 param->SetShutter(open, close);
-                HdChangeTracker& tracker = GetRenderIndex()->GetChangeTracker();
-                for (const SdfPath& id : GetRenderIndex()->GetRprimIds()) {
-                    tracker.MarkRprimDirty(id, HdChangeTracker::DirtyTransform | HdChangeTracker::DirtyPoints);
+                if (_delegate == nullptr || !_delegate->ResampleAllPrims()) {
+                    lrt::log::warn("hdLrt: the shutter changed and no scene index of this renderer's is in the "
+                                   "chain to resample the prims through; they keep the old samples");
                 }
             }
         }

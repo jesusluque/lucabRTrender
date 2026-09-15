@@ -109,6 +109,23 @@ target_compile_options(lrt_storm_oracle_tests PRIVATE -Wno-old-style-cast -Wno-s
 set_target_properties(lrt_storm_oracle_tests PROPERTIES CXX_VISIBILITY_PRESET default VISIBILITY_INLINES_HIDDEN OFF
                       BUILD_RPATH "${SLANG_ROOT}/lib;${LRT_USD_ROOT}/lib")
 
+# The plugin as a host loads it: UsdImagingGLEngine and HdLrtRendererPlugin
+# by name, in an executable that does not link lrt::usd -- with the delegate's
+# classes in the executable too, a template instantiated in both (make_shared
+# of the render pass) binds to the executable's copy, and the pass then
+# fails to recognise the plugin's own render buffers.
+lrt_test(lrt_host_tests
+    SOURCES usd/test_host.cpp
+    LIBS lrt::render usd usdGeom usdImaging usdImagingGL hd hgi cameraUtil)
+add_dependencies(lrt_host_tests hdLrt)
+target_compile_definitions(lrt_host_tests PRIVATE LRT_HYDRA_PLUGIN_DIR="${LRT_HYDRA_PLUGIN_DIR}")
+target_include_directories(lrt_host_tests SYSTEM PRIVATE "${LRT_USD_ROOT}/include")
+target_link_directories(lrt_host_tests PRIVATE "${LRT_USD_ROOT}/lib")
+target_compile_options(lrt_host_tests PRIVATE -Wno-old-style-cast -Wno-shadow -Wno-deprecated-declarations
+                       -Wno-double-promotion -Wno-cast-align)
+set_target_properties(lrt_host_tests PROPERTIES CXX_VISIBILITY_PRESET default VISIBILITY_INLINES_HIDDEN OFF
+                      BUILD_RPATH "${SLANG_ROOT}/lib;${LRT_USD_ROOT}/lib")
+
 if(LRT_BUILD_VIEW)
     lrt_test(lrt_view_tests
         SOURCES view/test_view.cpp
