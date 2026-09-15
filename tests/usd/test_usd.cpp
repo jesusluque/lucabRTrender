@@ -4114,3 +4114,85 @@ TEST_CASE("a UsdVol volume with an OpenVDB field absorbs as Beer-Lambert says th
     CHECK(n[2] > 3000);
     CHECK(n[3] == 0);
 }
+
+
+// A frame of volumes alone (M9): no mesh, a medium that scatters everything
+// and absorbs nothing, under a dome of radiance 1. The traced technique
+// takes the mesh layer for the volume even with no mesh, every sample walks
+// its camera ray, and a pixel the medium touched reads the dome's radiance
+// over its opacity -- judged as the technique-level furnace is, within five
+// standard errors measured from the pixels' spread.
+TEST_CASE("a frame of volumes alone is path traced through Hydra, and an albedo-one medium reads the dome",
+          "[usd][gpu][volume][furnace]") {
+    LRT_REQUIRE_GPU(gpu);
+    const gpu::Caps& caps = gpu->device->caps();
+    if (!caps.rayQuery || !caps.accelerationStructure) {
+        SKIP("needs ray queries");
+    }
+    if (!io::haveOpenVdb()) {
+        SKIP("built without OpenVDB");
+    }
+    const fs::path vdb = scratch("hydra_furnace.vdb");
+    const io::VdbBox box{{0, 0, 0}, {32, 32, 32}, 0.5F};
+    REQUIRE(io::writeVdbBoxes(vdb, "density", 0.1, std::span<const io::VdbBox>(&box, 1)));
+    const fs::path path = scratch("volume_alone.usda");
+    {
+        std::ofstream out(path);
+        out << "#usda 1.0\n(\n    upAxis = \"Y\"\n)\n"
+               "def DomeLight \"Sky\"\n{\n    float inputs:intensity = 1\n}\n"
+               "def Volume \"Cloud\"\n{\n"
+               "    double3 xformOp:translate = (-1.6, -1.6, -5)\n"
+               "    uniform token[] xformOpOrder = [\"xformOp:translate\"]\n"
+               "    rel field:density = </Cloud/density>\n"
+               "    float primvars:lrt:densityScale = 0.2\n"
+               "    color3f primvars:lrt:albedo = (1, 1, 1)\n"
+               "    def OpenVDBAsset \"density\"\n    {\n"
+               "        asset filePath = @" << vdb.string() << "@\n"
+               "        token fieldName = \"density\"\n    }\n}\n";
+    }
+    const uint32_t w = 81;
+    const uint32_t h = 61;
+    render::Camera camera = render::Camera::lookingAt({0.0, 0.0, 0.0}, {0.0, 0.0, -1.0});
+    camera.lens.focal = 35.0;
+    auto renderer = usd::StageRenderer::open(path);
+    if (!renderer) FAIL(renderer.error().toString());
+    (*renderer)->setPathSamples(64);
+    (*renderer)->setPathBounces(32);
+    (*renderer)->setPathTotal(256);
+    auto image = (*renderer)->render(camera, 0.0, w, h, "rt");
+    if (!image) FAIL(image.error().toString());
+    test::dumpPpm("volume_alone_hydra", image->rgba.data(), w, h);
+    gpu::BufferDesc desc;
+    desc.bytes = image->rgba.size() * 4;
+    desc.elementBytes = 16;
+    auto frame = gpu::Buffer::create(*gpu->device, desc, image->rgba.data());
+    REQUIRE(frame);
+    auto made = gpu::ComputeKernel::create(*gpu->library, "lrt/test/volume_render_check", "volumeFurnaceCheck");
+    if (!made) FAIL(made.error().toString());
+    gpu::Buffer counts = test::uintBuffer(*gpu->device, 2, "furnace.hydra.counts");
+    gpu::Buffer sums = test::uintBuffer(*gpu->device, 2, "furnace.hydra.sums");
+    {
+        gpu::CommandBatch batch(*gpu->device);
+        made->dispatch(batch, {1, 1, 1}, [&](rhi::ShaderCursor c) {
+            c["furnace"]["pixels"].setData(w * h);
+            c["furnace"]["minAlpha"].setData(0.25F);
+            c["with"].setBinding(frame->rhi());
+            c["counts"].setBinding(counts.rhi());
+            c["zBits"].setBinding(sums.rhi());
+        });
+        REQUIRE(batch.submit(true));
+    }
+    uint32_t n[2] = {};
+    float s[2] = {};
+    REQUIRE(counts.read(*gpu->device, 0, sizeof(n), n));
+    REQUIRE(sums.read(*gpu->device, 0, sizeof(s), s));
+    const double count = n[0];
+    const double mean = count > 0 ? s[0] / count : 0.0;
+    const double spread = count > 1 ? std::sqrt(std::max(s[1] / count - mean * mean, 0.0)) : 0.0;
+    const double standardError = spread / std::sqrt(std::max(count, 1.0));
+    std::printf("  volumes alone: %u pixels with opacity over 0.25 (of %u touched): mean radiance %.5f, spread %.4f, "
+                "%.2f standard errors from 1\n",
+                n[0], n[1], mean, spread, (mean - 1.0) / std::max(standardError, 1e-9));
+    CHECK(n[0] > 1000);
+    CHECK(std::abs(mean - 1.0) < 5.0 * standardError);
+}

@@ -992,7 +992,9 @@ Result<void> Engine::render(const render::Projection& projection, const render::
         bool anyMesh = false;
         {
             const std::lock_guard<std::mutex> held(guard_);
-            anyMesh = !meshes_.empty();
+            // A traced volume draws through the mesh layer, which wants the
+            // scene and the material programs even when no mesh is in it.
+            anyMesh = !meshes_.empty() || (technique == Technique::RayTraced && !volumes_.empty());
         }
         if (anyMesh) {
             LRT_TRY(prepareMaterials(aovRequest.primvars));
@@ -1245,6 +1247,16 @@ Result<void> Engine::render(const render::Projection& projection, const render::
     }
     // Opaque layers first -- meshes, points -- then splats blended over them.
     const bool drawMeshes = !meshInstances.empty() || !meshSets.empty();
+    // Volumes are path traced through the mesh layer, whose visibility then
+    // finds nothing and every sample walks its camera ray: a traced frame
+    // with volumes has that layer even when it has no mesh.
+    bool volumesInFrame = false;
+    if (technique == Technique::RayTraced) {
+        const std::lock_guard<std::mutex> held(guard_);
+        for (const auto& [id, volume] : volumes_) {
+            volumesInFrame = volumesInFrame || volume.visible;
+        }
+    }
     const gpu::Caps& caps = device_->caps();
     // A frame of nothing but splats is GaussianRayTracer's, and it writes the
     // whole image: there is no layer to compose under it, so it returns here.
@@ -1252,7 +1264,7 @@ Result<void> Engine::render(const render::Projection& projection, const render::
     // the surfaces are path traced below and the splats composed over them by
     // the rasteriser, because the tracer takes no `under` layer. Splats inside
     // the rays is still to be written (docs/decisions.md, M6).
-    if (technique == Technique::RayTraced && !drawMeshes) {
+    if (technique == Technique::RayTraced && !drawMeshes && !volumesInFrame) {
         if (!points.empty()) {
             static bool warned = false;
             if (!warned) {
@@ -1282,7 +1294,7 @@ Result<void> Engine::render(const render::Projection& projection, const render::
     if (drawMeshes && visibility == MeshVisibility::Rays && !(caps.rayQuery && caps.accelerationStructure)) {
         return Error(ErrorCode::Unsupported, "mesh visibility by rays: the device has no ray queries");
     }
-    const bool meshLayer = drawMeshes;
+    const bool meshLayer = drawMeshes || volumesInFrame;
     const bool pathTracing = meshLayer && technique == Technique::RayTraced;
     if (!pathTracing) {
         pathState_.traced = false;
@@ -1453,8 +1465,7 @@ Result<void> Engine::render(const render::Projection& projection, const render::
             const std::lock_guard<std::mutex> held(guard_);
             if (!volumes_.empty()) {
                 volumesUndrawnSaid_ = true;
-                log::info("hdLrt: volumes are drawn by the rt technique; this frame's is {}",
-                          technique == Technique::Raster ? "raster" : "rt without meshes");
+                log::info("hdLrt: volumes are drawn by the rt technique; the raster technique draws none");
             }
         }
         const technique::MaterialFrame* cutouts = (materialCutouts_ || scene_->anyHidden()) ? &frame : nullptr;

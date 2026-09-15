@@ -2648,11 +2648,18 @@ over a mesh plane under a `DistantLight`: 0 of 9801 pixels beyond five
 deviations, mean z^2 1.014, mean ratio 0.1920 against 0.1921, the outside
 unchanged.
 
+**A frame of volumes alone** is drawn too. Path tracing runs in the mesh
+layer, which the engine took only when a mesh was in the frame, and whose
+scene and material programs it made only when a mesh had arrived; a traced
+frame with a visible volume now takes the layer with an empty scene, the
+visibility finds nothing, and every sample walks its camera ray. Checked as
+the furnace through Hydra with no mesh at all -- a `DomeLight` of radiance 1
+and an albedo-one `Volume`: 4278 pixels read 1.00044, 0.44 standard errors
+from the dome.
+
 ### Not done
 
-- **A frame of volumes alone is not drawn**: path tracing needs the mesh
-  layer, which needs a mesh. The raster technique draws no volume, and the
-  engine says so once.
+- The raster technique draws no volume, and the engine says so once.
 - Only float grids, one field a volume (density); no temperature, emission
   or colour fields, no `UsdVol` material networks -- the medium's
   parameters are the three primvars.
