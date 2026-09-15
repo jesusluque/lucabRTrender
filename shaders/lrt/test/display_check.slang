@@ -122,3 +122,26 @@ void displayCheck(uint3 tid: SV_DispatchThreadID) {
     counts[1] = params.width * params.height;
     worst[0] = worstError;
 }
+
+/// Two displays of the same source against each other: pixels whose
+/// largest channel differs by more than the tolerance, and the worst.
+Texture2D<float4> other;
+
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void displayAgree(uint3 tid: SV_DispatchThreadID) {
+    uint over = 0;
+    float worstError = 0.0;
+    for (uint y = 0; y < params.height; ++y) {
+        for (uint x = 0; x < params.width; ++x) {
+            const float3 a = shown.Load(int3(int(x), int(y), 0)).rgb;
+            const float3 b = other.Load(int3(int(x), int(y), 0)).rgb;
+            const float error = max(max(abs(a.r - b.r), abs(a.g - b.g)), abs(a.b - b.b));
+            worstError = max(worstError, error);
+            over += error > params.tolerance ? 1u : 0u;
+        }
+    }
+    counts[0] = over;
+    counts[1] = params.width * params.height;
+    worst[0] = worstError;
+}

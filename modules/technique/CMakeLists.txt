@@ -4,6 +4,7 @@ lrt_add_module(technique
     SOURCES
         src/Denoiser.cpp
         src/DisplayTransform.cpp
+        src/Ocio.cpp
         src/Aces2.cpp
         src/MaterialPrograms.cpp
         src/MaterialShading.cpp
@@ -17,6 +18,19 @@ lrt_add_module(technique
         lrt::material
         lrt::light
         lrt::render)
+
+# OpenColorIO (scripts/build-ocio.sh), as a compiler of shader text and LUTs
+# for the display. Without it ViewTransform::Ocio says so.
+set(LRT_OCIO_ROOT "$ENV{HOME}/tools/ocio-2.5.2" CACHE PATH "OpenColorIO install")
+find_package(OpenColorIO 2.5 CONFIG QUIET HINTS "${LRT_OCIO_ROOT}" NO_DEFAULT_PATH)
+if(OpenColorIO_FOUND)
+    target_link_libraries(lrt_technique PRIVATE OpenColorIO::OpenColorIO)
+    target_compile_definitions(lrt_technique PRIVATE LRT_HAVE_OCIO=1)
+    message(STATUS "technique: OpenColorIO ${OpenColorIO_VERSION} (${LRT_OCIO_ROOT})")
+else()
+    target_compile_definitions(lrt_technique PRIVATE LRT_HAVE_OCIO=0)
+    message(STATUS "technique: no OpenColorIO at ${LRT_OCIO_ROOT}; no OCIO view")
+endif()
 
 # OIDN, GPU devices only (scripts/build-oidn.sh). Without it the engine has no
 # denoiser, and says so.

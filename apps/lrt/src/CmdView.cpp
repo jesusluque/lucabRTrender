@@ -23,6 +23,9 @@ void addView(CLI::App& app) {
     cmd->add_option("--light-samples", options->lightSamples, "samples per light per pixel (1 is interactive)");
     cmd->add_flag("--choose-lights", options->chooseLights, "one light a sample, chosen by power");
     cmd->add_flag("--edr", options->edr, "extended dynamic range: a float surface and ACES 2.0 up to the screen's peak");
+    cmd->add_option("--ocio-config", options->ocioConfig, "an OpenColorIO config (default with --ocio-display/--ocio-view: ocio://studio-config-latest)");
+    cmd->add_option("--ocio-display", options->ocioDisplay, "the OCIO display (default: the config's)");
+    cmd->add_option("--ocio-view", options->ocioView, "the OCIO view (default: the display's)");
     cmd->add_option("--snapshot", options->snapshot, "with --frames: the last frame as shown, to this EXR");
     cmd->add_flag("--play", options->play, "start with the timeline playing");
     cmd->callback([options, size] {

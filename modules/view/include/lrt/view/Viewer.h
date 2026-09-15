@@ -27,6 +27,12 @@ struct ViewOptions {
     /// Extended dynamic range: a float surface in linear P3, ACES 2.0 with
     /// the screen's peak as its peak. On a standard display the same as off.
     bool                  edr = false;
+    /// An OpenColorIO view to start with: any of these set compiles the
+    /// config's display and view into the display kernel (empty config:
+    /// OCIO's built-in studio config; empty display or view: its defaults).
+    std::string           ocioConfig;
+    std::string           ocioDisplay;
+    std::string           ocioView;
     bool                  visible = true;
     /// Start with the timeline playing, as the Play button does.
     bool                  play = false;

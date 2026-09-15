@@ -5,6 +5,7 @@
 #include "../gpu/GpuTest.h"
 
 #include <cstdio>
+#include <tuple>
 
 #include "lrt/gpu/Texture.h"
 #include "lrt/technique/DisplayTransform.h"
@@ -195,4 +196,133 @@ TEST_CASE("ACES 2.0 keeps neutrals on its tonescale, inverts over the display cu
         CHECK(g[0] < 8192 / 16);
         CHECK(gw[0] < 0.7F);
     }
+}
+
+// OpenColorIO's ACES 2.0 against ours. The studio config's "ACES 2.0 - SDR
+// 100 nits (Rec.709)" on its sRGB display, from linear Rec.709, is OCIO's own
+// implementation of the output transform -- its fixed functions, its tables,
+// its Rec.709 to ACES2065-1 matrix -- compiled by the display into a Slang
+// kernel; aces2.slang is a port of the reference CTL. Two implementations of
+// one transform, each run on the device, agreeing pixel for pixel over the
+// same sixteen stops of hues and coverages.
+TEST_CASE("OpenColorIO's ACES 2.0 view, compiled into a kernel, agrees with aces2.slang",
+          "[technique][display][ocio]") {
+    LRT_REQUIRE_GPU(gpu);
+    if (!technique::ocioBuilt()) {
+        SKIP("no OpenColorIO in this build");
+    }
+    const uint32_t w = 257;
+    const uint32_t h = 64;
+    auto generate = gpu::ComputeKernel::create(*gpu->library, "lrt/test/display_check", "displayGenerate");
+    auto agree = gpu::ComputeKernel::create(*gpu->library, "lrt/test/display_check", "displayAgree");
+    auto display = technique::DisplayTransform::create(*gpu->library);
+    if (!generate) FAIL(generate.error().toString());
+    if (!agree) FAIL(agree.error().toString());
+    if (!display) FAIL(display.error().toString());
+    technique::OcioView ocio;
+    ocio.display = "sRGB - Display";
+    ocio.view = "ACES 2.0 - SDR 100 nits (Rec.709)";
+    if (auto set = display->setOcio(ocio); !set) FAIL(set.error().toString());
+    std::printf("  %s\n", display->ocioDescription().c_str());
+    gpu::BufferDesc desc;
+    desc.bytes = uint64_t{w} * h * 16;
+    desc.elementBytes = 16;
+    desc.label = "display.source";
+    auto source = gpu::Buffer::create(*gpu->device, desc);
+    REQUIRE(source);
+    {
+        gpu::CommandBatch batch(*gpu->device);
+        generate->dispatch(batch, {w, h, 1}, [&](rhi::ShaderCursor cursor) {
+            cursor["source"].setBinding(source->rhi());
+            cursor["params"]["width"].setData(w);
+            cursor["params"]["height"].setData(h);
+        });
+        REQUIRE(batch.submit(true));
+    }
+    gpu::TextureDesc target;
+    target.width = w;
+    target.height = h;
+    target.format = rhi::Format::RGBA32Float;
+    target.usage = rhi::TextureUsage::UnorderedAccess | rhi::TextureUsage::ShaderResource;
+    target.label = "display.aces2";
+    auto ours = gpu::Texture::create(*gpu->device, target);
+    target.label = "display.ocio";
+    auto theirs = gpu::Texture::create(*gpu->device, target);
+    REQUIRE(ours);
+    REQUIRE(theirs);
+    technique::DisplaySource from;
+    from.kind = technique::DisplaySource::Kind::Colour;
+    from.buffer = &*source;
+    from.width = w;
+    from.height = h;
+    technique::DisplaySettings settings;
+    settings.display = technique::DisplayEncoding::Srgb;
+    settings.background = {0.05F, 0.1F, 0.2F};
+    const auto measure = [&](float tolerance) {
+        gpu::Buffer counts = test::uintBuffer(*gpu->device, 2, "display.counts");
+        gpu::BufferDesc one;
+        one.bytes = 4;
+        one.elementBytes = 4;
+        auto worst = gpu::Buffer::create(*gpu->device, one);
+        REQUIRE(worst);
+        auto a = ours->view(0);
+        auto b = theirs->view(0);
+        REQUIRE(a);
+        REQUIRE(b);
+        {
+            gpu::CommandBatch batch(*gpu->device);
+            agree->dispatch(batch, {1, 1, 1}, [&](rhi::ShaderCursor cursor) {
+                cursor["shown"].setBinding((*a).get());
+                cursor["other"].setBinding((*b).get());
+                cursor["counts"].setBinding(counts.rhi());
+                cursor["worst"].setBinding(worst->rhi());
+                cursor["params"]["width"].setData(w);
+                cursor["params"]["height"].setData(h);
+                cursor["params"]["tolerance"].setData(tolerance);
+            });
+            REQUIRE(batch.submit(true));
+        }
+        uint32_t n[2] = {};
+        float error = 0.0F;
+        REQUIRE(counts.read(*gpu->device, 0, sizeof(n), n));
+        REQUIRE(worst->read(*gpu->device, 0, sizeof(error), &error));
+        return std::make_tuple(n[0], n[1], error);
+    };
+    for (const float exposure : {0.0F, 2.5F, -3.0F}) {
+        settings.exposure = exposure;
+        {
+            gpu::CommandBatch batch(*gpu->device);
+            settings.view = technique::ViewTransform::Aces2;
+            REQUIRE(display->run(batch, from, settings, ours->rhi()));
+            settings.view = technique::ViewTransform::Ocio;
+            REQUIRE(display->run(batch, from, settings, theirs->rhi()));
+            REQUIRE(batch.submit(true));
+        }
+        const auto [over, pixels, worst] = measure(1.0F / 255.0F);
+        std::printf("  exposure %+.1f: %u of %u pixels differ by more than 1/255, worst %.2e\n", double(exposure), over,
+                    pixels, double(worst));
+        CHECK(pixels == w * h);
+        CHECK(over == 0);
+        // Measured 5.5e-4 at worst (at +2.5 stops): the two differ in how
+        // they reach ACES2065-1 from Rec.709 and in float evaluation, not in
+        // the transform.
+        CHECK(worst < 1e-3F);
+    }
+    // And the control: the OCIO view is not ACES's by accident -- its
+    // un-tone-mapped view differs.
+    ocio.view = "Un-tone-mapped";
+    if (auto set = display->setOcio(ocio); !set) FAIL(set.error().toString());
+    settings.exposure = 0.0F;
+    {
+        gpu::CommandBatch batch(*gpu->device);
+        settings.view = technique::ViewTransform::Aces2;
+        REQUIRE(display->run(batch, from, settings, ours->rhi()));
+        settings.view = technique::ViewTransform::Ocio;
+        REQUIRE(display->run(batch, from, settings, theirs->rhi()));
+        REQUIRE(batch.submit(true));
+    }
+    const auto [over, pixels, worst] = measure(1.0F / 255.0F);
+    std::printf("  control, the un-tone-mapped view: %u of %u pixels differ by more than 1/255, worst %.2e\n", over,
+                pixels, double(worst));
+    CHECK(over > pixels / 4);
 }

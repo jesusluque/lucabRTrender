@@ -9,10 +9,15 @@
 
 namespace lrt::technique {
 
+// Ocio.cpp: the compiled OCIO view, whichever way the build went.
+const gpu::ComputeKernel& ocioKernel(const DisplayTransform::OcioState& state);
+void bindOcio(const DisplayTransform::OcioState& state, rhi::ShaderCursor cursor);
+
 Result<DisplayTransform> DisplayTransform::create(gpu::ShaderLibrary& library) {
     auto kernel = gpu::ComputeKernel::create(library, "lrt/technique/display", "displayTransform");
     if (!kernel) return std::move(kernel).error();
     DisplayTransform display;
+    display.library_ = &library;
     display.device_ = &library.device();
     display.kernel_ = std::move(*kernel);
     gpu::BufferDesc four;
@@ -54,7 +59,15 @@ Result<void> DisplayTransform::run(gpu::CommandBatch& batch, const DisplaySource
         const bool p3 = settings.display == DisplayEncoding::DisplayP3 || settings.display == DisplayEncoding::LinearP3;
         LRT_TRY(aces_.prepare(batch, settings.peakLuminance, p3 ? Aces2Limiting::P3D65 : Aces2Limiting::Rec709));
     }
-    kernel_.dispatch(batch, {ow, oh, 1}, [&](rhi::ShaderCursor cursor) {
+    const bool ocio = settings.view == ViewTransform::Ocio;
+    if (ocio && ocio_ == nullptr) {
+        return Error(ErrorCode::InvalidArgument, "display: the OCIO view has no config; setOcio first");
+    }
+    const gpu::ComputeKernel& kernel = ocio ? ocioKernel(*ocio_) : kernel_;
+    kernel.dispatch(batch, {ow, oh, 1}, [&](rhi::ShaderCursor cursor) {
+        if (ocio) {
+            bindOcio(*ocio_, cursor);
+        }
         cursor["acesParams"].setBinding(aces_.ready() ? aces_.params().rhi() : placeholderFloat4_.rhi());
         cursor["acesTables"].setBinding(aces_.ready() ? aces_.tables().rhi() : placeholderWord_.rhi());
         cursor["colour"].setBinding(valid && floats ? source.buffer->rhi() : placeholderFloat4_.rhi());

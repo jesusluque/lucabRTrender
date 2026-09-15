@@ -9,6 +9,7 @@
 #include "lrt/core/Platform.h"
 #include "lrt/gpu/Device.h"
 #include "lrt/technique/Denoiser.h"
+#include "lrt/technique/DisplayTransform.h"
 
 #if LRT_HAVE_MATERIALX
 #include <MaterialXCore/Util.h>
@@ -57,6 +58,7 @@ void addInfo(CLI::App& app) {
         } else {
             std::printf("denoiser       none: %s\n", denoiser.error().toString().c_str());
         }
+        std::printf("ocio           %s\n", technique::ocioBuilt() ? "OpenColorIO, as the display's compiler" : "none in this build");
         // One TBB in the process, or two schedulers fight over the cores and
         // two sets of thread-local state disagree.
         int tbb = 0;

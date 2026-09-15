@@ -2760,12 +2760,50 @@ screen reporting a headroom of 1.00: the pipeline runs (draw 12.6 ms
 medians at 640x400, snapshot written), which shows the plumbing and not the
 range; a screen with headroom is what would.
 
-**OCIO is not built.** The USD prefix carries no OpenColorIO, so the
-optional route the plan described -- OCIO as a compiler whose shader text
-and LUTs become a generated Slang module and textures, the LUT values the
-one thing the host would compute -- is not in the tree; ACES 2.0 analytic
-is the default and the only colour management, and `renderingColorSpace`
-is read from the settings prim and reported, not acted on.
+**OCIO as a compiler.** OpenColorIO 2.5.2 is built by
+`scripts/build-ocio.sh` into `~/tools/ocio-2.5.2` on both machines (Ubuntu
+ships 2.1, which has no ACES 2.0), its own dependencies linked into it
+statically so none meets OpenUSD's. `DisplayTransform::setOcio` takes a
+config (OCIO's built-in studio config by default), a display and a view,
+from the engine's linear Rec.709 (`lin_rec709_scene`); the processor's GPU
+shader is generated as HLSL, which Slang reads as it is, and wrapped in a
+generated module named by its hash that imports the display kernel's
+pieces -- the pixel under the output pixel, the premultiplied colour over
+the background, exposure, and the non-colour modes -- so `ViewTransform::Ocio`
+is the same kernel with OCIO's function where the view transform was. Two
+rewrites of the text, both about the target and not the maths: 1D LUTs are
+asked for as 2D textures (`setAllowTexture1D(false)`), and `Sample` becomes
+`SampleLevel(..., 0)`, since a compute kernel has no derivatives and the
+tables have one level. Uniforms (dynamic properties) are bound by the names
+OCIO gives them; array uniforms are refused when the view compiles.
+
+**The exception, as the plan wrote it.** The LUT values are OCIO's,
+computed on the host when the processor is built -- the one piece of
+arithmetic on colour this route does not do on the device. They are
+uploaded as OCIO lays them out and placed into `RGBA32Float` textures by a
+kernel (`lrt_ocio_fill`), so the host does not even re-lay them. Every pixel
+is a kernel's. OCIO reports failure by throwing; `setOcio` is where those
+exceptions stop and become a `Result`.
+
+**Checked against aces2.slang.** The studio config's "ACES 2.0 - SDR 100
+nits (Rec.709)" view on its sRGB display is OCIO's own implementation of the
+output transform -- its fixed functions, its hue tables, its Rec.709 to
+ACES2065-1 matrix -- and aces2.slang is a port of the reference CTL: two
+implementations, each run on the device over the same sixteen stops of hues
+and coverages at three exposures. 0 of 16448 pixels differ by more than
+1/255 at any exposure; the worst difference is 3.2e-4 at 0 stops, 5.5e-4 at
++2.5 and 2.2e-5 at -3 (the test bounds it at 1e-3). The control, the
+config's un-tone-mapped view, differs at every pixel (worst 4.9). The same
+on the L4, under Vulkan and under CUDA alike: 0 pixels past 1/255, worst
+3.2e-4, 5.5e-4 and 2.2e-5. `lrt view
+--ocio-display D --ocio-view V [--ocio-config C]` starts on the OCIO view,
+and the panel lists it beside the others (Kitchen_set, 800x450: draw 17.5
+ms median, as AgX's 17.3).
+
+**What OCIO does not settle.** `renderingColorSpace` is still read and
+reported, not acted on: the engine renders in linear Rec.709 and OCIO is
+told so. For a studio config that is not ACES there is no second
+implementation to check against, only that the kernel runs what OCIO wrote.
 
 **Light groups and what is not a light.** A dome the camera sees is in its
 dome's group: `C.*<L.'NAME'>` matches the camera's ray meeting the light

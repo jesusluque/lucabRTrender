@@ -241,6 +241,17 @@ Result<ViewStats> runViewer(const ViewOptions& options) {
     if (!ui) return std::move(ui).error();
     auto display = technique::DisplayTransform::create(library);
     if (!display) return std::move(display).error();
+    const bool ocio = !options.ocioConfig.empty() || !options.ocioDisplay.empty() || !options.ocioView.empty();
+    if (ocio) {
+        technique::OcioView chosen;
+        if (!options.ocioConfig.empty()) {
+            chosen.config = options.ocioConfig;
+        }
+        chosen.display = options.ocioDisplay;
+        chosen.view = options.ocioView;
+        LRT_TRY(display->setOcio(chosen));
+        lrt::log::info("lrt view: {}", display->ocioDescription());
+    }
 
     // What the panels set.
     const std::vector<std::string> cameras = stage.cameras();
@@ -253,7 +264,8 @@ Result<ViewStats> runViewer(const ViewOptions& options) {
     int technique = indexOf(kTechniques, options.technique);
     int visibility = indexOf(kVisibility, options.visibility);
     int aov = 0;
-    int viewTransform = surfaceFormat == rhi::Format::RGBA16Float ? 2 : 1;   // ACES 2.0 for extended range, AgX otherwise
+    // OCIO when one was given; ACES 2.0 for extended range; AgX otherwise.
+    int viewTransform = ocio ? 3 : surfaceFormat == rhi::Format::RGBA16Float ? 2 : 1;
     int displayEncoding = surfaceFormat == rhi::Format::RGBA16Float ? 3 : 0;
     float exposure = 0.0F;
     float renderScale = 1.0F;
@@ -403,8 +415,11 @@ Result<ViewStats> runViewer(const ViewOptions& options) {
                 request();
             }
             ImGui::Separator();
-            const char* views[] = {"Standard", "AgX", "ACES 2.0"};
-            ImGui::Combo("View transform", &viewTransform, views, 3);
+            const char* views[] = {"Standard", "AgX", "ACES 2.0", "OCIO"};
+            ImGui::Combo("View transform", &viewTransform, views, ocio ? 4 : 3);
+            if (viewTransform == 3) {
+                ImGui::TextUnformatted(display->ocioDescription().c_str());
+            }
             const char* displays[] = {"sRGB", "Rec.709 (BT.1886)", "Display P3", "Linear P3 (extended range)"};
             ImGui::Combo("Display", &displayEncoding, displays, surfaceFormat == rhi::Format::RGBA16Float ? 4 : 3);
             ImGui::SliderFloat("Exposure", &exposure, -8.0F, 8.0F, "%.1f stops");

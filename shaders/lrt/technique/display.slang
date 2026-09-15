@@ -122,22 +122,39 @@ float3 idColour(uint id) {
     return float3(float(h & 255u), float((h >> 8) & 255u), float((h >> 16) & 255u)) / 255.0 * 0.8 + 0.2;
 }
 
-[shader("compute")]
-[numthreads(16, 16, 1)]
-void displayTransform(uint3 tid: SV_DispatchThreadID) {
+/// The source pixel under output pixel `tid`, false outside the output.
+public bool displayPixel(uint3 tid, out uint pixel) {
+    pixel = 0;
     if (tid.x >= params.outputWidth || tid.y >= params.outputHeight) {
-        return;
+        return false;
     }
     const uint x = min(uint((float(tid.x) + 0.5) * float(params.width) / float(params.outputWidth)), params.width - 1);
     const uint y = min(uint((float(tid.y) + 0.5) * float(params.height) / float(params.outputHeight)), params.height - 1);
     const uint row = params.flipRows != 0 ? params.height - 1 - y : y;
-    const uint pixel = row * params.width + x;
-    const float3 background = float3(params.backgroundR, params.backgroundG, params.backgroundB);
-    float3 shown = transferEncode(background, params.display);
-    if (params.mode == 0) {
-        shown = displayColour(colour[pixel * params.stride + params.offset], background, params.exposure, params.view,
-                              params.display);
-    } else if (params.mode == 1) {
+    pixel = row * params.width + x;
+    return true;
+}
+
+public bool displayingColour() {
+    return params.mode == 0;
+}
+
+public float3 displayBackground() {
+    return float3(params.backgroundR, params.backgroundG, params.backgroundB);
+}
+
+/// The scene-referred linear colour at `pixel` over the background, exposed:
+/// what a view transform takes.
+public float3 displayScene(uint pixel) {
+    const float4 premultiplied = colour[pixel * params.stride + params.offset];
+    return (premultiplied.rgb + displayBackground() * (1.0 - saturate(premultiplied.a))) * pow(2.0, params.exposure);
+}
+
+/// What every mode but colour shows at `pixel`; `backgroundShown` where
+/// nothing is.
+public float3 displayOther(uint pixel, float3 backgroundShown) {
+    float3 shown = backgroundShown;
+    if (params.mode == 1) {
         const float z = depth[pixel];
         if (z > 0.0) {
             const float t = saturate(log(z / params.nearZ) / log(params.farZ / params.nearZ));
@@ -151,5 +168,27 @@ void displayTransform(uint3 tid: SV_DispatchThreadID) {
     } else if (params.mode == 3) {
         shown = saturate(colour[pixel * params.stride + params.offset].rgb * params.vectorScale + params.vectorBias);
     }   // any other mode: the background (an AOV nothing drew)
+    return shown;
+}
+
+public void displayWrite(uint3 tid, float3 shown) {
+    output[tid.xy] = float4(shown, 1.0);
+}
+
+[shader("compute")]
+[numthreads(16, 16, 1)]
+void displayTransform(uint3 tid: SV_DispatchThreadID) {
+    uint pixel;
+    if (!displayPixel(tid, pixel)) {
+        return;
+    }
+    const float3 background = displayBackground();
+    float3 shown;
+    if (params.mode == 0) {
+        shown = displayColour(colour[pixel * params.stride + params.offset], background, params.exposure, params.view,
+                              params.display);
+    } else {
+        shown = displayOther(pixel, transferEncode(background, params.display));
+    }
     output[tid.xy] = float4(shown, 1.0);
 }
