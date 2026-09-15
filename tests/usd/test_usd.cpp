@@ -1767,19 +1767,15 @@ TEST_CASE("a dome light's image lights a Lambert plane, and shows where nothing 
     CHECK(corner[0] == Catch::Approx(linear).margin(0.01F));
 }
 
-/// Hidden: the engine's half of light linking is checked in
-/// lrt_technique_tests, exactly, by counters. What does not arrive here is the
-/// scene index's half. Measured, in this order: the filter is registered and
-/// appended (traced), it is given ten light types and five geometry types, the
-/// stage's collection transports correctly in expression mode
-/// (membershipExpression='/Left' on the light's collections data source, where
-/// relationship mode sends UsdLux's default '~//*.*'), the mesh carries a
-/// categories data source and the light a lightLink -- and both are empty,
-/// before syncing and after, inserted first in the chain and last. Whatever
-/// makes HdsiLightLinkingSceneIndex mark a prim is not happening, and its
-/// implementation is not in this tree to read.
+/// The scene index's half of light linking, through Hydra. Hidden until
+/// the chain's order was found: HdsiLightLinkingSceneIndex builds its
+/// collection cache from the added-prim notices that pass through it, and
+/// StageRenderer gave the stage to UsdImaging's scene indices before this
+/// renderer's filters existed, so they never heard of the stage's prims and
+/// every category came out empty. The stage is now given once the render
+/// index observes the chain.
 TEST_CASE("a UsdLux light's collection reaches only what it includes",
-          "[.][usd][gpu][mesh][lights][linking]") {
+          "[usd][gpu][mesh][lights][linking]") {
     LRT_REQUIRE_GPU(gpu);
     if (!gpu->device->caps().rasterization) {
         SKIP("no rasterisation on this device");

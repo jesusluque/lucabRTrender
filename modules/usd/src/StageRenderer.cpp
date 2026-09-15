@@ -77,8 +77,14 @@ Result<std::unique_ptr<StageRenderer>> StageRenderer::open(const std::filesystem
     if (impl.index == nullptr) {
         return Error(ErrorCode::InternalError, "cannot make a Hydra render index");
     }
+    // The chain is made empty and the stage given to it once the render
+    // index observes it: a filtering scene index learns of a prim only from
+    // the added notice that passes through it, and one made after the stage
+    // had populated its input never hears of the prims already there. The
+    // light linking scene index builds its collection cache from exactly
+    // those notices, so with the stage given first every category came out
+    // empty (docs/decisions.md, M5 and M9).
     UsdImagingCreateSceneIndicesInfo info;
-    info.stage = impl.stage;
     impl.sceneIndices = UsdImagingCreateSceneIndices(info);
     // Through the filters registered for this renderer before the index sees
     // it: that is what resolves a light's collections into the categories
@@ -97,6 +103,8 @@ Result<std::unique_ptr<StageRenderer>> StageRenderer::open(const std::filesystem
     const HdSceneIndexBaseRefPtr scene = HdDependencyForwardingSceneIndex::New(
         HdSceneIndexPluginRegistry::GetInstance().AppendSceneIndicesForRenderer("lucabRTrender", impl.globals));
     impl.index->InsertSceneIndex(scene, SdfPath::AbsoluteRootPath());
+    impl.sceneIndices.stageSceneIndex->SetStage(impl.stage);
+    impl.sceneIndices.stageSceneIndex->ApplyPendingUpdates();
 
     impl.controller = std::make_unique<HdxTaskController>(
         impl.index, SdfPath("/__lrtTaskController"), /*gpuEnabled=*/false);

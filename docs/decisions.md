@@ -1420,6 +1420,17 @@ enough that what is left is the light and not the noise.
     makes that filter mark a prim is not happening here, and its
     implementation is headers only in this install. The USD case is written
     and hidden (`[.][usd][gpu][mesh][lights][linking]`) with that list in it.
+  - **Found at M9, with OpenUSD's sources on the machine.** The filter
+    builds its collection cache in `_PrimsAdded`, from the added-prim
+    notices that pass through it, and nowhere else. `StageRenderer` handed
+    the stage to `UsdImagingCreateSceneIndices`, which populates on the spot,
+    before this renderer's filters were appended: a filtering scene index
+    made after its input populated never hears of the prims already there,
+    and the render index then read them through `GetPrim` from an empty
+    cache. Nothing on the list above could have seen it, because every
+    data source was right. The chain is now built empty, inserted, and given
+    the stage after. The USD case is no longer hidden: the square in the
+    light's collection lit over its 6150 pixels, the other drawn and 0 lit.
 - **Shadow linking is honoured in the trace.** A light with a shadow link
   walks its ray on past whatever does not carry that category, as a cutout
   walks past what its opacity removed, up to sixteen times; a light without
@@ -1427,7 +1438,9 @@ enough that what is left is the light and not the noise.
   form: with the link naming the occluder's category the umbra is exactly
   where it projects, and with it naming another the plane is lit as if
   nothing were there -- 0 pixels of 7440 away from the closed form either
-  way. What arrives from USD is the same half that light linking is missing.
+  way. From USD a shadow link comes through the same filter as a light
+  link, which was missing for the reason found at M9 (above); no USD case
+  for shadow links is written, so that half is not checked.
 - **Light instancing arrived with M6**, below. (So did the cylinder and IES
   profiles.)
 - **Splats are relit where their prim asks**, and baked everywhere else.
