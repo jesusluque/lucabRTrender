@@ -180,6 +180,9 @@ TEST_CASE("a cloud written to USD and drawn through Hydra matches the cloud draw
 
 TEST_CASE("splats and points behind a mesh leave it as it is; in front of it they show", "[usd][gpu][mesh][layers]") {
     LRT_REQUIRE_GPU(gpu);
+    if (!gpu->device->caps().rasterization) {
+        SKIP("no rasterisation on this device: the layers are composited from rasterised passes");
+    }
     const io::RawSplats raw = cloud(2500);
     const fs::path clouds = scratch("layers_cloud.usdc");
     fs::remove(clouds);

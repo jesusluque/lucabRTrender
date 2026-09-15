@@ -3485,36 +3485,38 @@ measured above.
   left there -- the same lesson the engine's hole flags taught, arriving in
   the tests.
 
-### The two devices at the end of M9 (commit c94f497)
+### The three devices, at the end of this pass (commit 2e6e183)
 
-Parity here means the same GPU-computed metric on each machine,
-computed on that machine; no pixels travel between them.
+Parity here means the same GPU-computed metric on each machine and each
+backend, computed there; no pixels travel between them.
 
-| | Metal (Apple M5 Pro) | CUDA (NVIDIA L4, no OptiX) |
-|---|---|---|
-| Cases | 168 | 168 |
-| Passed | 167 | 89 |
-| Failed | 1: openFXplayer's bundles are ABI 23, this host speaks 22 | 12, the known ones below |
-| Skipped, with reason | 0 | 67 |
+| | Metal (Apple M5 Pro) | Vulkan (NVIDIA L4) | CUDA (NVIDIA L4, no OptiX) |
+|---|---|---|---|
+| Cases | 188 | 188 | 188 |
+| Passed | 188 | 180 | 96 |
+| Failed | 0 | 0 | 2 |
+| Skipped, with reason | 0 | 8 | 90 |
 
-CUDA's 67 skips, by the reason each gives: 43 "no rasterisation on this
-device", 13 "needs rasterisation and ray queries" (two of them "to compare
-all three routes"), 2 "needs both rasterisation and ray queries", 4 points
-drawn as discs because the device does not rasterise, and one each for no
-window session, no openFXplayer build, Kitchen_set not on the machine, a
-Metal-only tracked buffer, chunks being the hardware route's, and one with
-an empty message. Every one names a capability CUDA without OptiX lacks, or
-an asset or host that is not there.
+**Vulkan's eight skips** are the host's and the hardware's, not the
+renderer's: the Metal-only tracked buffer, `lrt view`'s window on a headless
+box, the five gpe-backed cases and the aofx host (gpe has no Vulkan backend;
+CUDA and Metal cover them), and openFXplayer's own bundles, which are not
+built there. Everything else the suite checks -- the path tracer, materials,
+lights, motion, skinning, subdivision, curves, volumes, render settings,
+Kitchen_set against Storm through EGL, OCIO and the denoiser -- passes on the
+L4 exactly as on Metal.
 
-CUDA's 12 failures are the ones "Open on this backend" already explains:
-the float4 store into an 8-bit texture (and what decodes through it: PNG,
-UDIM, the lobes against genglsl, the two Hydra splat cases), and the
-Gaussian ray tracer's six cases. None is new.
+**CUDA's 90 skips** are what a device without rasterisation and without
+OptiX cannot answer: 47 "no rasterisation on this device", the rest needing
+rasterisation and ray queries together (motion, volumes, the lens, light
+linking, the Storm oracle, the host's engine), plus points as discs, the
+window, the Metal buffer and openFXplayer's bundles. Each names its
+capability in its skip message.
 
-New on both devices: `lrt_volume_tests` -- the NanoVDB layout counted
-voxel for voxel, and the medium's Beer-Lambert, majorant and leaf-walk
-checks -- passes on CUDA as on Metal, so PNanoVDB as Slang holds on both.
-The path-traced volume tests need ray queries, so they skip on CUDA.
+**CUDA's one failure** is `open_pbr_surface` against MaterialX's genglsl
+closures, which "Open on this backend" describes. The run before this one
+had a second: the layers case composites rasterised passes and said "the
+render pass drew nothing" instead of skipping; it names the capability now.
 
 ### Vulkan on the L4
 
