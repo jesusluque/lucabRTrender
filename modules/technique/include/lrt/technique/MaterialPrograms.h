@@ -106,6 +106,11 @@ struct MaterialFrame {
     /// contribution, at every bounce, under its group. Emission and the
     /// background are in no group.
     LightGroupTargets             groups;
+    /// The frame's volumes (world::VolumeSet's words) for the path tracer,
+    /// which traces free flights through them and transmittance to the
+    /// lights; null or none: no medium. The raster technique draws none.
+    const gpu::Buffer*            volumes = nullptr;
+    uint32_t                      volumeCount = 0;
 
     [[nodiscard]] bool valid() const noexcept {
         return programs != nullptr && scene != nullptr && records != nullptr && records->valid() && blob != nullptr &&

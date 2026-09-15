@@ -173,6 +173,11 @@ TEST_CASE("a medium on the grid is Beer-Lambert's within its own standard error,
         {{oblique[0], oblique[1], oblique[2]}, {obliqueDir[0], obliqueDir[1], obliqueDir[2]}, 0.0F, 20.0F,
          std::exp(-0.5F * chord(oblique, obliqueDir)), "obliquely across the dense box", 0},
         {{3.5F, 0.4F, 0.4F}, {1.0F, 0.0F, 0.0F}, 0.0F, 10.0F, std::exp(-2.0F * 0.8F), "x through the small box", 1},
+        // The same box, walked the other way along each axis: a negative
+        // direction steps the leaf cells down.
+        {{4.2F, 1.6F, 1.6F}, {-1.0F, 0.0F, 0.0F}, 0.0F, 10.0F, std::exp(-1.6F), "-x through the dense box", 4},
+        {{1.6F, 4.2F, 1.6F}, {0.0F, -1.0F, 0.0F}, 0.0F, 10.0F, std::exp(-1.6F), "-y through the dense box", 4},
+        {{1.6F, 1.5F, 4.2F}, {0.0F, 0.0F, -1.0F}, 0.0F, 10.0F, std::exp(-1.6F), "-z through the dense box", 4},
     };
     for (const Ray& ray : cases) {
         const auto bind = [&](rhi::ShaderCursor c) {

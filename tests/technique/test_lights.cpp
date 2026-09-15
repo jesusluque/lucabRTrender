@@ -21,6 +21,7 @@
 #include "lrt/geom/Mesh.h"
 #include "lrt/material/TextureStore.h"
 #include "lrt/io/Ies.h"
+#include "lrt/io/Vdb.h"
 #include "lrt/light/LightTable.h"
 #include "lrt/material/MaterialCompiler.h"
 #include "lrt/render/ReferenceRenderer.h"
@@ -33,6 +34,7 @@
 #include "lrt/world/GpuScene.h"
 #include "lrt/world/Instancing.h"
 #include "lrt/world/RayTracingScene.h"
+#include "lrt/world/VolumeSet.h"
 
 using namespace lrt;
 
@@ -3034,9 +3036,19 @@ struct PlaneMotion {
     uint32_t buckets = 1;
 };
 
+/// What else a frame of the plane can hold: volumes, the sun's shadows,
+/// another light in the sun's place, bounces.
+struct LensExtras {
+    const world::VolumeSet* volumes = nullptr;
+    bool                    sunShadows = false;
+    const light::Light*     light = nullptr;   ///< in place of the sun
+    uint32_t                bounces = 0;
+};
+
 LensFrame renderLensPlane(test::Gpu& gpu, const render::Projection& projection, uint32_t w, uint32_t h,
                           double planeZ, double half, double rightEdgeX, uint32_t samples,
-                          PlaneMotion motion = {}) {
+                          PlaneMotion motion = {}, const LensExtras& extras = {}) {
+    const world::VolumeSet* volumes = extras.volumes;
     std::vector<std::filesystem::path> shaderPaths;
     for (const std::string& path : gpu.device->shaderSearchPaths()) {
         shaderPaths.emplace_back(path);
@@ -3101,8 +3113,8 @@ LensFrame renderLensPlane(test::Gpu& gpu, const render::Projection& projection, 
     light::Light sun;
     sun.kind = light::LightKind::Distant;
     sun.intensity = 3.0F;
-    sun.shadow = false;
-    REQUIRE(table->set(std::span<const light::Light>(&sun, 1)));
+    sun.shadow = extras.sunShadows;
+    REQUIRE(table->set(std::span<const light::Light>(extras.light != nullptr ? extras.light : &sun, 1)));
     technique::VisibilityTargets visibility;
     technique::MaterialFrame frame;
     frame.programs = &*programs;
@@ -3113,13 +3125,17 @@ LensFrame renderLensPlane(test::Gpu& gpu, const render::Projection& projection, 
     frame.lights = &*table;
     frame.shadows = accel->topLevel();
     frame.samples = 1;
+    if (volumes != nullptr) {
+        frame.volumes = &volumes->words();
+        frame.volumeCount = volumes->count();
+    }
     render::RenderTargets out;
     {
         gpu::CommandBatch batch(*gpu.device);
         REQUIRE(raster->render(batch, *scene, projection, w, h, visibility));
         technique::PathSettings paths;
         paths.samples = samples;
-        paths.bounces = 0;
+        paths.bounces = extras.bounces;
         REQUIRE(tracer->trace(batch, visibility, projection, frame, paths, out, nullptr));
         REQUIRE(batch.submit(true));
     }
@@ -3621,5 +3637,202 @@ TEST_CASE("the light BVH chooses lights by their importance at the point, and sa
         CHECK(std::abs(z) < 4.0);
         CHECK(std::abs(sum - 1.0) < 1e-4);
         CHECK(domeShare > 0.0F);
+    }
+}
+
+
+// Volumes in the path tracer (M9): an absorbing box of constant density,
+// laid out from a .vdb, between the camera and the evenly lit plane. The
+// frame with it over the frame without is, pixel by pixel, the fraction of
+// paths delta tracking let through, and must sit on Beer-Lambert along that
+// pixel's ray within the binomial deviation the check derives from the
+// number of paths (volume_render_check.slang); outside the box the two
+// frames must agree.
+TEST_CASE("the path tracer through an absorbing volume is Beer-Lambert's, pixel by pixel",
+          "[technique][path][volume]") {
+    LRT_REQUIRE_GPU(gpu);
+    const gpu::Caps& caps = gpu->device->caps();
+    if (!caps.rasterization || !caps.rayQuery || !caps.accelerationStructure) {
+        SKIP("needs rasterisation and ray queries");
+    }
+    if (!io::haveOpenVdb()) {
+        SKIP("built without OpenVDB");
+    }
+    const std::filesystem::path dir = std::filesystem::temp_directory_path() / "lrt-tests" / "technique";
+    std::filesystem::create_directories(dir);
+    const std::filesystem::path path = dir / "absorbing_box.vdb";
+    const io::VdbBox box{{0, 0, 0}, {32, 32, 32}, 0.5F};
+    REQUIRE(io::writeVdbBoxes(path, "density", 0.1, std::span<const io::VdbBox>(&box, 1)));
+    auto grid = io::readVdbGrid(path, "density");
+    if (!grid) FAIL(grid.error().toString());
+    auto set = world::VolumeSet::create(*gpu->library);
+    if (!set) FAIL(set.error().toString());
+    // The box, 3.2 on a side, over the right half of the view: x in [0, 3.2),
+    // y in [-1.6, 1.6), z in [-3.8, -0.6); nothing scatters back.
+    world::VolumeInput input;
+    input.grid = &*grid;
+    input.objectToWorld = aofx::xform::translation({0.0, -1.6, -3.8});
+    input.densityScale = 1.0F;
+    input.albedo = {0.0F, 0.0F, 0.0F};
+    {
+        gpu::CommandBatch batch(*gpu->device);
+        REQUIRE(set->set(batch, std::span<const world::VolumeInput>(&input, 1)));
+        REQUIRE(batch.submit(true));
+    }
+    const uint32_t w = 161;
+    const uint32_t h = 121;
+    constexpr uint32_t kPaths = 1024;
+    render::Camera camera = render::Camera::lookingAt({0.0, 0.0, 0.0}, {0.0, 0.0, -1.0});
+    camera.lens.focal = 35.0;
+    const render::Projection projection = render::projectionFor(camera, w, h);
+    auto made = gpu::ComputeKernel::create(*gpu->library, "lrt/test/volume_render_check", "volumeRenderCheck");
+    if (!made) FAIL(made.error().toString());
+    for (const bool shadows : {false, true}) {
+        const LensFrame without =
+            renderLensPlane(*gpu, projection, w, h, -4.0, 4.0, 4.0, kPaths, {}, {nullptr, shadows});
+        const LensFrame with = renderLensPlane(*gpu, projection, w, h, -4.0, 4.0, 4.0, kPaths, {}, {&*set, shadows});
+        gpu::Buffer counts = test::uintBuffer(*gpu->device, 5, "volume.render.counts");
+        gpu::Buffer sumsBuffer = test::uintBuffer(*gpu->device, 4, "volume.render.sums");
+        {
+            gpu::CommandBatch batch(*gpu->device);
+            made->dispatch(batch, {1, 1, 1}, [&](rhi::ShaderCursor c) {
+                technique::setCamera(c["camera"], projection, w, h);
+                const std::array<float, 12> rows = aofx::xform::inverseAffine(projection.worldToView).rows3x4();
+                c["toWorld"]["row0"].setData(rows.data(), sizeof(float) * 4);
+                c["toWorld"]["row1"].setData(rows.data() + 4, sizeof(float) * 4);
+                c["toWorld"]["row2"].setData(rows.data() + 8, sizeof(float) * 4);
+                const float boxMin[3] = {0.0F, -1.6F, -3.8F};
+                const float boxMax[3] = {3.2F, 1.6F, -0.6F};
+                const float towardLight[3] = {0.0F, 0.0F, 1.0F};   // the sun shines down -z
+                c["check"]["boxMin"].setData(boxMin, sizeof(boxMin));
+                c["check"]["boxMax"].setData(boxMax, sizeof(boxMax));
+                c["check"]["towardLight"].setData(towardLight, sizeof(towardLight));
+                c["check"]["planeZ"].setData(-4.0F);
+                c["check"]["sigma"].setData(0.5F);
+                c["check"]["paths"].setData(static_cast<float>(kPaths));
+                c["check"]["deviations"].setData(5.0F);
+                c["check"]["shadows"].setData(uint32_t{shadows ? 1u : 0u});
+                c["with"].setBinding(with.colour.rhi());
+                c["without"].setBinding(without.colour.rhi());
+                c["counts"].setBinding(counts.rhi());
+                c["zBits"].setBinding(sumsBuffer.rhi());
+            });
+            REQUIRE(batch.submit(true));
+        }
+        uint32_t n[5] = {};
+        float sums[4] = {};
+        REQUIRE(counts.read(*gpu->device, 0, sizeof(n), n));
+        REQUIRE(sumsBuffer.read(*gpu->device, 0, sizeof(sums), sums));
+        const double meanSquare = n[0] > 0 ? sums[0] / n[0] : 0.0;
+        std::printf("  sun shadows %s: %u pixels whose light crosses the box: %u beyond 5 binomial deviations of "
+                    "Beer-Lambert, mean z^2 %.3f (1 for binomial noise alone), mean ratio %.4f against %.4f; %u "
+                    "untouched, %u of them changed\n",
+                    shadows ? "on" : "off", n[0], n[1], meanSquare, n[0] ? sums[1] / n[0] : 0.0F,
+                    n[0] ? sums[2] / n[0] : 0.0F, n[2], n[3]);
+        {
+            std::vector<float> rgba(size_t{w} * h * 4);
+            REQUIRE(with.colour.read(*gpu->device, 0, rgba.size() * 4, rgba.data()));
+            test::dumpPpm(shadows ? "volume_absorbing_box_shadows" : "volume_absorbing_box", rgba.data(), w, h);
+        }
+        CHECK(n[0] > 3000);
+        CHECK(n[1] == 0);
+        CHECK(meanSquare > 0.7);
+        CHECK(meanSquare < 1.3);
+        CHECK(n[2] > 1000);
+        CHECK(n[3] == 0);
+    }
+}
+
+
+// The volume furnace: a medium that scatters everything and absorbs
+// nothing (albedo 1), under a dome of radiance 1 and nothing else in view.
+// Every path that meets the medium random-walks until it leaves, and each
+// light sample along the way estimates what the walk's next escape would
+// see -- so a path's radiance is the dome's, whatever the density and
+// whatever the phase, once enough bounces are allowed. The medium is thin
+// (optical depth at most 0.56 across the box's diagonal), so the walk's
+// chance of 32 further collisions is below 1e-8. Judged over the covered
+// pixels: the mean of each pixel's radiance over its opacity, within five
+// standard errors of 1 measured from those same pixels' spread, for an
+// isotropic phase and a forward one (g 0.7).
+TEST_CASE("an albedo-one medium under a uniform dome reads the dome's radiance, for any phase",
+          "[technique][path][volume][furnace]") {
+    LRT_REQUIRE_GPU(gpu);
+    const gpu::Caps& caps = gpu->device->caps();
+    if (!caps.rasterization || !caps.rayQuery || !caps.accelerationStructure) {
+        SKIP("needs rasterisation and ray queries");
+    }
+    if (!io::haveOpenVdb()) {
+        SKIP("built without OpenVDB");
+    }
+    const std::filesystem::path dir = std::filesystem::temp_directory_path() / "lrt-tests" / "technique";
+    std::filesystem::create_directories(dir);
+    const std::filesystem::path path = dir / "furnace_box.vdb";
+    const io::VdbBox box{{0, 0, 0}, {32, 32, 32}, 0.5F};
+    REQUIRE(io::writeVdbBoxes(path, "density", 0.1, std::span<const io::VdbBox>(&box, 1)));
+    auto grid = io::readVdbGrid(path, "density");
+    if (!grid) FAIL(grid.error().toString());
+    auto made = gpu::ComputeKernel::create(*gpu->library, "lrt/test/volume_render_check", "volumeFurnaceCheck");
+    if (!made) FAIL(made.error().toString());
+    const uint32_t w = 81;
+    const uint32_t h = 61;
+    render::Camera camera = render::Camera::lookingAt({0.0, 0.0, 0.0}, {0.0, 0.0, -1.0});
+    camera.lens.focal = 35.0;
+    const render::Projection projection = render::projectionFor(camera, w, h);
+    light::Light dome;
+    dome.kind = light::LightKind::Dome;
+    dome.intensity = 1.0F;
+    dome.shadow = true;
+    for (const float g : {0.0F, 0.7F}) {
+        auto set = world::VolumeSet::create(*gpu->library);
+        if (!set) FAIL(set.error().toString());
+        world::VolumeInput input;
+        input.grid = &*grid;
+        input.objectToWorld = aofx::xform::translation({-1.6, -1.6, -5.0});   // centred on the view, 1.8 to 5 away
+        input.densityScale = 0.2F;   // sigma 0.1
+        input.albedo = {1.0F, 1.0F, 1.0F};
+        input.g = g;
+        {
+            gpu::CommandBatch batch(*gpu->device);
+            REQUIRE(set->set(batch, std::span<const world::VolumeInput>(&input, 1)));
+            REQUIRE(batch.submit(true));
+        }
+        // The plane the helper draws is a speck behind the camera.
+        LensExtras extras;
+        extras.volumes = &*set;
+        extras.light = &dome;
+        extras.bounces = 32;
+        const LensFrame frame = renderLensPlane(*gpu, projection, w, h, 50.0, 0.001, 0.001, 256, {}, extras);
+        gpu::Buffer counts = test::uintBuffer(*gpu->device, 2, "furnace.counts");
+        gpu::Buffer sums = test::uintBuffer(*gpu->device, 2, "furnace.sums");
+        {
+            gpu::CommandBatch batch(*gpu->device);
+            made->dispatch(batch, {1, 1, 1}, [&](rhi::ShaderCursor c) {
+                c["furnace"]["pixels"].setData(w * h);
+                c["furnace"]["minAlpha"].setData(0.25F);
+                c["with"].setBinding(frame.colour.rhi());
+                c["counts"].setBinding(counts.rhi());
+                c["zBits"].setBinding(sums.rhi());
+            });
+            REQUIRE(batch.submit(true));
+        }
+        uint32_t n[2] = {};
+        float s[2] = {};
+        REQUIRE(counts.read(*gpu->device, 0, sizeof(n), n));
+        REQUIRE(sums.read(*gpu->device, 0, sizeof(s), s));
+        const double count = n[0];
+        const double mean = count > 0 ? s[0] / count : 0.0;
+        const double spread = count > 1 ? std::sqrt(std::max(s[1] / count - mean * mean, 0.0)) : 0.0;
+        const double standardError = spread / std::sqrt(std::max(count, 1.0));
+        std::printf("  g %.1f: %u pixels with opacity over 0.25 (of %u the medium touched at all): mean radiance %.5f, spread "
+                    "%.4f a pixel, %.2f standard errors from the dome's 1\n",
+                    static_cast<double>(g), n[0], n[1], mean, spread, (mean - 1.0) / std::max(standardError, 1e-9));
+        {
+            std::vector<float> rgba(size_t{w} * h * 4);
+            REQUIRE(frame.colour.read(*gpu->device, 0, rgba.size() * 4, rgba.data()));
+            test::dumpPpm(g == 0.0F ? "volume_furnace_isotropic" : "volume_furnace_forward", rgba.data(), w, h);
+        }
+        CHECK(n[0] > 1000);
+        CHECK(std::abs(mean - 1.0) < 5.0 * standardError);
     }
 }

@@ -78,7 +78,7 @@ public:
     [[nodiscard]] Result<void> setPrograms(const MaterialPrograms& programs);
     /// The same, for a frame with light groups (their buffers declared) or
     /// without; `trace` switches as the frame asks.
-    [[nodiscard]] Result<void> setPrograms(const MaterialPrograms& programs, bool groups);
+    [[nodiscard]] Result<void> setPrograms(const MaterialPrograms& programs, bool groups, bool volumes);
 
     /// Traces `settings.samples` paths a pixel into `out`, as a running mean
     /// over everything accumulated so far.
@@ -121,6 +121,7 @@ private:
     std::optional<gpu::ComputeKernel> kernel_;
     std::string                       module_;
     bool                              groups_ = false;
+    bool                              volumes_ = false;
     uint32_t                          sumPlanes_ = 1;   ///< 1 + 2 * light groups
     gpu::Buffer                       sum_;           ///< float4 a pixel: the paths added so far
     gpu::Buffer                       moments_;       ///< words: the second moment's float bits a pixel, then the done flags a pixel

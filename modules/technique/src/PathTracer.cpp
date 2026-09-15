@@ -251,6 +251,58 @@ void addGroup(inout Groups g, uint group, float3 c) {}
 void endGroups(uint at, uint pixels, Groups g, float alpha, float totalSamples) {}
 )";
 
+/// The volumes: the medium module and the frame's words, in the kernel of
+/// a frame that has volumes; stubs that scatter nothing otherwise, so a
+/// frame without compiles exactly the kernel it always did.
+const char* kVolumes = R"(
+static const bool kVolumes = true;
+StructuredBuffer<uint> volumeWords;   // world::VolumeSet's words: header, records, grids, leaf maxima
+/// The first real collision along the ray among the frame's volumes before
+/// tMax, if any: each volume's own free flight, the nearest of them.
+bool mediumScatterAny(float3 origin, float3 direction, float tMin, float tMax, inout uint rng, out float t,
+                      out float3 albedo, out float g) {
+    t = tMax;
+    albedo = float3(1.0);
+    g = 0.0;
+    bool any = false;
+    const uint count = volumeCount(volumeWords);
+    for (uint v = 0; v < count; ++v) {
+        const VolumeRecord r = volumeRecord(volumeWords, v);
+        float tv;
+        if (mediumScatter(volumeWords, r, origin, direction, tMin, t, rng, tv) && tv < t) {
+            t = tv;
+            albedo = r.albedo;
+            g = r.g;
+            any = true;
+        }
+    }
+    return any;
+}
+float mediumTransmittanceAny(float3 origin, float3 direction, float tMin, float tMax, inout uint rng) {
+    float transmittance = 1.0;
+    const uint count = volumeCount(volumeWords);
+    for (uint v = 0; v < count; ++v) {
+        transmittance *= mediumTransmittance(volumeWords, volumeRecord(volumeWords, v), origin, direction, tMin, tMax, rng);
+    }
+    return transmittance;
+}
+)";
+
+const char* kNoVolumes = R"(
+static const bool kVolumes = false;
+bool mediumScatterAny(float3 origin, float3 direction, float tMin, float tMax, inout uint rng, out float t,
+                      out float3 albedo, out float g) {
+    t = tMax;
+    albedo = float3(1.0);
+    g = 0.0;
+    return false;
+}
+float mediumTransmittanceAny(float3 origin, float3 direction, float tMin, float tMax, inout uint rng) { return 1.0; }
+float mediumRandom(inout uint state) { return 0.0; }
+float hgPhase(float cosTheta, float g) { return 0.0; }
+float3 hgSample(float3 wo, float g, float2 u) { return -wo; }
+)";
+
 const char* kBody = R"(
 struct Shaded {
     LobeStack      stack;
@@ -260,6 +312,8 @@ struct Shaded {
     uint           categoriesLo;   // the instance's, for a light's link
     uint           categoriesHi;
     bool           valid;
+    float3         rayOrigin;      // where the ray that found it started, and how far it went: a medium's segment
+    float          rayT;
 };
 
 /// Evaluates whatever material a surface wears. `pixel` is only the uv
@@ -276,6 +330,8 @@ Shaded shadeSurface(uint2 pixel, Surface s) {
     out.toEye = normalize(out.inputs.viewPosition - out.inputs.positionWorld);
     out.depth = s.depth;
     out.valid = true;
+    out.rayOrigin = out.inputs.viewPosition;
+    out.rayT = length(out.inputs.positionWorld - out.inputs.viewPosition);
     return out;
 }
 
@@ -317,6 +373,8 @@ Shaded shadeHit(uint2 pixel, PathHit hit, float3 from, float3 direction) {
                                   hit.barycentrics.y);
     out = shadeSurface(pixel, surfaceFromWeights(hit.seen, weights, viewDirection));
     out.toEye = normalize(from - out.inputs.positionWorld);
+    out.rayOrigin = from;
+    out.rayT = hit.t;
     return out;
 }
 
@@ -375,6 +433,39 @@ Shaded shadeLensSample(uint2 pixel, uint sample, uint mask) {
 /// One light, sampled and weighed: next event estimation, with the density of
 /// the material's own sampling folded in by the power heuristic so the two
 /// strategies do not double count.
+/// A medium's random state for one purpose of one bounce of one sample.
+uint mediumSeed(uint2 pixel, uint sample, uint bounce, uint dim) {
+    return asuint(random(pixel, sample, bounce, dim)) ^ 0x5bd1e995u;
+}
+
+/// The camera's ray through a pixel, in world space, lens and distortion
+/// included when the tracer casts its own: for a sample that found no
+/// surface, along which a volume may still lie.
+void primaryRay(uint2 pixel, uint sample, out float3 originWorld, out float3 directionWorld) {
+    float3 origin;
+    float3 direction;
+    viewRay(camera, float2(pixel) + 0.5, origin, direction);
+    if (camera.orthographic == 0 && path.ownRays != 0) {
+        const float2 ndc = float2(direction.x * camera.focalX / (0.5 * float(camera.width)),
+                                  direction.y * camera.focalY / (0.5 * float(camera.height)));
+        const float r2 = dot(ndc, ndc);
+        direction.xy *= 1.0 + path.distortionK1 * r2 + path.distortionK2 * r2 * r2;
+        if (path.lensRadius > 0.0) {
+            const float3 focus = direction * max(path.focusDistance, camera.nearZ);
+            const float2 u = random2(pixel, sample, 0u, 13u);
+            const float r = sqrt(u.x) * path.lensRadius;
+            const float phi = 2.0 * 3.14159265358979 * u.y;
+            origin = float3(r * cos(phi), r * sin(phi), 0.0);
+            direction = focus - origin;
+        }
+    }
+    direction = normalize(direction);
+    originWorld = float3(dot(toWorld.row0.xyz, origin) + toWorld.row0.w, dot(toWorld.row1.xyz, origin) + toWorld.row1.w,
+                         dot(toWorld.row2.xyz, origin) + toWorld.row2.w);
+    directionWorld = normalize(float3(dot(toWorld.row0.xyz, direction), dot(toWorld.row1.xyz, direction),
+                                      dot(toWorld.row2.xyz, direction)));
+}
+
 float3 gatherLight(Shaded sh, uint2 pixel, uint sample, uint bounce, uint mask, out uint group) {
     group = 0;
     if (lightCount == 0) {
@@ -407,6 +498,15 @@ float3 gatherLight(Shaded sh, uint2 pixel, uint sample, uint bounce, uint mask, 
                      mask)) {
         return float3(0.0);
     }
+    // Through whatever medium lies between: a transmittance of one without,
+    // and for a light that casts no shadows -- a volume is an occluder like
+    // any other, and `shadow:enable` off means none dims it.
+    float transmittance = 1.0;
+    if (kVolumes && (light.flags & kLightShadow) != 0) {
+        uint rng = mediumSeed(pixel, sample, bounce, 21u);
+        transmittance = mediumTransmittanceAny(sh.inputs.positionWorld, ls.wi, 1.0e-3 * max(1.0, length(sh.inputs.positionWorld)),
+                                               ls.distance, rng);
+    }
     const float density = ls.pdf * choice.probability;
     // No weight. The two strategies cover disjoint sets of emitters, so there
     // is nothing to share: next event estimation covers the analytic lights of
@@ -422,7 +522,59 @@ float3 gatherLight(Shaded sh, uint2 pixel, uint sample, uint bounce, uint mask, 
     // Real MIS belongs with mesh lights, where the two strategies genuinely
     // overlap; it needs a "does this direction reach light k, and with what
     // radiance" beside lightPdf, which does not exist yet.
-    return f * ls.radiance / density;
+    return f * ls.radiance * transmittance / density;
+}
+
+/// The same at a point inside a medium: the phase function for the lobes,
+/// no surface to offset from, the lights chosen by power.
+float3 gatherLightMedium(float3 p, float3 wo, float g, uint2 pixel, uint sample, uint bounce, uint mask,
+                         out uint group) {
+    group = 0;
+    if (lightCount == 0) {
+        return float3(0.0);
+    }
+    const LightChoice choice = chooseLight(lights, lightCount, random(pixel, sample, bounce, 11u));
+    if (!choice.valid) {
+        return float3(0.0);
+    }
+    const LightRecord light = lights[choice.index];
+    group = light.group;
+    LightSample ls;
+    if (light.kind == kLightDome && !domeHasImage(light)) {
+        // A point in a medium faces no hemisphere: the dome's cosine
+        // sampling about a normal would never draw the half behind it, and
+        // flipping between the two halves weighs a sample near their
+        // horizon by one over its cosine. Uniform over the sphere instead,
+        // which for an isotropic phase weighs every sample the same.
+        const float2 u = random2(pixel, sample, bounce, 3u);
+        const float z = 1.0 - 2.0 * u.x;
+        const float r = sqrt(max(0.0, 1.0 - z * z));
+        const float phi = 2.0 * 3.14159265358979 * u.y;
+        ls.wi = float3(r * cos(phi), r * sin(phi), z);
+        ls.distance = 1.0e30;
+        ls.pdf = 1.0 / (4.0 * 3.14159265358979);
+        ls.radiance = lightEmission(light) * domeImage(light, ls.wi);
+        ls.delta = false;
+        ls.valid = true;
+    } else {
+        ls = sampleLightImaged(light, p, wo, random2(pixel, sample, bounce, 3u));
+    }
+    if (!ls.valid) {
+        return float3(0.0);
+    }
+    const float f = hgPhase(dot(wo, ls.wi), g);
+    if (f <= 0.0) {
+        return float3(0.0);
+    }
+    if ((light.flags & kLightShadow) != 0 && pathOccluded(p, ls.wi, ls.wi, ls.distance, light.shadowCategory, mask)) {
+        return float3(0.0);
+    }
+    float transmittance = 1.0;
+    if ((light.flags & kLightShadow) != 0) {
+        uint rng = mediumSeed(pixel, sample, bounce, 25u);
+        transmittance = mediumTransmittanceAny(p, ls.wi, 1.0e-4 * max(1.0, length(p)), ls.distance, rng);
+    }
+    return f * ls.radiance * transmittance / (ls.pdf * choice.probability);
 }
 
 [shader("compute")]
@@ -458,28 +610,86 @@ void tracePaths(uint3 group: SV_GroupID, uint index: SV_GroupIndex) {
     float  squares = 0.0;   // sum of each sample's luminance squared
     uint group = 0;
     Groups groups = groupsZero();
-    for (uint sample = 0; sample < samples && (first.valid || ownRays); ++sample) {
+    for (uint sample = 0; sample < samples && (first.valid || ownRays || kVolumes); ++sample) {
         const uint mask = sampleMask(tid, sample);
-        Shaded sh = ownRays && sample > 0 ? shadeLensSample(tid, sample, mask) : first;
-        if (!sh.valid) {
+        Shaded cur = ownRays && sample > 0 ? shadeLensSample(tid, sample, mask) : first;
+        // The ray to the first vertex: from the surface it found, or the
+        // pixel's ray to nothing -- along which a volume may still lie.
+        float3 o;
+        float3 d;
+        float tHit;
+        if (cur.valid) {
+            o = cur.rayOrigin;
+            d = normalize(cur.inputs.positionWorld - cur.rayOrigin);
+            tHit = cur.rayT;
+        } else if (kVolumes) {
+            primaryRay(tid, sample, o, d);
+            tHit = 1.0e30;
+        } else {
             continue;   // a lens ray that found nothing: transparent, and counted
         }
-        hitDepth = sh.depth;
-        // The first hit's, kept before the bounces: `sh` walks on to whatever
-        // the path finds, and it is this surface's opacity the pixel carries.
-        const float opacity = sh.stack.opacity;
-        alpha += opacity;
-        const float3 direct = gatherLight(sh, tid, sample, 0u, mask, group);
-        float3 carried = sh.stack.emission + direct;
-        if (kLightGroups) {
-            addGroup(groups, group, direct * opacity);
-        }
+        uint rng = mediumSeed(tid, sample, 0u, 23u);
+        float3 carried = float3(0.0);
         float3 throughput = float3(1.0);
-        // The bounces. Each one samples the material, traces where it points,
-        // and gathers that surface's light through what the path has kept.
-        for (uint bounce = 0; kTraces && bounce < path.bounces; ++bounce) {
-            const LobeSample ms = stackSample(sh.stack, sh.toEye, float3(random2(tid, sample, bounce, 5u),
-                                                                        random(tid, sample, bounce, 7u)));
+        // The first vertex's opacity is the pixel's, and its depth; a
+        // medium's collision is opaque.
+        float  opacity = 0.0;
+        float  depthHere = 0.0;
+        bool   vertexSeen = false;
+        // The vertices, each either a surface the ray met or a collision in
+        // a medium before it: each gathers its light through what the path
+        // has kept, and sends the path on -- through a lobe or the phase.
+        for (uint bounce = 0; bounce <= path.bounces; ++bounce) {
+            float tS;
+            float3 albedo;
+            float g;
+            const float tMin = bounce == 0 && cur.valid && !ownRays ? camera.nearZ : 0.0;
+            if (kVolumes && mediumScatterAny(o, d, tMin, tHit, rng, tS, albedo, g)) {
+                const float3 p = o + d * tS;
+                if (!vertexSeen) {
+                    vertexSeen = true;
+                    opacity = 1.0;
+                    depthHere = cur.valid ? cur.depth : tS;
+                }
+                throughput *= albedo;
+                const float3 direct = gatherLightMedium(p, -d, g, tid, sample, bounce, mask, group);
+                carried += throughput * direct;
+                if (kLightGroups) {
+                    addGroup(groups, group, throughput * direct * opacity);
+                }
+                if (bounce == path.bounces || !kTraces) {
+                    break;
+                }
+                d = hgSample(-d, g, float2(mediumRandom(rng), mediumRandom(rng)));
+                o = p;
+                const PathHit hit = traceNearestFrom(o, d, 1.0e-4 * max(1.0, length(o)), mask);
+                if (hit.seen.x == 0) {
+                    cur.valid = false;
+                    tHit = 1.0e30;
+                } else {
+                    cur = shadeHit(tid, hit, o, d);
+                    tHit = hit.t;
+                }
+                continue;
+            }
+            if (!cur.valid) {
+                break;   // the ray escaped
+            }
+            if (!vertexSeen) {
+                vertexSeen = true;
+                opacity = cur.stack.opacity;
+                depthHere = cur.depth;
+            }
+            const float3 direct = gatherLight(cur, tid, sample, bounce, mask, group);
+            carried += throughput * (cur.stack.emission + direct);
+            if (kLightGroups) {
+                addGroup(groups, group, throughput * direct * opacity);
+            }
+            if (bounce == path.bounces || !kTraces) {
+                break;
+            }
+            const LobeSample ms = stackSample(cur.stack, cur.toEye, float3(random2(tid, sample, bounce, 5u),
+                                                                          random(tid, sample, bounce, 7u)));
             if (!ms.valid || ms.pdf <= 0.0) {
                 break;
             }
@@ -490,29 +700,28 @@ void tracePaths(uint3 group: SV_GroupID, uint index: SV_GroupIndex) {
             if (!any(throughput > float3(0.0))) {
                 break;
             }
-            const float3 p = sh.inputs.positionWorld;
-            const float3 n = sh.inputs.normalWorld;
+            const float3 p = cur.inputs.positionWorld;
+            const float3 n = cur.inputs.normalWorld;
             const float scale = max(1.0, length(p));
             const float3 away = dot(n, ms.wi) < 0.0 ? -n : n;
-            const PathHit hit =
-                traceNearestFrom(p + (away + ms.wi) * (1.0e-3 * scale), ms.wi, 1.0e-3 * scale, mask);
+            o = p + (away + ms.wi) * (1.0e-3 * scale);
+            d = ms.wi;
+            const PathHit hit = traceNearestFrom(o, d, 1.0e-3 * scale, mask);
             if (hit.seen.x == 0) {
-                break;
+                cur.valid = false;
+                tHit = 1.0e30;
+            } else {
+                // Rebuilt from where the ray met the triangle, its eye where
+                // the bounce left from.
+                cur = shadeHit(tid, hit, p, d);
+                tHit = hit.t;
             }
-            Shaded next = shadeHit(tid, hit, p, ms.wi);
-            if (!next.valid) {
-                break;
-            }
-            // What the bounce found: its own emission weighed against the
-            // light sampling that could have found it, and its direct light.
-            carried += throughput * next.stack.emission;
-            const float3 bounced = gatherLight(next, tid, sample, bounce + 1u, mask, group);
-            carried += throughput * bounced;
-            if (kLightGroups) {
-                addGroup(groups, group, throughput * bounced * opacity);
-            }
-            sh = next;
         }
+        if (!vertexSeen) {
+            continue;   // nothing along the ray at all: transparent, and counted
+        }
+        hitDepth = depthHere;
+        alpha += opacity;
         total += carried * opacity;
         const float lum = dot(carried * opacity, kPathLuminance);
         squares += lum * lum;
@@ -624,17 +833,19 @@ Result<PathTracer> PathTracer::create(gpu::ShaderLibrary& library) {
 }
 
 Result<void> PathTracer::setPrograms(const MaterialPrograms& programs) {
-    return setPrograms(programs, groups_);
+    return setPrograms(programs, groups_, volumes_);
 }
 
-Result<void> PathTracer::setPrograms(const MaterialPrograms& programs, bool groups) {
-    if (programs.module() == module_ && groups == groups_ && kernel_.has_value()) {
+Result<void> PathTracer::setPrograms(const MaterialPrograms& programs, bool groups, bool volumes) {
+    if (programs.module() == module_ && groups == groups_ && volumes == volumes_ && kernel_.has_value()) {
         return ok();
     }
     const bool traces = device_->caps().rayQuery && device_->caps().accelerationStructure;
-    const std::string name =
-        programs.module() + (traces ? "_path_traced" : "_path_direct") + (groups ? "_groups" : "");
-    const std::string source = "import " + programs.module() + ";\n" + kPrelude + (groups ? kGroups : kNoGroups) +
+    const std::string name = programs.module() + (traces ? "_path_traced" : "_path_direct") +
+                             (groups ? "_groups" : "") + (volumes ? "_volumes" : "");
+    const std::string source = "import " + programs.module() + ";\n" +
+                               (volumes ? std::string("import lrt.volume.medium;\n") : std::string()) + kPrelude +
+                               (groups ? kGroups : kNoGroups) + (volumes ? kVolumes : kNoVolumes) +
                                (traces ? kRays : kNoRays) + kBody;
     auto program = library_->loadSource(name, source, {"tracePaths", "pathDecide"});
     if (!program) return std::move(program).error();
@@ -646,6 +857,7 @@ Result<void> PathTracer::setPrograms(const MaterialPrograms& programs, bool grou
     progressKernel_.emplace(std::move(*progressKernel));
     module_ = programs.module();
     groups_ = groups;
+    volumes_ = volumes;
     accumulated_ = 0;
     return ok();
 }
@@ -657,8 +869,9 @@ Result<void> PathTracer::trace(gpu::CommandBatch& batch, const VisibilityTargets
         return Error(ErrorCode::InvalidArgument, "path tracer: no materials set");
     }
     const bool groups = frame.groups.count > 0;
-    if (groups != groups_ && frame.programs != nullptr) {
-        LRT_TRY(setPrograms(*frame.programs, groups));
+    const bool volumes = frame.volumes != nullptr && frame.volumeCount > 0 && frame.volumes->valid();
+    if ((groups != groups_ || volumes != volumes_) && frame.programs != nullptr) {
+        LRT_TRY(setPrograms(*frame.programs, groups, volumes));
     }
     const uint32_t groupCount = std::min(frame.groups.count, kMaxLightGroups);
     const uint64_t pixels = uint64_t{targets.width} * targets.height;
@@ -750,6 +963,9 @@ Result<void> PathTracer::trace(gpu::CommandBatch& batch, const VisibilityTargets
         cursor["moments"].setBinding(moments_.rhi());
         if (groups) {
             cursor["groupCount"].setData(groupCount);
+        }
+        if (volumes) {
+            cursor["volumeWords"].setBinding(frame.volumes->rhi());
         }
         cursor["path"]["adaptive"].setData(uint32_t{settings.adaptive ? 1u : 0u});
         cursor["path"]["errorTarget"].setData(settings.errorTarget);

@@ -60,17 +60,22 @@ Result<void> VolumeSet::set(gpu::CommandBatch& batch, std::span<const VolumeInpu
         words.resize(words.size() + std::max<size_t>(placements_[v].leafCount, 1), 0u);
     }
     // The records: what the host knows. World to index is the inverse of
-    // the grid's index-to-world under the prim's transform, both row-vector
-    // matrices; the kernels read rows of a 3x4 applied to a column.
+    // index to object (the grid's own map) then object to world (the
+    // prim's). OpenVDB holds its map row-vector, translation in the last row;
+    // Mat4 is column-vector, applied first rightmost -- so the map is
+    // transposed as it is read, and composed on the right. Read untransposed
+    // and composed on the left, a translated volume sat offset by its
+    // translation in voxels rather than in world units, which a pure scale
+    // (the first fixture) could not show.
     for (uint32_t v = 0; v < count; ++v) {
         const VolumeInput& in = volumes[v];
-        render::Mat4 indexToWorld = render::Mat4::identity();
+        render::Mat4 indexToObject = render::Mat4::identity();
         for (int r = 0; r < 4; ++r) {
             for (int c = 0; c < 4; ++c) {
-                indexToWorld.at(r, c) = in.grid->indexToWorld[static_cast<size_t>(r * 4 + c)];
+                indexToObject.at(r, c) = in.grid->indexToWorld[static_cast<size_t>(c * 4 + r)];
             }
         }
-        const render::Mat4 worldToIndex = aofx::xform::inverseAffine(indexToWorld * in.objectToWorld);
+        const render::Mat4 worldToIndex = aofx::xform::inverseAffine(in.objectToWorld * indexToObject);
         const std::array<float, 12> rows = worldToIndex.rows3x4();
         const uint32_t b = kHeaderWords + v * kRecordWords;
         words[b + 0] = placements_[v].gridWord;
