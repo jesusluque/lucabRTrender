@@ -539,6 +539,25 @@ Result<size_t> Engine::commit() {
             primvar.indices = std::span<const int32_t>(p.indices.cdata(), p.indices.size());
             primvars.push_back(std::move(primvar));
         }
+        // The coordinate systems bound to the prim, as the material's
+        // transform nodes read them: each system's transform to world, its
+        // rows as three constant float4 primvars ("lrtCoordSys_NAME_0" to
+        // "_2"). Values handed over as Hydra gave them; any inverse is the
+        // shader's.
+        std::vector<std::array<float, 12>> coordSysRows;
+        coordSysRows.reserve(entry.look.coordSys.size());
+        for (const CoordSysBinding& binding : entry.look.coordSys) {
+            coordSysRows.push_back(binding.toWorld.rows3x4());
+            const std::array<float, 12>& rows = coordSysRows.back();
+            for (uint32_t r = 0; r < 3; ++r) {
+                geom::PrimvarInput primvar;
+                primvar.name = "lrtCoordSys_" + binding.name + "_" + std::to_string(r);
+                primvar.interpolation = geom::Interpolation::Constant;
+                primvar.components = 4;
+                primvar.values = {std::as_bytes(std::span<const float>(rows.data() + r * 4, 4)), false};
+                primvars.push_back(std::move(primvar));
+            }
+        }
         input.primvars = primvars;
         for (const MeshSubset& subset : a.subsets) {
             input.subsets.emplace_back(subset.faces.cdata(), subset.faces.size());

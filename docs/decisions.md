@@ -2419,11 +2419,42 @@ computing it.
 `Xform` translated to (1, 2, 3) reads back one system named `paint` at
 exactly that translation.
 
-**Not done.** No material reads a coordinate system yet: MaterialX's
-`position`/`normal`/`tangent` nodes with a `space` other than object or
-world would take the binding's matrix as a uniform of the compiled module,
-and that is the next step when a graph needs it -- the bookkeeping is what
-the plan asked M8.2 to settle, so that step is a uniform and not a search.
+**Materials read them**, through MaterialX's `transformpoint`,
+`transformvector` and `transformnormal`: a space named `world`, `object`
+(or `model`) or anything else, which is a system bound to the prim. The
+engine hands each binding's transform to world to the mesh as three
+constant float4 primvars, `lrtCoordSys_NAME_0` to `_2` (the rows of a 3x4,
+as Hydra gave them; a name with colons is not a MaterialX identifier, which
+the first spelling found), and the transform node reads them through the
+primvar slots every material already uses -- a per-mesh value with no new
+binding in any kernel. `MaterialInputs` carries the object-to-world rows,
+composed on the device from the instance's object-to-view rows and view to
+world; inverses and inverse transposes are the shader's
+(`lrtTransformBetween`). A system the prim does not have reads as world.
+
+**A defect this found**: genslang's own transform nodes multiplied by
+`u_worldMatrix` and its inverse, uniforms the compiler read from the blob
+with nothing written there -- identity. Every object/world transform in a
+MaterialX graph was a no-op on any mesh away from the origin. The four world
+matrices are now built from the shading point's rows, as the float4x4
+`mx_matrix_mul` applies.
+
+**Checked** against graphs that reach the same value without a transform
+node, frames compared (`compareHdr`), on a square tilted in object space
+under a rotation, a non-uniform scale and a translation, with a frame
+translated and scaled by 2 bound as `paint`: object point to world against
+world position, 1.66e-5 largest relative difference; world to object
+against object position, the same; world to `paint` against (P - t) / 2,
+the same; the object normal to world against the world normal, bit for bit
+-- with a control that the untransformed object normal differs from it
+(0.30). That reference graph also showed **hdMtlx typing a USD `vector3f`
+value as a string** (a role type MaterialX has no name for), so the value
+never reached a `vector3` input and read zero; a string input the nodedef
+declares numeric now takes the declared type, and its text parses as that.
+
+**Not done.** A binding whose target moves while the mesh's arrays do not
+is read again only when the mesh is rebuilt: the rows travel with the mesh's
+primvars. Curves do not take the systems' primvars.
 
 ## Complete USD: render settings and outputs (M10)
 

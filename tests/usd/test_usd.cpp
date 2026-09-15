@@ -3757,6 +3757,146 @@ TEST_CASE("a coordinate system bound to a mesh resolves to its target's transfor
     CHECK(t.z == 3.0);
 }
 
+// MaterialX's transforms between spaces, on a mesh that is not at the origin,
+// and to a coordinate system bound to it (M8.2). Each is checked against a
+// graph that reaches the same value without the transform node: position in
+// world space against object position carried object -> world, and so on;
+// both are emitted, offset to keep them positive, and the frames compared.
+// Before, genslang's transforms read world matrices nothing set -- identity
+// -- and knew no coordinate system at all.
+TEST_CASE("MaterialX transforms between object, world and a bound coordinate system match the spaces they name",
+          "[usd][gpu][mesh][materials][coordSys]") {
+    LRT_REQUIRE_GPU(gpu);
+    if (!gpu->device->caps().rasterization) {
+        SKIP("no rasterisation on this device");
+    }
+    // A square tilted in object space (its normal is not along an axis), under
+    // a rotation, a non-uniform scale and a translation; a frame translated
+    // and scaled, bound as "paint".
+    const auto stage = [&](const std::string& name, const std::string& graph) {
+        const fs::path path = scratch(name);
+        std::ofstream out(path);
+        out << "#usda 1.0\n(\n    upAxis = \"Y\"\n)\n"
+               "def Xform \"Frame\"\n{\n"
+               "    double3 xformOp:translate = (1, 2, 3)\n"
+               "    double3 xformOp:scale = (2, 2, 2)\n"
+               "    uniform token[] xformOpOrder = [\"xformOp:translate\", \"xformOp:scale\"]\n}\n"
+               "def Mesh \"Square\" (\n    prepend apiSchemas = [\"MaterialBindingAPI\", \"CoordSysAPI:paint\"]\n)\n{\n"
+               "    int[] faceVertexCounts = [4]\n"
+               "    int[] faceVertexIndices = [0, 1, 2, 3]\n"
+               "    point3f[] points = [(-0.5, -0.5, -0.2), (0.5, -0.5, 0.2), (0.5, 0.5, 0.2), (-0.5, 0.5, -0.2)]\n"
+               "    uniform token subdivisionScheme = \"none\"\n"
+               "    double3 xformOp:translate = (0.2, -0.1, -5)\n"
+               "    double3 xformOp:rotateXYZ = (10, 25, 5)\n"
+               "    double3 xformOp:scale = (2.5, 1.5, 1)\n"
+               "    uniform token[] xformOpOrder = [\"xformOp:translate\", \"xformOp:rotateXYZ\", \"xformOp:scale\"]\n"
+               "    rel coordSys:paint:binding = </Frame>\n"
+               "    rel material:binding = </Materials/Mat>\n}\n"
+               "def Camera \"Camera\"\n{\n"
+               "    float focalLength = 35\n"
+               "    float horizontalAperture = 24.576\n    float verticalAperture = 18.432\n"
+               "    float2 clippingRange = (0.1, 1000)\n}\n"
+               "def Scope \"Materials\"\n{\n"
+               "    def Material \"Mat\"\n    {\n"
+               "        token outputs:mtlx:surface.connect = </Materials/Mat/Surface.outputs:out>\n"
+               "        def Shader \"Surface\"\n        {\n"
+               "            uniform token info:id = \"ND_surface_unlit\"\n"
+               "            color3f inputs:emission_color.connect = </Materials/Mat/Out.outputs:out>\n"
+               "            token outputs:out\n        }\n"
+            << graph
+            << "        def Shader \"Out\"\n        {\n"
+               "            uniform token info:id = \"ND_convert_vector3_color3\"\n"
+               "            vector3f inputs:in.connect = </Materials/Mat/Offset.outputs:out>\n"
+               "            color3f outputs:out\n        }\n"
+               "    }\n}\n";
+        return path;
+    };
+    // Graph pieces: a node named N of type ND_... with inputs.
+    const auto node = [](const std::string& name, const std::string& id, const std::string& inputs) {
+        return "        def Shader \"" + name + "\"\n        {\n            uniform token info:id = \"" + id + "\"\n" +
+               inputs + "            vector3f outputs:out\n        }\n";
+    };
+    const auto offset = [&](const std::string& from, float by) {
+        return node("Offset", "ND_add_vector3FA",
+                    "            vector3f inputs:in1.connect = </Materials/Mat/" + from + ".outputs:out>\n"
+                    "            float inputs:in2 = " + std::to_string(by) + "\n");
+    };
+    const auto position = [&](const char* name, const char* space) {
+        return node(name, "ND_position_vector3", std::string("            string inputs:space = \"") + space + "\"\n");
+    };
+    const auto transform = [&](const char* id, const char* from, const char* fromSpace, const char* toSpace) {
+        return node("Xf", id,
+                    std::string("            vector3f inputs:in.connect = </Materials/Mat/") + from + ".outputs:out>\n" +
+                        "            string inputs:fromspace = \"" + fromSpace + "\"\n" +
+                        "            string inputs:tospace = \"" + toSpace + "\"\n");
+    };
+    struct Case {
+        const char* what;
+        std::string transformed;
+        std::string direct;
+    };
+    const std::vector<Case> cases{
+        {"object point to world", position("P", "object") + transform("ND_transformpoint_vector3", "P", "object", "world") + offset("Xf", 10.0F),
+         position("P", "world") + offset("P", 10.0F)},
+        {"world point to object", position("P", "world") + transform("ND_transformpoint_vector3", "P", "world", "object") + offset("Xf", 10.0F),
+         position("P", "object") + offset("P", 10.0F)},
+        {"world point to the bound 'paint'",
+         position("P", "world") + transform("ND_transformpoint_vector3", "P", "world", "paint") + offset("Xf", 10.0F),
+         position("P", "world") +
+             node("Moved", "ND_subtract_vector3", "            vector3f inputs:in1.connect = </Materials/Mat/P.outputs:out>\n"
+                                                  "            vector3f inputs:in2 = (1, 2, 3)\n") +
+             node("Scaled", "ND_divide_vector3FA", "            vector3f inputs:in1.connect = </Materials/Mat/Moved.outputs:out>\n"
+                                                   "            float inputs:in2 = 2\n") +
+             offset("Scaled", 10.0F)},
+        {"object normal to world",
+         node("N", "ND_normal_vector3", "            string inputs:space = \"object\"\n") +
+             transform("ND_transformnormal_vector3", "N", "object", "world") + offset("Xf", 2.0F),
+         node("N", "ND_normal_vector3", "            string inputs:space = \"world\"\n") + offset("N", 2.0F)},
+    };
+    const uint32_t w = 160, h = 120;
+    const auto frame = [&](const fs::path& path) {
+        auto renderer = usd::StageRenderer::open(path);
+        if (!renderer) FAIL(renderer.error().toString());
+        auto image = (*renderer)->render("/Camera", 0.0, w, h, "raster");
+        if (!image) FAIL(image.error().toString());
+        gpu::BufferDesc desc;
+        desc.bytes = image->rgba.size() * sizeof(float);
+        desc.elementBytes = 16;
+        auto made = gpu::Buffer::create(*gpu->device, desc, image->rgba.data());
+        REQUIRE(made);
+        return std::move(*made);
+    };
+    int k = 0;
+    for (const Case& c : cases) {
+        gpu::Buffer a = frame(stage("spaces_" + std::to_string(k) + "_transformed.usda", c.transformed));
+        gpu::Buffer b = frame(stage("spaces_" + std::to_string(k) + "_direct.usda", c.direct));
+        auto diff = render::compareHdr(*gpu->library, a, b, w, h);
+        REQUIRE(diff);
+        std::vector<float> blank(size_t{w} * h * 4, 0.0F);
+        auto empty = gpu::Buffer::fromSpan<float>(*gpu->device, blank, "blank");
+        REQUIRE(empty);
+        auto drawn = render::compareHdr(*gpu->library, a, *empty, w, h);
+        REQUIRE(drawn);
+        std::printf("  %-34s: relMSE %.2e, max relative %.2e (against blank %.2e)\n", c.what, diff->relMse,
+                    diff->maxRelative, drawn->relMse);
+        CHECK(drawn->relMse > 0.1);
+        CHECK(diff->maxRelative < 1e-4);
+        ++k;
+    }
+    // The normals agree to the bit, which is also what a check comparing a
+    // thing with itself would say: the object normal left untransformed must
+    // not agree with the world normal.
+    gpu::Buffer untransformed = frame(stage("spaces_normal_untransformed.usda",
+        node("N", "ND_normal_vector3", "            string inputs:space = \"object\"\n") + offset("N", 2.0F)));
+    gpu::Buffer world = frame(stage("spaces_normal_world.usda",
+        node("N", "ND_normal_vector3", "            string inputs:space = \"world\"\n") + offset("N", 2.0F)));
+    auto control = render::compareHdr(*gpu->library, untransformed, world, w, h);
+    REQUIRE(control);
+    std::printf("  control, object normal untransformed : max relative %.2e against the world normal\n",
+                control->maxRelative);
+    CHECK(control->maxRelative > 1e-2);
+}
+
 // Render settings through Hydra (M10): a UsdRenderSettings prim with its
 // products and vars reaches the delegate's renderSettings bprim once it is
 // the scene's active one; `renderProducts` renders each product at its own

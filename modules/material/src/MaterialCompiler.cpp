@@ -10,6 +10,7 @@
 #include <MaterialXFormat/XmlIo.h>
 #include <MaterialXGenHw/HwConstants.h>
 #include <MaterialXGenHw/Nodes/HwSurfaceNode.h>
+#include <MaterialXGenShader/Exception.h>
 #include <MaterialXGenShader/GenContext.h>
 #include <MaterialXGenShader/Shader.h>
 #include <MaterialXGenShader/ShaderGraph.h>
@@ -141,12 +142,22 @@ public:
     }
 };
 
+mx::ShaderNodeImplPtr createTransformPoint();
+mx::ShaderNodeImplPtr createTransformVector();
+mx::ShaderNodeImplPtr createTransformNormal();
+
 class LrtSlangShaderGenerator : public mx::SlangShaderGenerator {
 public:
     LrtSlangShaderGenerator(mx::TypeSystemPtr types, ClosureVariant variant)
         : mx::SlangShaderGenerator(types), variant_(variant) {
         const bool lobes = variant == ClosureVariant::Lobes;
         registerImplementation("IM_surface_" + TARGET, lobes ? LrtSurfaceNode::create : LrtReferenceSurfaceNode::create);
+        // Transforms between object, world and a coordinate system bound to
+        // the prim, from the shading point's own transform: genslang's read
+        // matrices from uniforms nothing set (identity) and knew no systems.
+        registerImplementation("IM_transformpoint_vector3_" + TARGET, createTransformPoint);
+        registerImplementation("IM_transformvector_vector3_" + TARGET, createTransformVector);
+        registerImplementation("IM_transformnormal_vector3_" + TARGET, createTransformNormal);
         // The closure and shader types live in material_runtime.slang.
         const auto aggregate = [&](mx::TypeDesc type, const std::string& name, const std::string& value) {
             _syntax->registerTypeSyntax(type, std::make_shared<mx::AggregateTypeSyntax>(
@@ -179,6 +190,13 @@ public:
         replaceTokens(_tokenSubstitutions, ps);
         SlangSyntaxFromGlsl(ps);
         return shader;
+    }
+
+    /// A primvar's scene slot as the blob holds it, read in generated code.
+    std::string primvarSlotRead(const std::string& primvar) const {
+        MaterialSlot& slot = addSlot(MaterialSlot::Kind::Primvar, primvar, 1);
+        slot.name = primvar;
+        return "uint(lrtBlob(" + std::to_string(slot.offset) + "u))";
     }
 
 private:
@@ -356,6 +374,24 @@ private:
         for (const mx::ShaderPort* port : uniforms) {
             const mx::TypeDesc type = port->getType();
             const std::string& variable = port->getVariable();
+            // The world matrices, from the shading point's transform, as the
+            // float4x4 mx_matrix_mul applies them.
+            if (port->getName() == mx::HW::T_WORLD_MATRIX) {
+                emitLine(variable + " = lrtMatrixApplying(lrtWorldFromObject())", stage);
+                continue;
+            }
+            if (port->getName() == mx::HW::T_WORLD_INVERSE_MATRIX) {
+                emitLine(variable + " = lrtMatrixApplying(lrtInverse(lrtWorldFromObject()))", stage);
+                continue;
+            }
+            if (port->getName() == mx::HW::T_WORLD_TRANSPOSE_MATRIX) {
+                emitLine(variable + " = lrtMatrixApplyingTranspose(lrtWorldFromObject())", stage);
+                continue;
+            }
+            if (port->getName() == mx::HW::T_WORLD_INVERSE_TRANSPOSE_MATRIX) {
+                emitLine(variable + " = lrtMatrixApplyingTranspose(lrtInverse(lrtWorldFromObject()))", stage);
+                continue;
+            }
             if (port->getName() == mx::HW::T_VIEW_POSITION) {
                 emitLine(variable + " = inputs.viewPosition", stage);
                 continue;
@@ -447,6 +483,57 @@ private:
         emitFunctionBodyEnd(graph, context, stage);
     }
 };
+
+/// transformpoint, transformvector and transformnormal between "world",
+/// "object" (or "model") and any other name, which is a coordinate system
+/// bound to the prim (UsdShadeCoordSysAPI): its transform to world reaches
+/// the mesh as three constant primvars, "lrtCoordSys_NAME_0" to "_2", the
+/// rows of a 3x4. An empty space is world.
+class LrtTransformNode : public mx::ShaderNodeImpl {
+public:
+    enum class Kind { Point, Vector, Normal };
+    explicit LrtTransformNode(Kind kind) : kind_(kind) {}
+
+    void emitFunctionCall(const mx::ShaderNode& node, mx::GenContext& context, mx::ShaderStage& stage) const override {
+        DEFINE_SHADER_STAGE(stage, mx::Stage::PIXEL) {
+            const auto& generator = static_cast<const LrtSlangShaderGenerator&>(context.getShaderGenerator());
+            const mx::ShaderInput* in = node.getInput("in");
+            const mx::ShaderOutput* output = node.getOutput();
+            if (in == nullptr || output == nullptr) {
+                throw mx::ExceptionShaderGenError("transform node '" + node.getName() + "' has no in or out");
+            }
+            const auto space = [&](const char* input) {
+                const mx::ShaderInput* port = node.getInput(input);
+                const std::string name = port != nullptr ? port->getValueString() : std::string();
+                if (name.empty() || name == "world") {
+                    return std::string("0u, 0u, 0u, 0u");
+                }
+                if (name == "object" || name == "model") {
+                    return std::string("1u, 0u, 0u, 0u");
+                }
+                const std::string prefix = "lrtCoordSys_" + name + "_";
+                return "2u, " + generator.primvarSlotRead(prefix + "0") + ", " + generator.primvarSlotRead(prefix + "1") +
+                       ", " + generator.primvarSlotRead(prefix + "2");
+            };
+            const std::string from = space("fromspace");
+            const std::string to = space("tospace");
+            generator.emitLineBegin(stage);
+            generator.emitOutput(output, true, false, context, stage);
+            generator.emitString(" = lrtTransformBetween(" + generator.getUpstreamResult(in, context) + ", " +
+                                     (kind_ == Kind::Point ? "1.0" : "0.0") + ", " +
+                                     (kind_ == Kind::Normal ? "true" : "false") + ", " + from + ", " + to + ")",
+                                 stage);
+            generator.emitLineEnd(stage);
+        }
+    }
+
+private:
+    Kind kind_;
+};
+
+mx::ShaderNodeImplPtr createTransformPoint() { return std::make_shared<LrtTransformNode>(LrtTransformNode::Kind::Point); }
+mx::ShaderNodeImplPtr createTransformVector() { return std::make_shared<LrtTransformNode>(LrtTransformNode::Kind::Vector); }
+mx::ShaderNodeImplPtr createTransformNormal() { return std::make_shared<LrtTransformNode>(LrtTransformNode::Kind::Normal); }
 
 std::string hexHash(const std::string& text) {
     // FNV-1a, 64 bits: a name for equal source, not a secret.

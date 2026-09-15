@@ -105,5 +105,13 @@ public MaterialInputs materialInputsAt(CameraParams camera, ViewToWorld toWorld,
     inputs.points = s.points;
     inputs.weights = s.weights;
     inputs.displayColor = r.colour;
+    // Object to world: the instance's object-to-view rows, then view to world.
+    const float3 c0 = applyRows(toWorld, float3(r.view0.x, r.view1.x, r.view2.x), 0.0);
+    const float3 c1 = applyRows(toWorld, float3(r.view0.y, r.view1.y, r.view2.y), 0.0);
+    const float3 c2 = applyRows(toWorld, float3(r.view0.z, r.view1.z, r.view2.z), 0.0);
+    const float3 c3 = applyRows(toWorld, float3(r.view0.w, r.view1.w, r.view2.w), 1.0);
+    inputs.worldFromObject0 = float4(c0.x, c1.x, c2.x, c3.x);
+    inputs.worldFromObject1 = float4(c0.y, c1.y, c2.y, c3.y);
+    inputs.worldFromObject2 = float4(c0.z, c1.z, c2.z, c3.z);
     return inputs;
 }

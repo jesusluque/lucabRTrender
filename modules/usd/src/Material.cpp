@@ -51,8 +51,14 @@ const std::map<TfToken, TfToken>& primvarReaders() {
 /// normal. hdMtlx types each input by what it was given, the nodedef no
 /// longer matches, and the whole material fails ("could not find a nodedef
 /// for node 'Surface'"). A float4 and a color4 are one Slang float4, so the
-/// input takes the declared name and nothing else changes.
+/// input takes the declared name and nothing else changes. So does a value
+/// hdMtlx typed as a string because USD's role type has no MaterialX name.
 void matchDeclaredTypes(const MaterialX::DocumentPtr& document) {
+    const auto numeric = [](const std::string& type) {
+        static const std::set<std::string> kNumeric{"float",   "integer", "boolean",  "vector2",  "vector3",
+                                                    "vector4", "color3",  "color4",   "matrix33", "matrix44"};
+        return kNumeric.count(type) != 0;
+    };
     const auto shape = [](const std::string& type) -> int {
         if (type == "vector3" || type == "color3") return 3;
         if (type == "vector4" || type == "color4") return 4;
@@ -82,8 +88,15 @@ void matchDeclaredTypes(const MaterialX::DocumentPtr& document) {
         }
         for (const MaterialX::InputPtr& input : node->getInputs()) {
             const MaterialX::InputPtr declared = nodeDef->getActiveInput(input->getName());
-            if (declared && declared->getType() != input->getType() && shape(declared->getType()) != 0 &&
-                shape(declared->getType()) == shape(input->getType())) {
+            if (!declared || declared->getType() == input->getType()) {
+                continue;
+            }
+            if (shape(declared->getType()) != 0 && shape(declared->getType()) == shape(input->getType())) {
+                input->setType(declared->getType());
+            } else if (input->getType() == "string" && numeric(declared->getType()) && input->hasValueString()) {
+                // A value of a role type USD has and MaterialX does not
+                // (vector3f, point3f, normal3f) reaches it as a string of its
+                // numbers: the declared type reads the same text.
                 input->setType(declared->getType());
             }
         }

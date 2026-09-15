@@ -175,6 +175,9 @@ void materialProbe(uint3 tid: SV_DispatchThreadID) {
     inputs.frame = 0.0;
     inputs.time = 0.0;
     inputs.inside = false;
+    inputs.worldFromObject0 = float4(1.0, 0.0, 0.0, 0.0);
+    inputs.worldFromObject1 = float4(0.0, 1.0, 0.0, 0.0);
+    inputs.worldFromObject2 = float4(0.0, 0.0, 1.0, 0.0);
     inputs.mesh.firstPoint = 0;
     inputs.mesh.points = 0;
     inputs.mesh.firstTriangle = 0;
