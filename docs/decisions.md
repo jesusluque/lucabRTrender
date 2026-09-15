@@ -2735,6 +2735,35 @@ correctness.
 After both, Kitchen_set lit renders under both techniques from inside the
 kitchen; the path traced frame at 256 paths is clean without the denoiser.
 
+### Measured (release, Apple M5 Pro)
+
+`lrt stage --frames 11` at 1920x1080 from inside the kitchen, median of
+the ten frames after the first (Hydra sync, drawing and the readback):
+
+| Stage | raster | rt (1 path, 1 bounce) |
+|---|---|---|
+| Kitchen_set, no lights (headlight) | 43.1 ms | 333.3 ms |
+| Kitchen_set lit (dome, rect, two spheres) | 96.0 ms | 358.9 ms |
+
+The first frame, which loads the stage and compiles, is 4.5 to 5.5 s.
+`lrt view --frames 120` on Kitchen_set lit at 1600x900, framing the whole
+set: raster 33.3 ms a frame, rt 127.7 ms a frame while it accumulates
+(medians).
+
+### A render settings prim over a real stage
+
+A layer over Kitchen_set lit adds a camera, light groups on its lights
+(`sky`, `window`, `bulbs`) and a `RenderSettings` prim with one product of
+seven vars -- beauty, depth, primId, normal and the three groups as light
+path expressions -- traced at 256 paths and 3 bounces. `lrt stage
+--render-settings /Render/Final` writes one EXR of 21 channels in 41 s
+(release). Read back and checked with the light group kernel: the groups
+sum to the beauty wherever a surface was drawn; the 19% of pixels where
+they do not are the dome's background seen through the openings, which is
+in no group, as M10 records. The `window` group is empty in this layer
+because its rect, turned 90 degrees about Y, emits away from the kitchen:
+the bench layer's authoring, not the renderer's.
+
 ## Linux, on the 94 (M11's first half)
 
 ### The first table, after the port was reconciled with engine
