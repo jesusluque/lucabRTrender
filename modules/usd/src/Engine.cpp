@@ -1157,21 +1157,50 @@ Result<void> Engine::render(const render::Projection& projection, const render::
                         if (!made) return std::move(made).error();
                         instancing_.emplace(std::move(*made));
                     }
-                    std::vector<world::InstancerLevel> levels;
-                    for (const InstancerLink& link : entry.instancing) {
-                        const InstancerArrays& a = instancers_.at(link.instancer).arrays;
-                        world::InstancerLevel level;
-                        level.indices = std::span<const int32_t>(link.indices.cdata(), link.indices.size());
-                        level.translations = streamOf(a.translations);
-                        level.rotations = streamOf(a.rotations);
-                        level.scales = streamOf(a.scales);
-                        level.transforms = streamOf(a.transforms);
-                        level.instancerTransform = a.instancerTransform;
-                        levels.push_back(level);
-                    }
-                    auto chain = instancing_->compose(levels);
+                    // The chain at the frame, and -- where an instancer in it
+                    // moves under the shutter -- at the samples about it: each
+                    // level from its own samples where it has them, the
+                    // frame's arrays where it does not.
+                    enum class At { Frame, Start, End };
+                    bool anyMoves = false;
+                    const auto compose = [&](At at) -> Result<world::InstanceChain> {
+                        std::vector<world::InstancerLevel> levels;
+                        for (const InstancerLink& link : entry.instancing) {
+                            const InstancerArrays& a = instancers_.at(link.instancer).arrays;
+                            const InstancerSample* sample = at == At::Start && a.start.has_value() ? &*a.start
+                                                            : at == At::End && a.end.has_value()   ? &*a.end
+                                                                                                    : nullptr;
+                            if (at == At::Frame && a.start.has_value() && a.end.has_value() && !anyMoves) {
+                                anyMoves = true;
+                                mutableEntry.chainTimeStart = a.timeStart;
+                                mutableEntry.chainTimeEnd = a.timeEnd;
+                            }
+                            world::InstancerLevel level;
+                            level.indices = std::span<const int32_t>(link.indices.cdata(), link.indices.size());
+                            level.translations = streamOf(sample != nullptr ? sample->translations : a.translations);
+                            level.rotations = streamOf(sample != nullptr ? sample->rotations : a.rotations);
+                            level.scales = streamOf(sample != nullptr ? sample->scales : a.scales);
+                            level.transforms = streamOf(sample != nullptr ? sample->transforms : a.transforms);
+                            level.instancerTransform = sample != nullptr ? sample->instancerTransform : a.instancerTransform;
+                            levels.push_back(level);
+                        }
+                        return instancing_->compose(levels);
+                    };
+                    auto chain = compose(At::Frame);
                     if (!chain) return std::move(chain).error();
                     mutableEntry.chain = std::move(*chain);
+                    mutableEntry.chainStart = {};
+                    mutableEntry.chainEnd = {};
+                    if (anyMoves) {
+                        auto start = compose(At::Start);
+                        if (!start) return std::move(start).error();
+                        auto end = compose(At::End);
+                        if (!end) return std::move(end).error();
+                        if (start->count == mutableEntry.chain.count && end->count == mutableEntry.chain.count) {
+                            mutableEntry.chainStart = std::move(*start);
+                            mutableEntry.chainEnd = std::move(*end);
+                        }
+                    }
                     mutableEntry.chainVersions = std::move(versions);
                     mutableEntry.chainDirty = false;
                 }
@@ -1179,6 +1208,17 @@ Result<void> Engine::render(const render::Projection& projection, const render::
                 set.mesh = entry.gpu;
                 set.chainRows = entry.chain.rows;
                 set.count = entry.chain.count;
+                if (motionBuckets > 1 && entry.chainStart.count == entry.chain.count && entry.chain.count > 0 &&
+                    entry.chainStart.rows.valid() && entry.chainEnd.rows.valid()) {
+                    set.chainRowsStart = entry.chainStart.rows;
+                    set.chainRowsEnd = entry.chainEnd.rows;
+                    set.timeStart = entry.chainTimeStart;
+                    set.timeEnd = entry.chainTimeEnd;
+                    if (set.timeEnd == set.timeStart) {
+                        set.timeStart = shutterOpen;
+                        set.timeEnd = shutterClose;
+                    }
+                }
                 set.prototype = entry.objectToWorld;
                 set.primId = entry.primId;
                 set.displayColor = entry.look.displayColor;
@@ -1320,7 +1360,13 @@ Result<void> Engine::render(const render::Projection& projection, const render::
         pathAuxValid_ = false;
     }
     if (meshLayer) {
-        LRT_TRY(scene_->update(meshInstances, projection, meshSets, motionBuckets, shutterOpen, shutterClose));
+        // A light that moves cuts the frame into shutter slices as geometry
+        // that moves does.
+        const bool lightsMove = motionBuckets > 1 && std::any_of(lamps.begin(), lamps.end(), [](const light::Light& l) {
+                                    return l.moves && (l.instanceRows == nullptr || l.instanceCount == 0);
+                                });
+        LRT_TRY(scene_->update(meshInstances, projection, meshSets, motionBuckets, shutterOpen, shutterClose,
+                               lightsMove));
         // The frame's lights, and what a shadow ray traces against: rays
         // shadow whatever route found the visibility, so the structure is
         // built even where the rasteriser drew. All of this uploads and
@@ -1580,6 +1626,9 @@ Result<void> Engine::render(const render::Projection& projection, const render::
             now.bounces = paths.bounces;
             now.adaptive = paths.adaptive;
             now.mis = paths.mis;
+            now.cameraMoves = projection.cameraMoves;
+            now.cameraStart = projection.viewToWorldStart;
+            now.cameraEnd = projection.viewToWorldEnd;
             now.error = paths.errorTarget;
             now.revision = revision_.load();
             if (renderTags != nullptr) {

@@ -2049,9 +2049,59 @@ so the velocity stage authors its sample at the frame drawn; a sample at
 frame 0 read at frame 0.5 had been held and then extrapolated about 0.5,
 a frame's worth off the samples.
 
-**Not done.** Instancers' and lights' motion is not sampled (a
-PointInstancer's prototypes and a light stand at the frame's time under a
-shutter); the camera's own motion neither. The raster technique draws the
+**Instancers move.** Under a shutter `HdLrtInstancer` samples each of its
+per-instance arrays (`SamplePrimvar` of translations, rotations, scales and
+transforms) and its own transform (`SampleInstancerTransform`) about the
+shutter, keeping the samples' times, as a mesh does; the engine composes the
+chain three times -- at the frame, and at the two samples, each level from
+its own samples where it has them and the frame's arrays where it does not
+-- and hands the set both motion chains. `GpuScene` puts moving sets first
+among the sets, copies their records per shutter slice after the single
+instances' copies (`instanceRecordsMotion`: the chain rows interpolated to
+the slice's centre, times the prototype, answering to the slice's bit), and
+the acceleration structures take those copies instead of the moving sets'
+frame records -- the range stays contiguous because the moving sets lead.
+Checked: two squares under a PointInstancer whose positions are time
+sampled, path traced in eight slices, are bit for bit the same squares
+authored as two meshes sliding by their transforms (relMSE 0, max 0), and
+differ from the shutter closed (0.92); with the motion chains withheld from
+the scene the instancer drew sharp, and the comparison failed.
+
+**The camera moves.** The delegate's camera sprim is `HdLrtCamera`, hd's
+`HdCamera` that also samples its transform about the shutter; the pass
+hands the projection view to world at both samples (the camera's transform,
+then the flip to +z -- no inverse) with their times. A moving camera makes
+the scene cut the frame into shutter slices even when nothing else moves,
+and turns on the path tracer's own primary rays, each sample's camera
+interpolated to the centre of the slice its rays answer to -- the time the
+moving geometry it meets is drawn at. The raster draws the frame's camera.
+Checked: a camera sliding +x over two still squares, path traced in eight
+slices, is bit for bit a still camera over the squares sliding -x (relMSE 0,
+max 0), and differs from the shutter closed (0.92); with the samples
+withheld from the kernel the camera drew sharp and the comparison failed.
+
+**Lights move.** A light samples its transform about the shutter as a mesh
+does; the table carries, only when some light moves, 26 floats a record
+after the light BVH's nodes in the IES values buffer -- the rows at both
+samples and their times, a still record's times equal -- since the path
+tracer's kernel binds its 31 buffers already. A moving light makes the
+frame's slices as moving geometry does, and each sample places the light it
+chose (next event estimation, media, and the material's rays under MIS)
+between its samples at the centre of the slice its rays answer to
+(`lightFor`); its choice by power, and the light BVH's, stay the frame's.
+Checked by the relative scene: a sphere light sliding over a floor with an
+occluder, under a still camera, against the light still and the camera,
+floor and occluder sliding the other way -- relMSE 4.9e-9 (p99 relative
+1.7e-5) -- while against the light standing still the frames part by
+2.8e-4, a soft shadow sweeping a part of the floor. With the samples
+withheld from the kernel the moving light drew the still frame (3.7e-13).
+(The test's first arrangement was wrong, not the renderer: the reversed
+stage put the occluder two units from the light at mid frame instead of
+one.)
+
+**Not done.** An instanced light does not move. A shutter that changes
+after an instancer, a light or the camera synced is read at its next sync:
+the pass dirties rprims only. The raster technique draws the
 frame's time, no blur. A turn between the two shutter samples is
 interpolated as rows, not as a rotation. Two samples only: a shutter that
 spans more than two authored samples takes the outer two. Where a prim's

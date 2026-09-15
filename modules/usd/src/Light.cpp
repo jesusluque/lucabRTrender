@@ -75,6 +75,24 @@ void HdLrtLight::Sync(HdSceneDelegate* sceneDelegate, HdRenderParam* renderParam
         return;
     }
     lamp.lightToWorld = lrt::usd::fromUsd(sceneDelegate->GetTransform(id));
+    // Under a shutter, its transform at the samples about it, as a mesh's.
+    {
+        const auto* param = static_cast<HdLrtRenderParam*>(renderParam);
+        const float open = static_cast<float>(param->GetShutterOpen());
+        const float close = static_cast<float>(param->GetShutterClose());
+        if (close > open) {
+            float times[2] = {0.0F, 0.0F};
+            GfMatrix4d values[2];
+            const size_t n = sceneDelegate->SampleTransform(id, open, close, 2, times, values);
+            if (n >= 2 && values[0] != values[n - 1]) {
+                lamp.moves = true;
+                lamp.lightToWorldStart = lrt::usd::fromUsd(values[0]);
+                lamp.lightToWorldEnd = lrt::usd::fromUsd(values[n - 1]);
+                lamp.timeStart = times[0];
+                lamp.timeEnd = times[n - 1];
+            }
+        }
+    }
     const VtValue colour = sceneDelegate->GetLightParamValue(id, HdLightTokens->color);
     if (colour.IsHolding<GfVec3f>()) {
         const GfVec3f& c = colour.UncheckedGet<GfVec3f>();

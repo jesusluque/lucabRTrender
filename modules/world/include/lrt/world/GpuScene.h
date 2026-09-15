@@ -77,6 +77,14 @@ struct InstanceSet {
     uint32_t                             material = 0;
     std::vector<uint32_t>                subsetMaterials;
     uint64_t                             categories = 0;   ///< as MeshInstance's
+    /// Under a shutter, when the instancers move: the chain at the samples
+    /// that bracket it (3 float4 rows an instance, as `chainRows`), and when
+    /// those samples are, in the shutter's units. Both chains or neither.
+    gpu::Buffer                          chainRowsStart;
+    gpu::Buffer                          chainRowsEnd;
+    double                               timeStart = 0.0;
+    double                               timeEnd = 1.0;
+    [[nodiscard]] bool moves() const noexcept { return chainRowsStart.valid() && chainRowsEnd.valid(); }
 };
 
 /// Consecutive instances of one mesh: one draw.
@@ -100,7 +108,8 @@ public:
     /// rasteriser and the compute BVH draw.
     [[nodiscard]] Result<void> update(std::span<const MeshInstance> instances, const render::Projection& projection,
                                       std::span<const InstanceSet> sets = {}, uint32_t buckets = 1,
-                                      double shutterOpen = 0.0, double shutterClose = 1.0);
+                                      double shutterOpen = 0.0, double shutterClose = 1.0,
+                                      bool otherMotion = false);
 
     [[nodiscard]] uint32_t instanceCount() const noexcept { return instanceCount_; }
     [[nodiscard]] uint32_t buckets() const noexcept { return buckets_; }
@@ -150,6 +159,9 @@ public:
     [[nodiscard]] const gpu::Buffer& triangleSubsets() const noexcept { return triangleSubsets_; }
     [[nodiscard]] bool anyHidden() const noexcept { return anyHidden_; }
     /// Per mesh (from MeshRecord.subsetBase), per subset: its material row, 0 for the instance's.
+    /// The shutter the last update laid its slices over, in its own units.
+    [[nodiscard]] double shutterOpen() const noexcept { return shutterOpen_; }
+    [[nodiscard]] double shutterClose() const noexcept { return shutterClose_; }
     [[nodiscard]] const gpu::Buffer& subsetRows() const noexcept { return subsetRows_; }
     [[nodiscard]] const gpu::Buffer& meshRecords() const noexcept { return meshRecords_; }
     [[nodiscard]] const gpu::Buffer& instanceRecords() const noexcept { return instanceRecords_; }
@@ -166,6 +178,8 @@ private:
     uint64_t                                           positionsRevision_ = 0;
     std::vector<uint64_t>                              meshRevisions_;
     uint32_t                                           buckets_ = 1;
+    double                                             shutterOpen_ = 0.0;
+    double                                             shutterClose_ = 1.0;
     uint32_t                                           tlasFirst_ = 0;
     uint32_t                                           tlasCount_ = 0;
     uint32_t                                           pointsStride_ = 0;
@@ -175,7 +189,8 @@ private:
     std::vector<uint64_t>                              primvarValueBase_;   ///< per mesh: its first value in primvarValues_
 
     gpu::Device*                                       device_ = nullptr;
-    gpu::ComputeKernel                                 records_;
+    gpu::ComputeKernel                                 records_, recordsMotion_;
+    gpu::Buffer                                        motionSetRows0_, motionSetRows1_, motionSetRecords_;
     gpu::ComputeKernel                                 worldBoxes_, boundsChunks_, boundsReduce_;
     gpu::ComputeKernel                                 subsetClear_;
     std::vector<std::shared_ptr<const geom::GpuMesh>>  meshes_;

@@ -1,5 +1,6 @@
 // Copyright (c) 2026 lucabRTrender contributors.
 #include "RenderPass.h"
+#include "Camera.h"
 
 #include "RenderParam.h"
 
@@ -50,6 +51,16 @@ void HdLrtRenderPass::_Execute(HdRenderPassStateSharedPtr const& state, TfTokenV
             projection.lensRadius = static_cast<double>(camera->GetFocalLength()) /
                                     (2.0 * static_cast<double>(camera->GetFStop()));
             projection.focusDistance = static_cast<double>(camera->GetFocusDistance());
+        }
+        // A camera that moves under the shutter: view to world at its two
+        // samples (the camera's transform, then the flip to +z).
+        if (const auto* moving = dynamic_cast<const HdLrtCamera*>(camera); moving != nullptr && moving->Moves()) {
+            const lrt::render::Mat4 flip = aofx::xform::scaling({1.0, 1.0, -1.0});
+            projection.cameraMoves = true;
+            projection.viewToWorldStart = lrt::usd::fromUsd(moving->GetTransformStart()) * flip;
+            projection.viewToWorldEnd = lrt::usd::fromUsd(moving->GetTransformEnd()) * flip;
+            projection.cameraTimeStart = moving->GetTimeStart();
+            projection.cameraTimeEnd = moving->GetTimeEnd();
         }
         if (camera->GetLensDistortionType() == HdCameraTokens->standard) {
             projection.distortionK1 = static_cast<double>(camera->GetLensDistortionK1());

@@ -71,6 +71,14 @@ struct Projection {
     double focusDistance = 0.0;
     double distortionK1 = 0.0;   ///< radial, in ndc radius: p' = p (1 + k1 r^2 + k2 r^4)
     double distortionK2 = 0.0;
+    /// Under a shutter, when the camera itself moves: view to world at the
+    /// samples bracketing it, and when those are (in the shutter's units).
+    /// Only the path tracer's own rays follow it; `worldToView` is the frame's.
+    bool   cameraMoves = false;
+    Mat4   viewToWorldStart = Mat4::identity();
+    Mat4   viewToWorldEnd = Mat4::identity();
+    double cameraTimeStart = 0.0;
+    double cameraTimeEnd = 1.0;
 };
 
 [[nodiscard]] Mat4 viewFromCamera(const Mat4& cameraToWorld);

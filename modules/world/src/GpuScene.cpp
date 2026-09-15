@@ -40,9 +40,11 @@ struct SetRecord {
     uint32_t mesh;
     uint32_t primId;
     uint32_t flags;
-    uint32_t categoriesLo, categoriesHi, pad0;
+    uint32_t categoriesLo, categoriesHi;
+    float    time0, time1;
+    uint32_t pad0, pad1, pad2;
 };
-static_assert(sizeof(SetRecord) == 96);
+static_assert(sizeof(SetRecord) == 112);
 
 struct PrimvarRecord {
     uint32_t interpolation, components, first, count;
@@ -84,6 +86,9 @@ Result<GpuScene> GpuScene::create(gpu::ShaderLibrary& library) {
     auto records = gpu::ComputeKernel::create(library, "lrt/world/instancing", "instanceRecords");
     if (!records) return std::move(records).error();
     scene.records_ = std::move(*records);
+    auto recordsMotion = gpu::ComputeKernel::create(library, "lrt/world/instancing", "instanceRecordsMotion");
+    if (!recordsMotion) return std::move(recordsMotion).error();
+    scene.recordsMotion_ = std::move(*recordsMotion);
     auto clear = gpu::ComputeKernel::create(library, "lrt/geom/mesh_subsets", "subsetClear");
     auto motionRecords = gpu::ComputeKernel::create(library, "lrt/world/motion", "motionRecords");
     if (!motionRecords) return std::move(motionRecords).error();
@@ -314,7 +319,7 @@ Result<void> GpuScene::writeSlots() {
 
 Result<void> GpuScene::update(std::span<const MeshInstance> instances, const render::Projection& projection,
                               std::span<const InstanceSet> sets, uint32_t bucketsWanted, double shutterOpen,
-                              double shutterClose) {
+                              double shutterClose, bool otherMotion) {
     // The meshes, in first-appearance order; instances grouped by mesh.
     std::vector<std::shared_ptr<const geom::GpuMesh>> meshes;
     std::map<const geom::GpuMesh*, uint32_t> indexOf;
@@ -346,6 +351,27 @@ Result<void> GpuScene::update(std::span<const MeshInstance> instances, const ren
     for (const MeshInstance& instance : instances) {
         moves = moves || instance.motion.has_value();
     }
+    // The sets, those whose instancers move first: under motion the
+    // structure takes their bucket copies and not their frame records, and
+    // the range it takes is contiguous.
+    std::vector<const InstanceSet*> ordered;
+    for (const InstanceSet& set : sets) {
+        if (set.mesh != nullptr && set.mesh->triangles > 0 && set.count > 0 && set.moves()) {
+            ordered.push_back(&set);
+        }
+    }
+    const size_t movingSets = ordered.size();
+    for (const InstanceSet& set : sets) {
+        if (set.mesh != nullptr && set.mesh->triangles > 0 && set.count > 0 && !set.moves()) {
+            ordered.push_back(&set);
+        }
+    }
+    moves = moves || (bucketsWanted > 1 && movingSets > 0);
+    // A moving camera cuts the frame into slices too: its rays at a slice's
+    // centre meet the geometry drawn there, still or not.
+    moves = moves || (bucketsWanted > 1 && (projection.cameraMoves || otherMotion));
+    shutterOpen_ = shutterOpen;
+    shutterClose_ = shutterClose;
     const uint32_t buckets = moves ? std::min<uint32_t>(std::max<uint32_t>(bucketsWanted, 1), 8) : 1;
     bool anyDeforms = false;
     for (const bool d : deforms) {
@@ -357,10 +383,8 @@ Result<void> GpuScene::update(std::span<const MeshInstance> instances, const ren
     const bool relayout = buckets != buckets_ || deforms != deforms_;
     buckets_ = buckets;
     deforms_ = deforms;
-    for (const InstanceSet& set : sets) {
-        if (set.mesh == nullptr || set.mesh->triangles == 0 || set.count == 0) {
-            continue;
-        }
+    for (const InstanceSet* setPtr : ordered) {
+        const InstanceSet& set = *setPtr;
         if (indexOf.try_emplace(set.mesh.get(), static_cast<uint32_t>(meshes.size())).second) {
             meshes.push_back(set.mesh);
             byMesh.emplace_back();
@@ -514,8 +538,8 @@ Result<void> GpuScene::update(std::span<const MeshInstance> instances, const ren
         for (const MeshInstance& instance : instances) {
             place(instance.mesh.get(), instance.subsetMaterials);
         }
-        for (const InstanceSet& set : sets) {
-            place(set.mesh.get(), set.subsetMaterials);
+        for (const InstanceSet* set : ordered) {
+            place(set->mesh.get(), set->subsetMaterials);
         }
         if (rows != subsetRowWords_) {
             LRT_TRY(subsetRows_.write(*device_, 0, rows.size() * 4, rows.data()));
@@ -525,21 +549,26 @@ Result<void> GpuScene::update(std::span<const MeshInstance> instances, const ren
     // Sets after the single instances, their records written on the device;
     // and after those, under motion, every single instance's bucket copies.
     uint64_t total = records.size();
-    for (const InstanceSet& set : sets) {
-        if (set.mesh != nullptr && set.mesh->triangles > 0) {
-            total += set.count;
-        }
+    uint64_t movingInstances = 0;
+    for (size_t k = 0; k < ordered.size(); ++k) {
+        total += ordered[k]->count;
+        movingInstances += k < movingSets ? ordered[k]->count : 0;
     }
-    const uint64_t withMotion = total + (buckets_ > 1 ? uint64_t{records.size()} * buckets_ : 0);
+    if (buckets_ <= 1) {
+        movingInstances = 0;
+    }
+    const uint64_t withMotion =
+        total + (buckets_ > 1 ? (uint64_t{records.size()} + movingInstances) * buckets_ : 0);
     if (withMotion > UINT32_MAX) {
         return Error(ErrorCode::OutOfMemory, "more than 2^32 instances");
     }
     instanceCount_ = static_cast<uint32_t>(total);
     if (buckets_ > 1) {
-        // The structure holds the sets (still, so answering to every bit) and
-        // the bucket copies; not the frame's single records.
-        tlasFirst_ = static_cast<uint32_t>(records.size());
-        tlasCount_ = static_cast<uint32_t>(withMotion - records.size());
+        // The structure holds the still sets (answering to every bit) and the
+        // bucket copies of the single instances and of the moving sets; not
+        // the frame's records of either.
+        tlasFirst_ = static_cast<uint32_t>(records.size() + movingInstances);
+        tlasCount_ = static_cast<uint32_t>(withMotion - tlasFirst_);
     } else {
         tlasFirst_ = 0;
         tlasCount_ = instanceCount_;
@@ -588,10 +617,8 @@ Result<void> GpuScene::update(std::span<const MeshInstance> instances, const ren
     std::vector<SetRecord> setRecords;
     std::vector<std::pair<gpu::Buffer, uint32_t>> layout;
     uint32_t setInstances = 0;
-    for (const InstanceSet& set : sets) {
-        if (set.mesh == nullptr || set.mesh->triangles == 0 || set.count == 0) {
-            continue;
-        }
+    for (const InstanceSet* setPtr : ordered) {
+        const InstanceSet& set = *setPtr;
         const uint32_t mesh = indexOf.at(set.mesh.get());
         SetRecord record{};
         rows(set.prototype, record.prototype);
@@ -606,6 +633,8 @@ Result<void> GpuScene::update(std::span<const MeshInstance> instances, const ren
         record.flags = (set.doubleSided ? 1u : 0u) | (set.material << 8);
         record.categoriesLo = static_cast<uint32_t>(set.categories & 0xFFFFFFFFu);
         record.categoriesHi = static_cast<uint32_t>(set.categories >> 32);
+        record.time0 = static_cast<float>(set.timeStart);
+        record.time1 = static_cast<float>(set.timeEnd);
         setRecords.push_back(record);
         layout.emplace_back(set.chainRows, set.count);
         draws_.push_back({mesh, singles + setInstances, set.count});
@@ -653,6 +682,49 @@ Result<void> GpuScene::update(std::span<const MeshInstance> instances, const ren
             p[kNames[k]].setData(view[k]);
         }
     });
+    // The moving sets' bucket copies, after the single instances' copies:
+    // their chains at the two samples pooled apart, each frame (a moving
+    // chain is a new chain every frame), and records per slice between them.
+    if (movingInstances > 0) {
+        const auto grow = [&](gpu::Buffer& buffer, uint64_t count, size_t element, const char* label) -> Result<void> {
+            if (buffer.count() < count) {
+                auto made = deviceBuffer(*device_, count * 3 / 2 + 1, element, label);
+                if (!made) return std::move(made).error();
+                buffer = std::move(*made);
+            }
+            return ok();
+        };
+        LRT_TRY(grow(motionSetRows0_, movingInstances * 3, 16, "scene.motionSetRows0"));
+        LRT_TRY(grow(motionSetRows1_, movingInstances * 3, 16, "scene.motionSetRows1"));
+        LRT_TRY(grow(motionSetRecords_, movingSets, sizeof(SetRecord), "scene.motionSets"));
+        for (size_t k = 0; k < movingSets; ++k) {
+            const uint64_t at = uint64_t{setRecords[k].first} * 48;
+            const uint64_t bytes = uint64_t{setRecords[k].count} * 48;
+            batch.encoder()->copyBuffer(motionSetRows0_.rhi(), at, ordered[k]->chainRowsStart.rhi(), 0, bytes);
+            batch.encoder()->copyBuffer(motionSetRows1_.rhi(), at, ordered[k]->chainRowsEnd.rhi(), 0, bytes);
+        }
+        batch.markDirty();
+        LRT_TRY(motionSetRecords_.write(*device_, 0, movingSets * sizeof(SetRecord), setRecords.data()));
+        const uint32_t count = static_cast<uint32_t>(movingInstances * buckets_);
+        recordsMotion_.dispatch(batch, {count, 1, 1}, [&](rhi::ShaderCursor cursor) {
+            cursor["sets"].setBinding(motionSetRecords_.rhi());
+            cursor["setRows"].setBinding(motionSetRows0_.rhi());
+            cursor["setRowsEnd"].setBinding(motionSetRows1_.rhi());
+            cursor["records"].setBinding(instanceRecords_.rhi());
+            rhi::ShaderCursor p = cursor["params"];
+            p["count"].setData(count);
+            p["sets"].setData(static_cast<uint32_t>(movingSets));
+            p["buckets"].setData(buckets_);
+            p["first"].setData(static_cast<uint32_t>(total + uint64_t{records.size()} * buckets_));
+            p["open"].setData(static_cast<float>(shutterOpen));
+            p["close"].setData(static_cast<float>(shutterClose));
+            static constexpr const char* kNames[12] = {"v00", "v01", "v02", "v03", "v10", "v11",
+                                                      "v12", "v13", "v20", "v21", "v22", "v23"};
+            for (size_t k = 0; k < 12; ++k) {
+                p[kNames[k]].setData(view[k]);
+            }
+        });
+    }
     LRT_TRY(batch.submit(true));
     return ok();
 }

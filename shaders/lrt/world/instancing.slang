@@ -27,7 +27,7 @@ struct InstancingParams {
     uint  first;          // records: the sets' first record
     uint  flags;
     uint  sets;           // records: how many sets
-    uint  pad0;
+    uint  buckets;        // motion records: shutter slices
     float c0r; float c0g; float c0b; float c0a;   // records: displayColor, opacity
     // a 3x4 in rows: the level's instancer transform, or (records) the prototype's own
     float m00; float m01; float m02; float m03;
@@ -37,6 +37,9 @@ struct InstancingParams {
     float v00; float v01; float v02; float v03;
     float v10; float v11; float v12; float v13;
     float v20; float v21; float v22; float v23;
+    float open;           // motion records: the shutter
+    float close;
+    float pad1; float pad2;
 };
 
 StructuredBuffer<uint>              indices;          // level: which primvar element each instance takes
@@ -61,10 +64,13 @@ struct SetRecord {
     uint   flags;        // bit 0: double sided
     uint   categoriesLo; // what a light's link is tested against
     uint   categoriesHi;
-    uint   pad0;
+    float  time0;        // under motion: when its chain's two samples are, in the shutter's units
+    float  time1;
+    uint   pad0; uint pad1; uint pad2;
 };
 StructuredBuffer<SetRecord>         sets;             // records: in order of `first`
-StructuredBuffer<float4>            setRows;          // records: 3 per instance, every set's chain
+StructuredBuffer<float4>            setRows;          // records: 3 per instance, every set's chain (motion: at the earlier sample)
+StructuredBuffer<float4>            setRowsEnd;       // motion records: the same chains at the later sample
 ConstantBuffer<InstancingParams>    params;
 
 /// A float64 from its two words (little-endian), rounded to float -- Metal
@@ -187,17 +193,9 @@ uint setOf(uint i) {
     return lo;
 }
 
-/// Every instanced set's records in one dispatch: instance i's chain times
-/// its set's prototype, to view, with the normal matrix.
-[shader("compute")]
-[numthreads(256, 1, 1)]
-void instanceRecords(uint3 tid: SV_DispatchThreadID) {
-    const uint i = tid.x;
-    if (i >= params.count) {
-        return;
-    }
-    const SetRecord set = sets[setOf(i)];
-    const float4x4 chain = full(float3x4(setRows[i * 3], setRows[i * 3 + 1], setRows[i * 3 + 2]));
+/// An instance's record: its chain times its set's prototype, to view, with
+/// the normal matrix.
+InstanceRecord setInstanceRecord(SetRecord set, float4x4 chain, uint instanceId, uint mask) {
     const float4x4 world = mul(chain, full(float3x4(set.prototype0, set.prototype1, set.prototype2)));
     const float4x4 view = mul(full(paramRows(true)), world);
     // The normal matrix: the inverse transpose of view's 3x3, by cofactors.
@@ -222,11 +220,56 @@ void instanceRecords(uint3 tid: SV_DispatchThreadID) {
     record.colour = set.colour;
     record.mesh = set.mesh;
     record.primId = set.primId;
-    record.instanceId = i - set.first;
+    record.instanceId = instanceId;
     record.flags = set.flags;
     record.categoriesLo = set.categoriesLo;
     record.categoriesHi = set.categoriesHi;
-    record.mask = 0xFF;   // still: in every shutter slice
+    record.mask = mask;
     record.pointsOffset = 0;
-    records[params.first + i] = record;
+    return record;
+}
+
+/// Every instanced set's records in one dispatch.
+[shader("compute")]
+[numthreads(256, 1, 1)]
+void instanceRecords(uint3 tid: SV_DispatchThreadID) {
+    const uint i = tid.x;
+    if (i >= params.count) {
+        return;
+    }
+    const SetRecord set = sets[setOf(i)];
+    const float4x4 chain = full(float3x4(setRows[i * 3], setRows[i * 3 + 1], setRows[i * 3 + 2]));
+    records[params.first + i] = setInstanceRecord(set, chain, i - set.first, 0xFF);   // still: in every slice
+}
+
+/// Where bucket b's centre falls between two samples at time0 and time1, the
+/// shutter running from open to close: motion.slang's, for the sets.
+float setBucketFactor(uint b, uint buckets, float open, float close, float time0, float time1) {
+    const float at = open + (float(b) + 0.5) / float(buckets) * (close - open);
+    const float span = time1 - time0;
+    return abs(span) > 1.0e-12 ? (at - time0) / span : 0.0;
+}
+
+/// The moving sets' records under motion blur: for each shutter slice a copy
+/// of every instance of a set whose instancer moves, its chain between the
+/// two samples at the slice's centre -- as motionRecords does for single
+/// instances -- answering to that slice's mask bit. `count` is the moving
+/// instances times the buckets; `sets` and `setRows`/`setRowsEnd` hold the
+/// moving sets alone.
+[shader("compute")]
+[numthreads(256, 1, 1)]
+void instanceRecordsMotion(uint3 tid: SV_DispatchThreadID) {
+    const uint k = tid.x;
+    if (k >= params.count || params.buckets == 0) {
+        return;
+    }
+    const uint moving = params.count / params.buckets;
+    const uint b = k / moving;
+    const uint i = k - b * moving;
+    const SetRecord set = sets[setOf(i)];
+    const float t = setBucketFactor(b, params.buckets, params.open, params.close, set.time0, set.time1);
+    const float4x4 chain = full(float3x4(lerp(setRows[i * 3], setRowsEnd[i * 3], t),
+                                         lerp(setRows[i * 3 + 1], setRowsEnd[i * 3 + 1], t),
+                                         lerp(setRows[i * 3 + 2], setRowsEnd[i * 3 + 2], t)));
+    records[params.first + k] = setInstanceRecord(set, chain, i - set.first, 1u << b);
 }

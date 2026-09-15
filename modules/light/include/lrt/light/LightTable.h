@@ -66,6 +66,15 @@ struct Light {
     /// record once per instance and a kernel places each copy.
     const gpu::Buffer* instanceRows = nullptr;
     uint32_t     instanceCount = 0;
+    /// Under a shutter, when the light moves: its transform at the samples
+    /// bracketing it, and when those are (in the shutter's units). The
+    /// record keeps `lightToWorld`, the frame's; the path tracer's samples
+    /// place the light between these. Not for an instanced light.
+    bool         moves = false;
+    render::Mat4 lightToWorldStart = render::Mat4::identity();
+    render::Mat4 lightToWorldEnd = render::Mat4::identity();
+    float        timeStart = 0.0F;
+    float        timeEnd = 1.0F;
     float        temperature = 6500.0F;
     bool         enableTemperature = false;
     bool         normalize = false;
@@ -192,6 +201,8 @@ private:
     std::optional<gpu::ComputeKernel> hierarchy_, refit_, countNonzero_, boundsChunks_, boundsReduce_;
     std::optional<gpu::RadixSort>     sort_;
     uint32_t     nodeBase_ = 0;
+    uint32_t     motionBase_ = 0;     ///< in iesValues: 26 floats a record (rows at both samples, their times); 0: none moves
+    bool         anyMoves_ = false;
     uint32_t     treeNodes_ = 0;
     uint32_t     unbounded_ = 0;
     [[nodiscard]] Result<void> buildBvh(const std::vector<uint32_t>& bounded, const std::vector<uint32_t>& unbounded);

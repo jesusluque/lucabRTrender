@@ -14,6 +14,7 @@
 #include <pxr/imaging/hdsi/velocityMotionResolvingSceneIndex.h>
 
 #include "RenderDelegate.h"
+#include "Camera.h"
 
 #include "Light.h"
 #include "Material.h"
@@ -444,7 +445,7 @@ HdSprim* HdLrtRenderDelegate::CreateSprim(TfToken const& typeId, SdfPath const& 
         // it carries the name and the transform; a mesh reads its bindings.
         return new HdCoordSys(id);
     }
-    return typeId == HdPrimTypeTokens->camera ? new HdCamera(id) : nullptr;
+    return typeId == HdPrimTypeTokens->camera ? new HdLrtCamera(id) : nullptr;
 }
 
 HdSprim* HdLrtRenderDelegate::CreateFallbackSprim(TfToken const& typeId) {
@@ -460,7 +461,7 @@ HdSprim* HdLrtRenderDelegate::CreateFallbackSprim(TfToken const& typeId) {
     if (typeId == HdPrimTypeTokens->coordSys) {
         return new HdCoordSys(SdfPath::EmptyPath());
     }
-    return typeId == HdPrimTypeTokens->camera ? new HdCamera(SdfPath::EmptyPath()) : nullptr;
+    return typeId == HdPrimTypeTokens->camera ? new HdLrtCamera(SdfPath::EmptyPath()) : nullptr;
 }
 
 void HdLrtRenderDelegate::DestroySprim(HdSprim* sprim) { delete sprim; }

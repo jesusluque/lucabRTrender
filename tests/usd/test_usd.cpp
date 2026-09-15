@@ -3139,6 +3139,284 @@ TEST_CASE("a camera's shutter blurs a moving mesh through Hydra, rigid and defor
     }
 }
 
+// A PointInstancer whose positions move under the shutter blurs its
+// instances as the same squares authored one by one, each sliding by its
+// own transform: the set's chain is composed at the two samples and its
+// records copied per shutter slice between them, as a single instance's
+// are. And the blur is there: against the shutter closed, the frames differ.
+TEST_CASE("a moving PointInstancer's instances blur as the same prims authored one by one",
+          "[usd][gpu][mesh][path][motion][instancing]") {
+    LRT_REQUIRE_GPU(gpu);
+    const gpu::Caps& caps = gpu->device->caps();
+    if (!caps.rasterization || !caps.rayQuery || !caps.accelerationStructure) {
+        SKIP("needs rasterisation and ray queries");
+    }
+    const char* square = "    int[] faceVertexCounts = [4]\n"
+                         "    int[] faceVertexIndices = [0, 1, 2, 3]\n"
+                         "    point3f[] points = [(-0.4, -0.4, 0), (0.4, -0.4, 0), (0.4, 0.4, 0), (-0.4, 0.4, 0)]\n"
+                         "    uniform token subdivisionScheme = \"none\"\n"
+                         "    color3f[] primvars:displayColor = [(0.8, 0.8, 0.8)] ( interpolation = \"constant\" )\n";
+    const auto stage = [&](const char* name, bool instanced, bool shutter) {
+        const fs::path path = scratch(name);
+        std::ofstream out(path);
+        out << "#usda 1.0\n(\n    upAxis = \"Y\"\n    startTimeCode = 0\n    endTimeCode = 1\n)\n";
+        if (instanced) {
+            out << "def PointInstancer \"Squares\"\n{\n"
+                   "    int[] protoIndices = [0, 0]\n"
+                   "    point3f[] positions.timeSamples = {\n"
+                   "        0: [(-1.5, -0.5, -5), (0.5, 0.6, -6)],\n"
+                   "        1: [(-0.5, -0.5, -5), (1.5, 0.9, -6)],\n    }\n"
+                   "    rel prototypes = </Squares/Proto>\n"
+                   "    def Mesh \"Proto\"\n    {\n" << square << "    }\n}\n";
+        } else {
+            const char* from[] = {"(-1.5, -0.5, -5)", "(0.5, 0.6, -6)"};
+            const char* to[] = {"(-0.5, -0.5, -5)", "(1.5, 0.9, -6)"};
+            for (int k = 0; k < 2; ++k) {
+                out << "def Mesh \"Square" << k << "\"\n{\n" << square
+                    << "    double3 xformOp:translate.timeSamples = {\n        0: " << from[k] << ",\n        1: " << to[k]
+                    << ",\n    }\n"
+                       "    uniform token[] xformOpOrder = [\"xformOp:translate\"]\n}\n";
+            }
+        }
+        out << "def Camera \"Camera\"\n{\n"
+               "    float focalLength = 35\n"
+               "    float horizontalAperture = 24.576\n    float verticalAperture = 18.432\n"
+               "    float2 clippingRange = (0.1, 1000)\n";
+        if (shutter) {
+            out << "    double shutter:open = -0.25\n    double shutter:close = 0.25\n";
+        }
+        out << "}\n"
+               "def DistantLight \"Sun\"\n{\n    float inputs:intensity = 3\n    bool inputs:shadow:enable = 0\n}\n";
+        return path;
+    };
+    const uint32_t w = 160, h = 120;
+    const auto frame = [&](const fs::path& path) {
+        auto renderer = usd::StageRenderer::open(path);
+        if (!renderer) FAIL(renderer.error().toString());
+        (*renderer)->setPathSamples(64);
+        (*renderer)->setPathTotal(64);
+        (*renderer)->setPathBounces(0);
+        (*renderer)->setMotionBuckets(8);
+        auto image = (*renderer)->render("/Camera", 0.5, w, h, "rt");
+        if (!image) FAIL(image.error().toString());
+        gpu::BufferDesc desc;
+        desc.bytes = image->rgba.size() * sizeof(float);
+        desc.elementBytes = 16;
+        auto made = gpu::Buffer::create(*gpu->device, desc, image->rgba.data());
+        REQUIRE(made);
+        return std::move(*made);
+    };
+    const gpu::Buffer instancedBlur = frame(stage("instancer_blur.usda", true, true));
+    const gpu::Buffer singlesBlur = frame(stage("instancer_blur_singles.usda", false, true));
+    const gpu::Buffer instancedSharp = frame(stage("instancer_sharp.usda", true, false));
+    auto same = render::compareHdr(*gpu->library, instancedBlur, singlesBlur, w, h);
+    auto blurred = render::compareHdr(*gpu->library, instancedBlur, instancedSharp, w, h);
+    REQUIRE(same);
+    REQUIRE(blurred);
+    std::vector<float> blank(size_t{w} * h * 4, 0.0F);
+    auto empty = gpu::Buffer::fromSpan<float>(*gpu->device, blank, "blank");
+    REQUIRE(empty);
+    auto drawn = render::compareHdr(*gpu->library, instancedBlur, *empty, w, h);
+    REQUIRE(drawn);
+    std::printf("  a moving instancer against the same squares one by one: relMSE %.2e (max relative %.2e); against "
+                "the shutter closed %.2e; against blank %.2e\n",
+                same->relMse, same->maxRelative, blurred->relMse, drawn->relMse);
+    CHECK(drawn->relMse > 1.0);
+    CHECK(blurred->relMse > 1e-2);
+    CHECK(same->maxRelative < 1e-3);
+}
+
+// A camera that moves under the shutter: everything it sees blurs as if the
+// scene moved the other way. Two squares under a sun that lights by
+// direction alone (no shadows), so where a square is does not change its
+// shade -- the camera sliding +x over still squares must draw what a still
+// camera draws of the squares sliding -x, slice by slice. And the blur is
+// there: against the same camera with the shutter closed, the frames differ.
+TEST_CASE("a camera moving under the shutter blurs the frame as the scene moving the other way does",
+          "[usd][gpu][mesh][path][motion][camera]") {
+    LRT_REQUIRE_GPU(gpu);
+    const gpu::Caps& caps = gpu->device->caps();
+    if (!caps.rasterization || !caps.rayQuery || !caps.accelerationStructure) {
+        SKIP("needs rasterisation and ray queries");
+    }
+    const char* square = "    int[] faceVertexCounts = [4]\n"
+                         "    int[] faceVertexIndices = [0, 1, 2, 3]\n"
+                         "    point3f[] points = [(-0.4, -0.4, 0), (0.4, -0.4, 0), (0.4, 0.4, 0), (-0.4, 0.4, 0)]\n"
+                         "    uniform token subdivisionScheme = \"none\"\n"
+                         "    color3f[] primvars:displayColor = [(0.8, 0.8, 0.8)] ( interpolation = \"constant\" )\n";
+    // cameraMoves: the camera slides from x 0 to 1 over frames 0..1 and the
+    // squares stand; otherwise the camera stands and the squares slide 0..-1.
+    const auto stage = [&](const char* name, bool cameraMoves, bool shutter) {
+        const fs::path path = scratch(name);
+        std::ofstream out(path);
+        out << "#usda 1.0\n(\n    upAxis = \"Y\"\n    startTimeCode = 0\n    endTimeCode = 1\n)\n";
+        const char* at[] = {"(-0.8, -0.3, -5)", "(0.9, 0.5, -6)"};
+        const char* moved[] = {"(-1.8, -0.3, -5)", "(-0.1, 0.5, -6)"};
+        for (int k = 0; k < 2; ++k) {
+            out << "def Mesh \"Square" << k << "\"\n{\n" << square;
+            if (cameraMoves) {
+                out << "    double3 xformOp:translate = " << at[k] << "\n";
+            } else {
+                out << "    double3 xformOp:translate.timeSamples = {\n        0: " << at[k] << ",\n        1: " << moved[k]
+                    << ",\n    }\n";
+            }
+            out << "    uniform token[] xformOpOrder = [\"xformOp:translate\"]\n}\n";
+        }
+        out << "def Camera \"Camera\"\n{\n"
+               "    float focalLength = 35\n"
+               "    float horizontalAperture = 24.576\n    float verticalAperture = 18.432\n"
+               "    float2 clippingRange = (0.1, 1000)\n";
+        if (cameraMoves) {
+            out << "    double3 xformOp:translate.timeSamples = {\n        0: (0, 0, 0),\n        1: (1, 0, 0),\n    }\n"
+                   "    uniform token[] xformOpOrder = [\"xformOp:translate\"]\n";
+        }
+        if (shutter) {
+            out << "    double shutter:open = -0.25\n    double shutter:close = 0.25\n";
+        }
+        out << "}\n"
+               "def DistantLight \"Sun\"\n{\n    float inputs:intensity = 3\n    bool inputs:shadow:enable = 0\n}\n";
+        return path;
+    };
+    const uint32_t w = 160, h = 120;
+    // Drawn at frame 0.5 with the camera's frame position subtracted: the
+    // still-camera stage at 0.5 has the squares half way along, and the
+    // moving camera's frame view is half way along too.
+    const auto frame = [&](const fs::path& path) {
+        auto renderer = usd::StageRenderer::open(path);
+        if (!renderer) FAIL(renderer.error().toString());
+        (*renderer)->setPathSamples(64);
+        (*renderer)->setPathTotal(64);
+        (*renderer)->setPathBounces(0);
+        (*renderer)->setMotionBuckets(8);
+        auto image = (*renderer)->render("/Camera", 0.5, w, h, "rt");
+        if (!image) FAIL(image.error().toString());
+        gpu::BufferDesc desc;
+        desc.bytes = image->rgba.size() * sizeof(float);
+        desc.elementBytes = 16;
+        auto made = gpu::Buffer::create(*gpu->device, desc, image->rgba.data());
+        REQUIRE(made);
+        return std::move(*made);
+    };
+    const gpu::Buffer cameraBlur = frame(stage("camera_blur.usda", true, true));
+    const gpu::Buffer sceneBlur = frame(stage("camera_blur_scene.usda", false, true));
+    const gpu::Buffer cameraSharp = frame(stage("camera_sharp.usda", true, false));
+    auto same = render::compareHdr(*gpu->library, cameraBlur, sceneBlur, w, h);
+    auto blurred = render::compareHdr(*gpu->library, cameraBlur, cameraSharp, w, h);
+    REQUIRE(same);
+    REQUIRE(blurred);
+    std::vector<float> blank(size_t{w} * h * 4, 0.0F);
+    auto empty = gpu::Buffer::fromSpan<float>(*gpu->device, blank, "blank");
+    REQUIRE(empty);
+    auto drawn = render::compareHdr(*gpu->library, cameraBlur, *empty, w, h);
+    REQUIRE(drawn);
+    std::printf("  a moving camera against the scene moving the other way: relMSE %.2e (max relative %.2e); "
+                "against the shutter closed %.2e; against blank %.2e\n",
+                same->relMse, same->maxRelative, blurred->relMse, drawn->relMse);
+    CHECK(drawn->relMse > 1.0);
+    CHECK(blurred->relMse > 1e-2);
+    CHECK(same->maxRelative < 1e-3);
+}
+
+// A light that moves under the shutter: its light and its shadows move with
+// it, slice by slice. The same instants arranged the other way round -- the
+// light still and everything else (the camera, a floor, an occluder)
+// sliding the opposite way -- are the same relative scene at every time, so
+// the two frames must agree; and against the light standing still, they
+// must not.
+TEST_CASE("a light moving under the shutter lights and shadows as the scene moving the other way does",
+          "[usd][gpu][mesh][path][motion][lights]") {
+    LRT_REQUIRE_GPU(gpu);
+    const gpu::Caps& caps = gpu->device->caps();
+    if (!caps.rasterization || !caps.rayQuery || !caps.accelerationStructure) {
+        SKIP("needs rasterisation and ray queries");
+    }
+    // LightMoves: the light slides x 0 -> 2 and all else stands at x 0.
+    // SceneMoves: the light stands at x 1 and the camera, floor and occluder
+    // slide x 1 -> -1, so that everything less the light is -2t either way.
+    // Still: the light at its frame position, x 1, nothing moving.
+    enum class Arrangement { LightMoves, SceneMoves, Still };
+    const auto stage = [&](const char* name, Arrangement arrangement) {
+        const fs::path path = scratch(name);
+        std::ofstream out(path);
+        const bool sceneMoves = arrangement == Arrangement::SceneMoves;
+        const auto slide = [&](const char* at, const char* to) {
+            std::string text;
+            if (sceneMoves) {
+                text = std::string("    double3 xformOp:translate.timeSamples = {\n        0: ") + at + ",\n        1: " + to +
+                       ",\n    }\n";
+            } else {
+                text = "    double3 xformOp:translate = (0, 0, 0)\n";
+            }
+            return text + "    uniform token[] xformOpOrder = [\"xformOp:translate\"]\n";
+        };
+        out << "#usda 1.0\n(\n    upAxis = \"Y\"\n    startTimeCode = 0\n    endTimeCode = 1\n)\n"
+               "def Mesh \"Floor\"\n{\n"
+               "    int[] faceVertexCounts = [4]\n    int[] faceVertexIndices = [0, 1, 2, 3]\n"
+               "    point3f[] points = [(-8, -1, 0), (8, -1, 0), (8, -1, -12), (-8, -1, -12)]\n"
+               "    uniform token subdivisionScheme = \"none\"\n"
+               "    color3f[] primvars:displayColor = [(0.8, 0.8, 0.8)] ( interpolation = \"constant\" )\n"
+            << slide("(1, 0, 0)", "(-1, 0, 0)") << "}\n"
+            << "def Mesh \"Occluder\"\n{\n"
+               "    int[] faceVertexCounts = [4]\n    int[] faceVertexIndices = [0, 1, 2, 3]\n"
+               "    point3f[] points = [(-0.5, 0.2, -4.5), (0.5, 0.2, -4.5), (0.5, 0.2, -5.5), (-0.5, 0.2, -5.5)]\n"
+               "    uniform token subdivisionScheme = \"none\"\n"
+               "    color3f[] primvars:displayColor = [(0.8, 0.8, 0.8)] ( interpolation = \"constant\" )\n"
+            << slide("(1, 0, 0)", "(-1, 0, 0)") << "}\n"
+            << "def SphereLight \"Bulb\"\n{\n    float inputs:intensity = 30\n    float inputs:radius = 0.2\n";
+        if (arrangement == Arrangement::LightMoves) {
+            out << "    double3 xformOp:translate.timeSamples = {\n        0: (0, 2, -5),\n        1: (2, 2, -5),\n    }\n";
+        } else {
+            out << "    double3 xformOp:translate = (1, 2, -5)\n";
+        }
+        out << "    uniform token[] xformOpOrder = [\"xformOp:translate\"]\n}\n"
+               "def Camera \"Camera\"\n{\n"
+               "    float focalLength = 24\n"
+               "    float horizontalAperture = 24.576\n    float verticalAperture = 18.432\n"
+               "    float2 clippingRange = (0.1, 1000)\n"
+               "    double shutter:open = -0.25\n    double shutter:close = 0.25\n";
+        if (sceneMoves) {
+            out << "    double3 xformOp:translate.timeSamples = {\n        0: (1, 1, 1),\n        1: (-1, 1, 1),\n    }\n";
+        } else {
+            out << "    double3 xformOp:translate = (0, 1, 1)\n";
+        }
+        out << "    uniform token[] xformOpOrder = [\"xformOp:translate\"]\n}\n";
+        return path;
+    };
+    const uint32_t w = 128, h = 96;
+    const auto frame = [&](const fs::path& path) {
+        auto renderer = usd::StageRenderer::open(path);
+        if (!renderer) FAIL(renderer.error().toString());
+        (*renderer)->setPathSamples(64);
+        (*renderer)->setPathTotal(128);
+        (*renderer)->setPathBounces(0);
+        (*renderer)->setMotionBuckets(8);
+        auto image = (*renderer)->render("/Camera", 0.5, w, h, "rt");
+        if (!image) FAIL(image.error().toString());
+        gpu::BufferDesc desc;
+        desc.bytes = image->rgba.size() * sizeof(float);
+        desc.elementBytes = 16;
+        auto made = gpu::Buffer::create(*gpu->device, desc, image->rgba.data());
+        REQUIRE(made);
+        return std::move(*made);
+    };
+    const gpu::Buffer lightMoves = frame(stage("light_moves.usda", Arrangement::LightMoves));
+    const gpu::Buffer sceneMoves = frame(stage("light_moves_scene.usda", Arrangement::SceneMoves));
+    const gpu::Buffer still = frame(stage("light_still.usda", Arrangement::Still));
+    auto same = render::compareHdr(*gpu->library, lightMoves, sceneMoves, w, h);
+    auto moved = render::compareHdr(*gpu->library, lightMoves, still, w, h);
+    REQUIRE(same);
+    REQUIRE(moved);
+    std::printf("  a moving light against the scene moving the other way: relMSE %.2e (p99 relative %.2e); against the "
+                "light still %.2e\n",
+                same->relMse, same->p99Relative, moved->relMse);
+    // The blur is a soft shadow sweeping part of the floor: small over the
+    // frame (2.8e-4), and real -- with the light's samples withheld from the
+    // kernel, the moving light drew the still frame to 3.7e-13 and parted
+    // from the other arrangement by 3.1e-4.
+    CHECK(moved->relMse > 1e-5);
+    CHECK(same->relMse < moved->relMse / 1000.0);
+}
+
 // Velocities: a mesh that authors one sample of points and `velocities`
 // must blur as one that authors the two samples those velocities reach --
 // UsdGeom's velocity interpolation, resolved by hdsi's scene index ahead

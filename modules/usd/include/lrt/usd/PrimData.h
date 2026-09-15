@@ -138,12 +138,28 @@ struct CurveArrays {
 };
 
 /// An instancer's primvars as Hydra holds them.
+/// An instancer's per-instance arrays and its own transform at one time.
+struct InstancerSample {
+    pxr::VtValue translations;   ///< VtVec3fArray / VtVec3dArray / VtVec3hArray
+    pxr::VtValue rotations;      ///< VtQuathArray / VtQuatfArray / VtQuatdArray (ix, iy, iz, real)
+    pxr::VtValue scales;         ///< VtVec3fArray / VtVec3dArray / VtVec3hArray
+    pxr::VtValue transforms;     ///< VtMatrix4dArray / VtMatrix4fArray, row-major
+    render::Mat4 instancerTransform = render::Mat4::identity();
+};
+
 struct InstancerArrays {
     pxr::VtValue translations;   ///< VtVec3fArray / VtVec3dArray / VtVec3hArray
     pxr::VtValue rotations;      ///< VtQuathArray / VtQuatfArray / VtQuatdArray (ix, iy, iz, real)
     pxr::VtValue scales;         ///< VtVec3fArray / VtVec3dArray / VtVec3hArray
     pxr::VtValue transforms;     ///< VtMatrix4dArray / VtMatrix4fArray, row-major
     render::Mat4 instancerTransform = render::Mat4::identity();
+    /// Under a shutter, when anything of the instancer moves: the samples
+    /// that bracket it, at their own times (as Hydra hands them). An array a
+    /// sample lacks, or that did not move, is the frame's.
+    std::optional<InstancerSample> start;
+    std::optional<InstancerSample> end;
+    double                         timeStart = 0.0;
+    double                         timeEnd = 0.0;
 };
 
 /// One level of a prototype's instancing: the instancer, and which of its

@@ -36,7 +36,13 @@ struct PathParams {
     float distortionK2;
     uint buckets;      // motion blur: shutter slices; a sample's rays answer to one slice's mask bit
     uint mis;          // 1: the lights' and the material's strategies are weighed (power heuristic)
-    uint pad4;
+    uint cameraMoves;  // 1: the camera moves under the shutter: its view to world between two samples
+    float4 cameraStart0; float4 cameraStart1; float4 cameraStart2;   // view to world at the earlier sample
+    float4 cameraEnd0; float4 cameraEnd1; float4 cameraEnd2;         // and at the later
+    float cameraTime0; // when the two samples are, and the shutter, in the same units
+    float cameraTime1;
+    float shutterOpen;
+    float shutterClose;
 };
 
 Texture2D<uint4>               visibility;   // (instance + 1, triangle); row 0 on top
@@ -50,6 +56,7 @@ static const float3 kPathLuminance = float3(0.2126, 0.7152, 0.0722);
 ConstantBuffer<CameraParams>   camera;
 StructuredBuffer<LightRecord>  lights;
 uniform uint                   lightCount;
+uniform uint                   lightMotionBase;   // in iesValues: moving lights' samples, 26 floats a record; 0: none moves
 uniform uint                   lightNodeBase;
 uniform uint                   lightTreeNodes;
 uniform uint                   lightUnboundedCount;
@@ -441,6 +448,31 @@ uint sampleMask(uint2 pixel, uint sample) {
     return 1u << min(uint(t * float(path.buckets)), path.buckets - 1);
 }
 
+/// View to world for a sample's rays: the frame's, or -- when the camera
+/// moves under the shutter -- the camera's between its two samples, at the
+/// centre of the shutter slice the sample's rays answer to (sampleMask draws
+/// the same number), which is when the moving geometry it meets is drawn.
+ViewToWorld cameraFor(uint2 pixel, uint sample) {
+    if (path.cameraMoves == 0) {
+        ViewToWorld frame;
+        frame.row0 = toWorld.row0;
+        frame.row1 = toWorld.row1;
+        frame.row2 = toWorld.row2;
+        return frame;
+    }
+    const float u = random(pixel, sample, 0u, 17u);
+    const uint buckets = max(path.buckets, 1u);
+    const uint b = min(uint(u * float(buckets)), buckets - 1);
+    const float at = path.shutterOpen + (float(b) + 0.5) / float(buckets) * (path.shutterClose - path.shutterOpen);
+    const float span = path.cameraTime1 - path.cameraTime0;
+    const float t = abs(span) > 1.0e-12 ? (at - path.cameraTime0) / span : 0.0;
+    ViewToWorld m;
+    m.row0 = lerp(path.cameraStart0, path.cameraEnd0, t);
+    m.row1 = lerp(path.cameraStart1, path.cameraEnd1, t);
+    m.row2 = lerp(path.cameraStart2, path.cameraEnd2, t);
+    return m;
+}
+
 Found foundLensSample(uint2 pixel, uint sample, uint mask) {
     float3 origin;
     float3 direction;
@@ -461,12 +493,13 @@ Found foundLensSample(uint2 pixel, uint sample, uint mask) {
         }
     }
     direction = normalize(direction);
-    const float3 originWorld = float3(dot(toWorld.row0.xyz, origin) + toWorld.row0.w,
-                                      dot(toWorld.row1.xyz, origin) + toWorld.row1.w,
-                                      dot(toWorld.row2.xyz, origin) + toWorld.row2.w);
-    const float3 directionWorld = normalize(float3(dot(toWorld.row0.xyz, direction),
-                                                   dot(toWorld.row1.xyz, direction),
-                                                   dot(toWorld.row2.xyz, direction)));
+    const ViewToWorld eye = cameraFor(pixel, sample);
+    const float3 originWorld = float3(dot(eye.row0.xyz, origin) + eye.row0.w,
+                                      dot(eye.row1.xyz, origin) + eye.row1.w,
+                                      dot(eye.row2.xyz, origin) + eye.row2.w);
+    const float3 directionWorld = normalize(float3(dot(eye.row0.xyz, direction),
+                                                   dot(eye.row1.xyz, direction),
+                                                   dot(eye.row2.xyz, direction)));
     const PathHit hit = traceNearestFrom(originWorld, directionWorld, camera.nearZ, mask);
     return foundHit(hit, originWorld, directionWorld);
 }
@@ -501,10 +534,43 @@ void primaryRay(uint2 pixel, uint sample, out float3 originWorld, out float3 dir
         }
     }
     direction = normalize(direction);
-    originWorld = float3(dot(toWorld.row0.xyz, origin) + toWorld.row0.w, dot(toWorld.row1.xyz, origin) + toWorld.row1.w,
-                         dot(toWorld.row2.xyz, origin) + toWorld.row2.w);
-    directionWorld = normalize(float3(dot(toWorld.row0.xyz, direction), dot(toWorld.row1.xyz, direction),
-                                      dot(toWorld.row2.xyz, direction)));
+    const ViewToWorld eye = cameraFor(pixel, sample);   // the frame's unless the camera moves
+    originWorld = float3(dot(eye.row0.xyz, origin) + eye.row0.w, dot(eye.row1.xyz, origin) + eye.row1.w,
+                         dot(eye.row2.xyz, origin) + eye.row2.w);
+    directionWorld = normalize(float3(dot(eye.row0.xyz, direction), dot(eye.row1.xyz, direction),
+                                      dot(eye.row2.xyz, direction)));
+}
+
+/// Light k's record for a sample: as the table holds it, or -- when the
+/// light moves under the shutter -- placed between its two samples at the
+/// centre of the shutter slice the sample's rays answer to, as the camera
+/// and the moving geometry are.
+LightRecord lightFor(uint k, uint2 pixel, uint sample) {
+    LightRecord l = lights[k];
+    if (lightMotionBase == 0) {
+        return l;
+    }
+    const uint at = lightMotionBase + k * 26;
+    const float t0 = iesValues[at + 24];
+    const float t1 = iesValues[at + 25];
+    if (!(t1 > t0)) {
+        return l;
+    }
+    const float u = random(pixel, sample, 0u, 17u);
+    const uint buckets = max(path.buckets, 1u);
+    const uint b = min(uint(u * float(buckets)), buckets - 1);
+    const float centre = path.shutterOpen + (float(b) + 0.5) / float(buckets) * (path.shutterClose - path.shutterOpen);
+    const float f = (centre - t0) / (t1 - t0);
+    const float4 s0 = float4(iesValues[at], iesValues[at + 1], iesValues[at + 2], iesValues[at + 3]);
+    const float4 s1 = float4(iesValues[at + 4], iesValues[at + 5], iesValues[at + 6], iesValues[at + 7]);
+    const float4 s2 = float4(iesValues[at + 8], iesValues[at + 9], iesValues[at + 10], iesValues[at + 11]);
+    const float4 e0 = float4(iesValues[at + 12], iesValues[at + 13], iesValues[at + 14], iesValues[at + 15]);
+    const float4 e1 = float4(iesValues[at + 16], iesValues[at + 17], iesValues[at + 18], iesValues[at + 19]);
+    const float4 e2 = float4(iesValues[at + 20], iesValues[at + 21], iesValues[at + 22], iesValues[at + 23]);
+    l.row0 = lerp(s0, e0, f);
+    l.row1 = lerp(s1, e1, f);
+    l.row2 = lerp(s2, e2, f);
+    return l;
 }
 
 /// Light k's probability of being chosen at p, n, as gatherLight chooses.
@@ -555,7 +621,7 @@ float3 gatherLight(Shaded sh, uint2 pixel, uint sample, uint bounce, uint mask, 
     if (!choice.valid) {
         return float3(0.0);
     }
-    const LightRecord light = lights[choice.index];
+    const LightRecord light = lightFor(choice.index, pixel, sample);
     group = light.group;
     if (!lightLinked(light.lightCategory, sh.categoriesLo, sh.categoriesHi)) {
         return float3(0.0);
@@ -613,7 +679,7 @@ float3 gatherLightMedium(float3 p, float3 wo, float g, uint2 pixel, uint sample,
     if (!choice.valid) {
         return float3(0.0);
     }
-    const LightRecord light = lights[choice.index];
+    const LightRecord light = lightFor(choice.index, pixel, sample);
     group = light.group;
     LightSample ls;
     if (light.kind == kLightDome && !domeHasImage(light)) {
@@ -809,7 +875,7 @@ void tracePaths(uint3 group: SV_GroupID, uint index: SV_GroupIndex) {
                 const bool escaped = hit.seen.x == 0;
                 const float reached = hit.t + dot(o - p, d);
                 for (uint k = 0; k < lightCount; ++k) {
-                    const LightRecord light = lights[k];
+                    const LightRecord light = lightFor(k, tid, sample);
                     if (!misWeighs(light) || !lightLinked(light.lightCategory, cur.categoriesLo, cur.categoriesHi)) {
                         continue;
                     }
@@ -1092,13 +1158,29 @@ Result<void> PathTracer::trace(gpu::CommandBatch& batch, const VisibilityTargets
         cursor["path"]["adaptive"].setData(uint32_t{settings.adaptive ? 1u : 0u});
         cursor["path"]["headlight"].setData(uint32_t{settings.headlight ? 1u : 0u});
         cursor["path"]["mis"].setData(uint32_t{settings.mis ? 1u : 0u});
+        // A moving camera: its view to world at the two samples, for the rays.
+        cursor["path"]["cameraMoves"].setData(uint32_t{projection.cameraMoves ? 1u : 0u});
+        {
+            const std::array<float, 12> start = projection.viewToWorldStart.rows3x4();
+            const std::array<float, 12> end = projection.viewToWorldEnd.rows3x4();
+            static constexpr const char* kStart[3] = {"cameraStart0", "cameraStart1", "cameraStart2"};
+            static constexpr const char* kEnd[3] = {"cameraEnd0", "cameraEnd1", "cameraEnd2"};
+            for (size_t r = 0; r < 3; ++r) {
+                cursor["path"][kStart[r]].setData(start.data() + r * 4, sizeof(float) * 4);
+                cursor["path"][kEnd[r]].setData(end.data() + r * 4, sizeof(float) * 4);
+            }
+            cursor["path"]["cameraTime0"].setData(static_cast<float>(projection.cameraTimeStart));
+            cursor["path"]["cameraTime1"].setData(static_cast<float>(projection.cameraTimeEnd));
+            cursor["path"]["shutterOpen"].setData(static_cast<float>(frame.scene != nullptr ? frame.scene->shutterOpen() : 0.0));
+            cursor["path"]["shutterClose"].setData(static_cast<float>(frame.scene != nullptr ? frame.scene->shutterClose() : 1.0));
+        }
         cursor["path"]["errorTarget"].setData(settings.errorTarget);
         cursor["path"]["minSamples"].setData(settings.minSamples);
         const uint32_t buckets = frame.scene != nullptr ? frame.scene->buckets() : 1u;
         const bool ownRays = (!projection.orthographic &&
                               (projection.lensRadius > 0.0 || projection.distortionK1 != 0.0 ||
                                projection.distortionK2 != 0.0)) ||
-                             buckets > 1;
+                             buckets > 1 || projection.cameraMoves;
         cursor["path"]["ownRays"].setData(uint32_t{ownRays ? 1u : 0u});
         cursor["path"]["buckets"].setData(buckets);
         cursor["path"]["lensRadius"].setData(static_cast<float>(projection.lensRadius));

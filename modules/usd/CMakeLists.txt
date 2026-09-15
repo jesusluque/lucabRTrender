@@ -1,5 +1,6 @@
 set(LRT_USD_SOURCES
     src/HydraCamera.cpp
+    src/Camera.cpp
     src/PrimData.cpp
     src/Engine.cpp
     src/RenderBuffer.cpp

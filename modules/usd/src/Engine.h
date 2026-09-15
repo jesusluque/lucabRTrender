@@ -93,6 +93,12 @@ struct MeshEntry {
     std::optional<CurveArrays>             pendingCurves;   ///< a BasisCurves prim: built as a tube mesh
     std::vector<InstancerLink>             instancing;      ///< innermost first; empty: not instanced
     world::InstanceChain                   chain;           ///< composed from `instancing`
+    /// Under a shutter, when an instancer in the chain moves: the chain at the
+    /// samples bracketing it, and when those are (the first moving level's).
+    world::InstanceChain                   chainStart;
+    world::InstanceChain                   chainEnd;
+    double                                 chainTimeStart = 0.0;
+    double                                 chainTimeEnd = 0.0;
     std::vector<uint64_t>                  chainVersions;   ///< the instancer versions `chain` was made from
     bool                                   chainDirty = false;
     std::shared_ptr<const geom::GpuMesh>   gpu;
@@ -414,6 +420,9 @@ private:
         uint32_t     bounces = 0;
         bool         adaptive = false;
         bool         mis = true;
+        bool         cameraMoves = false;
+        render::Mat4 cameraStart = render::Mat4::identity();
+        render::Mat4 cameraEnd = render::Mat4::identity();
         float        error = 0.0F;
         uint64_t     revision = 0;
         uint64_t     tags = 0;         ///< a hash of the render tags drawn: purposes that change start the mean again
@@ -423,10 +432,14 @@ private:
         [[nodiscard]] bool operator==(const PathState& o) const {
             for (int r = 0; r < 4; ++r) {
                 for (int c = 0; c < 4; ++c) {
-                    if (worldToView.at(r, c) != o.worldToView.at(r, c)) {
+                    if (worldToView.at(r, c) != o.worldToView.at(r, c) || cameraStart.at(r, c) != o.cameraStart.at(r, c) ||
+                        cameraEnd.at(r, c) != o.cameraEnd.at(r, c)) {
                         return false;
                     }
                 }
+            }
+            if (cameraMoves != o.cameraMoves) {
+                return false;
             }
             return focalX == o.focalX && focalY == o.focalY && centreX == o.centreX && centreY == o.centreY &&
                    nearZ == o.nearZ && farZ == o.farZ && orthographic == o.orthographic &&

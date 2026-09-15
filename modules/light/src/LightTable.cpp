@@ -2,6 +2,7 @@
 #include "lrt/light/LightTable.h"
 
 #include <algorithm>
+#include <array>
 
 #include <functional>
 
@@ -181,6 +182,27 @@ Result<void> LightTable::set(std::span<const Light> lights, float sceneRadius) {
     const uint32_t nodeCount = (bounded.empty() ? 0u : 2u * static_cast<uint32_t>(bounded.size()) - 1u) +
                                static_cast<uint32_t>(unbounded.size());
     iesValues.resize(iesValues.size() + size_t{nodeCount} * 16, 0.0F);
+    // Moving lights, after the nodes: for every record its rows at the two
+    // shutter samples and their times -- a still record's times equal, which
+    // is how the path tracer tells it stands. Only where something moves.
+    anyMoves_ = std::any_of(lights.begin(), lights.end(),
+                            [](const Light& l) { return l.moves && (l.instanceRows == nullptr || l.instanceCount == 0); });
+    motionBase_ = 0;
+    if (anyMoves_) {
+        motionBase_ = static_cast<uint32_t>(iesValues.size());
+        for (const Light& light : lights) {
+            const uint32_t copies = light.instanceRows != nullptr && light.instanceCount > 0 ? light.instanceCount : 1u;
+            const bool moving = light.moves && copies == 1;
+            const std::array<float, 12> start = (moving ? light.lightToWorldStart : light.lightToWorld).rows3x4();
+            const std::array<float, 12> end = (moving ? light.lightToWorldEnd : light.lightToWorld).rows3x4();
+            for (uint32_t c = 0; c < copies; ++c) {
+                iesValues.insert(iesValues.end(), start.begin(), start.end());
+                iesValues.insert(iesValues.end(), end.begin(), end.end());
+                iesValues.push_back(moving ? light.timeStart : 0.0F);
+                iesValues.push_back(moving ? light.timeEnd : 0.0F);
+            }
+        }
+    }
     if (iesValues.empty()) {
         iesValues.push_back(0.0F);
     }
@@ -431,6 +453,10 @@ void LightTable::bind(rhi::ShaderCursor cursor) const {
         base.setData(nodeBase_);
         cursor["lightTreeNodes"].setData(treeNodes_);
         cursor["lightUnboundedCount"].setData(unbounded_);
+    }
+    // Moving lights' samples, where a kernel follows them.
+    if (const rhi::ShaderCursor motion = cursor["lightMotionBase"]; motion.isValid()) {
+        motion.setData(anyMoves_ ? motionBase_ : uint32_t{0});
     }
     cursor["iesRecords"].setBinding(iesRecords_.rhi());
     cursor["iesValues"].setBinding(iesValues_.rhi());
