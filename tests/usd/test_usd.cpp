@@ -3417,6 +3417,85 @@ TEST_CASE("a light moving under the shutter lights and shadows as the scene movi
     CHECK(same->relMse < moved->relMse / 1000.0);
 }
 
+// A shutter opened after the first frame: the prims already synced must
+// sample again about it. The same renderer draws a sliding square with the
+// shutter closed, the camera's shutter is then authored open through the
+// layer the stage shares, and the next frame must be the frame a renderer
+// opened on the edited stage draws -- not the sharp one again.
+TEST_CASE("a shutter opened after the first frame blurs the next as a stage authored so does",
+          "[usd][gpu][mesh][path][motion][shutter]") {
+    LRT_REQUIRE_GPU(gpu);
+    const gpu::Caps& caps = gpu->device->caps();
+    if (!caps.rasterization || !caps.rayQuery || !caps.accelerationStructure) {
+        SKIP("needs rasterisation and ray queries");
+    }
+    const fs::path path = scratch("shutter_opened.usda");
+    {
+        std::ofstream out(path);
+        out << "#usda 1.0\n(\n    upAxis = \"Y\"\n    startTimeCode = 0\n    endTimeCode = 1\n)\n"
+               "def Mesh \"Square\"\n{\n"
+               "    int[] faceVertexCounts = [4]\n    int[] faceVertexIndices = [0, 1, 2, 3]\n"
+               "    point3f[] points = [(-0.5, -1, -5), (0.5, -1, -5), (0.5, 1, -5), (-0.5, 1, -5)]\n"
+               "    double3 xformOp:translate.timeSamples = {\n        0: (-1, 0, 0),\n        1: (1, 0, 0),\n    }\n"
+               "    uniform token[] xformOpOrder = [\"xformOp:translate\"]\n"
+               "    uniform token subdivisionScheme = \"none\"\n"
+               "    color3f[] primvars:displayColor = [(0.8, 0.8, 0.8)] ( interpolation = \"constant\" )\n}\n"
+               "def Camera \"Camera\"\n{\n"
+               "    float focalLength = 35\n"
+               "    float horizontalAperture = 24.576\n    float verticalAperture = 18.432\n"
+               "    float2 clippingRange = (0.1, 1000)\n}\n"
+               "def DistantLight \"Sun\"\n{\n    float inputs:intensity = 3\n    bool inputs:shadow:enable = 0\n}\n";
+    }
+    const uint32_t w = 160, h = 120;
+    const auto settle = [](usd::StageRenderer& r) {
+        r.setPathSamples(64);
+        r.setPathTotal(64);
+        r.setPathBounces(0);
+        r.setMotionBuckets(8);
+    };
+    const auto upload = [&](const usd::StageImage& image) {
+        gpu::BufferDesc desc;
+        desc.bytes = image.rgba.size() * sizeof(float);
+        desc.elementBytes = 16;
+        auto made = gpu::Buffer::create(*gpu->device, desc, image.rgba.data());
+        REQUIRE(made);
+        return std::move(*made);
+    };
+    auto renderer = usd::StageRenderer::open(path);
+    if (!renderer) FAIL(renderer.error().toString());
+    settle(**renderer);
+    auto sharp = (*renderer)->render("/Camera", 0.5, w, h, "rt");
+    if (!sharp) FAIL(sharp.error().toString());
+    // The shutter, authored on the layer both stages share.
+    {
+        UsdStageRefPtr editing = UsdStage::Open(path.string());
+        REQUIRE(editing);
+        UsdGeomCamera camera(editing->GetPrimAtPath(SdfPath("/Camera")));
+        REQUIRE(camera);
+        camera.GetShutterOpenAttr().Set(-0.25);
+        camera.GetShutterCloseAttr().Set(0.25);
+    }
+    auto edited = (*renderer)->render("/Camera", 0.5, w, h, "rt");
+    if (!edited) FAIL(edited.error().toString());
+    auto fresh = usd::StageRenderer::open(path);
+    if (!fresh) FAIL(fresh.error().toString());
+    settle(**fresh);
+    auto authored = (*fresh)->render("/Camera", 0.5, w, h, "rt");
+    if (!authored) FAIL(authored.error().toString());
+    const gpu::Buffer a = upload(*edited);
+    const gpu::Buffer b = upload(*authored);
+    const gpu::Buffer c = upload(*sharp);
+    auto same = render::compareHdr(*gpu->library, a, b, w, h);
+    auto blurred = render::compareHdr(*gpu->library, b, c, w, h);
+    REQUIRE(same);
+    REQUIRE(blurred);
+    std::printf("  shutter opened after a frame: the next frame against the authored stage's relMSE %.2e (max relative "
+                "%.2e); the authored blur against the sharp frame %.2e\n",
+                same->relMse, same->maxRelative, blurred->relMse);
+    CHECK(blurred->relMse > 1e-2);
+    CHECK(same->maxRelative < 1e-3);
+}
+
 // Velocities: a mesh that authors one sample of points and `velocities`
 // must blur as one that authors the two samples those velocities reach --
 // UsdGeom's velocity interpolation, resolved by hdsi's scene index ahead

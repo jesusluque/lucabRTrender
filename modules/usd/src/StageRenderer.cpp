@@ -22,6 +22,8 @@
 #include <pxr/usd/usd/stage.h>
 #include <pxr/imaging/hd/primOriginSchema.h>
 #include <pxr/imaging/hd/materialBindingsSchema.h>
+#include <pxr/imaging/hd/primvarsSchema.h>
+#include <pxr/imaging/hd/xformSchema.h>
 #include <pxr/imaging/hd/sceneIndex.h>
 #include <pxr/usd/usdGeom/camera.h>
 #include <pxr/usd/usdGeom/metrics.h>
@@ -555,7 +557,15 @@ Result<void> StageRenderer::aim(const std::string& camera, double time, const st
         usdCamera.GetShutterOpenAttr().Get(&open, UsdTimeCode(time));
         usdCamera.GetShutterCloseAttr().Get(&close, UsdTimeCode(time));
         if (auto* param = static_cast<HdLrtRenderParam*>(impl.delegate->GetRenderParam()); param != nullptr) {
+            const bool changed = param->GetShutterOpen() != open || param->GetShutterClose() != close;
             param->SetShutter(open, close);
+            // Everything synced about the old shutter samples again: every
+            // prim's transform and primvars dirtied, which reaches meshes,
+            // instancers, lights and the camera alike.
+            if (changed) {
+                impl.bindingPurposes->DirtyAll(HdDataSourceLocatorSet{HdXformSchema::GetDefaultLocator(),
+                                                                      HdPrimvarsSchema::GetDefaultLocator()});
+            }
         }
     }
     impl.sceneIndices.stageSceneIndex->SetTime(UsdTimeCode(time));

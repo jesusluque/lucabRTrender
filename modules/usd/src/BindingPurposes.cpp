@@ -75,6 +75,20 @@ void HdLrtBindingPurposesSceneIndex::SetPurposes(const TfTokenVector& purposes) 
     }
 }
 
+void HdLrtBindingPurposesSceneIndex::DirtyAll(const HdDataSourceLocatorSet& locators) {
+    const HdSceneIndexBaseRefPtr input = _GetInputSceneIndex();
+    if (!input) {
+        return;
+    }
+    HdSceneIndexObserver::DirtiedPrimEntries dirtied;
+    for (const SdfPath& path : HdSceneIndexPrimView(input)) {
+        dirtied.emplace_back(path, locators);
+    }
+    if (!dirtied.empty()) {
+        _SendPrimsDirtied(dirtied);
+    }
+}
+
 HdSceneIndexPrim HdLrtBindingPurposesSceneIndex::GetPrim(const SdfPath& primPath) const {
     const HdSceneIndexBaseRefPtr input = _GetInputSceneIndex();
     if (!input) {

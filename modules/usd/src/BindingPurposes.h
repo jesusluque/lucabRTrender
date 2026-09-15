@@ -22,6 +22,12 @@ public:
 
     /// A new list; every prim with bindings is dirtied when it differs.
     void SetPurposes(const TfTokenVector& purposes);
+
+    /// Every prim dirtied at `locators`: what a change the scene does not
+    /// carry needs -- a shutter, which every sampled transform and primvar
+    /// depends on. (The change tracker's own marks do not reach prims a
+    /// scene index owns under emulation.)
+    void DirtyAll(const HdDataSourceLocatorSet& locators);
     [[nodiscard]] const TfTokenVector& GetPurposes() const { return _purposes; }
 
     HdSceneIndexPrim GetPrim(const SdfPath& primPath) const override;

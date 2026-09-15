@@ -2099,9 +2099,19 @@ withheld from the kernel the moving light drew the still frame (3.7e-13).
 stage put the occluder two units from the light at mid frame instead of
 one.)
 
-**Not done.** An instanced light does not move. A shutter that changes
-after an instancer, a light or the camera synced is read at its next sync:
-the pass dirties rprims only. The raster technique draws the
+**A shutter that changes after prims synced.** The pass marked every rprim
+dirty through the change tracker, and under scene index emulation those
+marks do not reach prims the stage's scene index owns (as with binding
+purposes): a camera whose shutter was authored open after a first frame drew
+the next frame half resampled, relMSE 1.18 from the stage authored so.
+`StageRenderer` now dirties every prim's transform and primvars through its
+own filtering scene index when the shutter it reads differs from the one
+the prims were sampled about -- meshes, instancers, lights and the camera
+alike -- and the frame after the edit is bit for bit the authored stage's.
+
+**Not done.** An instanced light does not move. A host driving the plugin
+itself (not `StageRenderer`) has only the pass's tracker marks when its
+camera's shutter changes. The raster technique draws the
 frame's time, no blur. A turn between the two shutter samples is
 interpolated as rows, not as a rotation. Two samples only: a shutter that
 spans more than two authored samples takes the outer two. Where a prim's
