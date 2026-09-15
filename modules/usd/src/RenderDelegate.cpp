@@ -232,7 +232,7 @@ HdRenderPassSharedPtr HdLrtRenderDelegate::CreateRenderPass(HdRenderIndex* index
 
 TF_DEFINE_PRIVATE_TOKENS(_lrtSettings, ((technique, "lrt:technique"))((settleStreams, "lrt:settleStreams"))
                                            ((visibility, "lrt:visibility"))((lightSamples, "lrt:lightSamples"))((chooseLights, "lrt:chooseLights"))
-                                           ((pathSamples, "lrt:pathSamples"))((pathBounces, "lrt:pathBounces"))((pathTotal, "lrt:pathTotal"))((denoise, "lrt:denoise"))((pathAdaptive, "lrt:pathAdaptive"))((pathError, "lrt:pathError"))((motionBuckets, "lrt:motionBuckets"))
+                                           ((pathSamples, "lrt:pathSamples"))((pathBounces, "lrt:pathBounces"))((pathTotal, "lrt:pathTotal"))((denoise, "lrt:denoise"))((pathAdaptive, "lrt:pathAdaptive"))((pathError, "lrt:pathError"))((motionBuckets, "lrt:motionBuckets"))((disableMotionBlur, "lrt:disableMotionBlur"))((disableDepthOfField, "lrt:disableDepthOfField"))
                                            (raster)(rt)(automatic)(rays)(bvh));
 
 HdRenderSettingDescriptorList HdLrtRenderDelegate::GetRenderSettingDescriptors() const {
@@ -352,6 +352,16 @@ float HdLrtRenderDelegate::GetPathError() const {
     if (value.IsHolding<float>()) return value.UncheckedGet<float>();
     if (value.IsHolding<double>()) return static_cast<float>(value.UncheckedGet<double>());
     return 0.02F;
+}
+
+bool HdLrtRenderDelegate::GetDisableMotionBlur() const {
+    const VtValue value = GetRenderSetting(_lrtSettings->disableMotionBlur);
+    return value.IsHolding<bool>() && value.UncheckedGet<bool>();
+}
+
+bool HdLrtRenderDelegate::GetDisableDepthOfField() const {
+    const VtValue value = GetRenderSetting(_lrtSettings->disableDepthOfField);
+    return value.IsHolding<bool>() && value.UncheckedGet<bool>();
 }
 
 bool HdLrtRenderDelegate::GetDenoise() const {

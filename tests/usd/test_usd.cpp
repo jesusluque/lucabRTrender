@@ -4048,6 +4048,142 @@ TEST_CASE("a mesh takes the material bound for the purpose render settings name,
     CHECK(centre("after /Render/Preview's products") == 'g');
 }
 
+// A render product's disableMotionBlur and disableDepthOfField (M10): read
+// since the products were, applied now. One stage -- a square sliding under
+// a shutter open about the frame, seen through a lens focused in front of it
+// -- and three products: both switches on, which must be bit for bit the
+// same stage authored with neither shutter nor lens; and each switch alone,
+// which must not be, since the other effect is still drawn. The switches
+// hold for their product and nothing after.
+TEST_CASE("a render product's disableMotionBlur and disableDepthOfField draw it without either",
+          "[usd][gpu][mesh][path][render-settings][camera][motion]") {
+    LRT_REQUIRE_GPU(gpu);
+    const gpu::Caps& caps = gpu->device->caps();
+    if (!caps.rasterization || !caps.rayQuery || !caps.accelerationStructure) {
+        SKIP("needs rasterisation and ray queries");
+    }
+    const uint32_t w = 96, h = 64;
+    const size_t pixels = size_t{w} * h;
+    const auto stage = [&](const char* name, bool effects) {
+        const fs::path path = scratch(name);
+        std::ofstream out(path);
+        out << "#usda 1.0\n(\n    upAxis = \"Y\"\n    startTimeCode = 0\n    endTimeCode = 1\n)\n"
+               "def Mesh \"Square\"\n{\n"
+               "    int[] faceVertexCounts = [4]\n"
+               "    int[] faceVertexIndices = [0, 1, 2, 3]\n"
+               "    point3f[] points = [(-0.5, -1, -5), (0.5, -1, -5), (0.5, 1, -5), (-0.5, 1, -5)]\n"
+               "    double3 xformOp:translate.timeSamples = {\n        0: (-1, 0, 0),\n        1: (1, 0, 0),\n    }\n"
+               "    uniform token[] xformOpOrder = [\"xformOp:translate\"]\n"
+               "    uniform token subdivisionScheme = \"none\"\n"
+               "    color3f[] primvars:displayColor = [(0.8, 0.8, 0.8)] ( interpolation = \"constant\" )\n}\n"
+               "def DistantLight \"Sun\"\n{\n    float inputs:intensity = 3\n    bool inputs:shadow:enable = 0\n}\n"
+               "def Camera \"Camera\"\n{\n"
+               "    float focalLength = 35\n"
+               "    float horizontalAperture = 24.576\n    float verticalAperture = 16.384\n"
+               "    float2 clippingRange = (0.1, 1000)\n";
+        if (effects) {
+            out << "    double shutter:open = -0.25\n    double shutter:close = 0.25\n"
+                   "    float fStop = 8\n    float focusDistance = 2.5\n";
+        }
+        out << "}\n"
+               "def Scope \"Render\"\n{\n"
+               "    def RenderSettings \"Settings\"\n    {\n"
+               "        rel camera = </Camera>\n"
+               "        rel products = [</Render/Plain>, </Render/Lens>, </Render/Blur>]\n"
+               "        int2 resolution = (96, 64)\n"
+               "        token lrt:technique = \"rt\"\n"
+               "        int lrt:pathSamples = 16\n        int lrt:pathTotal = 16\n        int lrt:pathBounces = 0\n"
+               "        int lrt:motionBuckets = 8\n"
+               "    }\n";
+        const auto product = [&](const char* productName, bool noBlur, bool noLens) {
+            out << "    def RenderProduct \"" << productName << "\"\n    {\n"
+                << "        token productName = \"switches_" << productName << ".exr\"\n"
+                << "        rel orderedVars = </Render/Vars/beauty>\n"
+                   "        int2 resolution = (96, 64)\n"
+                << "        uniform bool disableMotionBlur = " << (noBlur ? 1 : 0) << "\n"
+                << "        uniform bool disableDepthOfField = " << (noLens ? 1 : 0) << "\n    }\n";
+        };
+        product("Plain", true, true);
+        product("Lens", true, false);
+        product("Blur", false, true);
+        out << "    def Scope \"Vars\"\n    {\n"
+               "        def RenderVar \"beauty\"\n        {\n            string sourceName = \"Ci\"\n"
+               "            token dataType = \"color3f\"\n        }\n    }\n}\n";
+        return path;
+    };
+    // The reference: neither shutter nor lens, drawn as the settings say.
+    std::vector<uint32_t> reference[3];
+    {
+        auto renderer = usd::StageRenderer::open(stage("switches_reference.usda", false));
+        if (!renderer) FAIL(renderer.error().toString());
+        (*renderer)->setPathSamples(16);
+        (*renderer)->setPathTotal(16);
+        (*renderer)->setPathBounces(0);
+        (*renderer)->setMotionBuckets(8);
+        auto image = (*renderer)->render("/Camera", 0.5, w, h, "rt");
+        if (!image) FAIL(image.error().toString());
+        for (size_t c = 0; c < 3; ++c) {
+            reference[c].resize(pixels);
+            for (size_t p = 0; p < pixels; ++p) std::memcpy(&reference[c][p], image->rgba.data() + p * 4 + c, 4);
+        }
+    }
+    const fs::path path = stage("switches.usda", true);
+    auto renderer = usd::StageRenderer::open(path);
+    if (!renderer) FAIL(renderer.error().toString());
+    auto written = (*renderer)->renderProducts("/Render/Settings", 0.5, path.parent_path());
+    if (!written) FAIL(written.error().toString());
+    REQUIRE(written->size() == 3);
+    const auto differing = [&](const fs::path& file) {
+        auto read = io::readExrChannels(file);
+        if (!read) FAIL(read.error().toString());
+        uint64_t off = 0;
+        const char* names[] = {"beauty.R", "beauty.G", "beauty.B"};
+        for (size_t c = 0; c < 3; ++c) {
+            const io::ExrChannelData* found = nullptr;
+            for (const io::ExrChannelData& data : read->channels) {
+                if (data.name == names[c]) found = &data;
+            }
+            REQUIRE(found != nullptr);
+            REQUIRE(found->words.size() == pixels);
+            auto a = gpu::Buffer::fromSpan<uint32_t>(*gpu->device, found->words, "product");
+            auto b = gpu::Buffer::fromSpan<uint32_t>(*gpu->device, reference[c], "reference");
+            REQUIRE(a);
+            REQUIRE(b);
+            auto count = render::countDifferent(*gpu->library, *a, *b, static_cast<uint32_t>(pixels));
+            REQUIRE(count);
+            off += *count;
+        }
+        return off;
+    };
+    const uint64_t plain = differing((*written)[0]);
+    const uint64_t lens = differing((*written)[1]);
+    const uint64_t blur = differing((*written)[2]);
+    std::printf("  words off the plain stage's frame: both switched off %llu, lens drawn %llu, blur drawn %llu (of %zu)\n",
+                static_cast<unsigned long long>(plain), static_cast<unsigned long long>(lens),
+                static_cast<unsigned long long>(blur), pixels * 3);
+    CHECK(plain == 0);
+    CHECK(lens > 300);
+    CHECK(blur > 300);
+    // And after the products, the stage's own effects again.
+    (*renderer)->setPathSamples(16);
+    (*renderer)->setPathTotal(16);
+    (*renderer)->setPathBounces(0);
+    (*renderer)->setMotionBuckets(8);
+    auto after = (*renderer)->render("/Camera", 0.5, w, h, "rt");
+    if (!after) FAIL(after.error().toString());
+    std::vector<uint32_t> red(pixels);
+    for (size_t p = 0; p < pixels; ++p) std::memcpy(&red[p], after->rgba.data() + p * 4, 4);
+    auto a = gpu::Buffer::fromSpan<uint32_t>(*gpu->device, red, "after");
+    auto b = gpu::Buffer::fromSpan<uint32_t>(*gpu->device, reference[0], "reference");
+    REQUIRE(a);
+    REQUIRE(b);
+    auto again = render::countDifferent(*gpu->library, *a, *b, static_cast<uint32_t>(pixels));
+    REQUIRE(again);
+    std::printf("  a render after the products: %llu red words off the plain frame\n",
+                static_cast<unsigned long long>(*again));
+    CHECK(*again > 100);
+}
+
 // Light groups (M10): a light's `lrt:lightGroup` puts its direct light,
 // at every bounce, into a plane of its own beside the beauty, asked for as
 // the "lightGroup:NAME" output -- or, through a render product, as the var

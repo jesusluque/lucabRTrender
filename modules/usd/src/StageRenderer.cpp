@@ -330,6 +330,15 @@ Result<std::vector<std::filesystem::path>> StageRenderer::renderProducts(const s
     setIncludedPurposes(info->includedPurposes);
     setMaterialBindingPurposes(info->materialBindingPurposes);
     std::vector<std::filesystem::path> written;
+    // The per-product switches below hold for the products alone, however
+    // this returns.
+    struct Switches {
+        HdLrtRenderDelegate* delegate;
+        ~Switches() {
+            delegate->SetRenderSetting(TfToken("lrt:disableMotionBlur"), VtValue(false));
+            delegate->SetRenderSetting(TfToken("lrt:disableDepthOfField"), VtValue(false));
+        }
+    } switches{impl.delegate.get()};
     for (const RenderProductInfo& product : info->products) {
         if (product.width == 0 || product.height == 0) {
             return Error::make(ErrorCode::InvalidArgument, "render product '{}' has no resolution", product.path);
@@ -344,6 +353,11 @@ Result<std::vector<std::filesystem::path>> StageRenderer::renderProducts(const s
             aovs.push_back(*aov);
         }
         requestOutputs(aovs);
+        // The product's own switches, or its settings prim's, for this product.
+        impl.delegate->SetRenderSetting(TfToken("lrt:disableMotionBlur"),
+                                        VtValue(info->disableMotionBlur || product.disableMotionBlur));
+        impl.delegate->SetRenderSetting(TfToken("lrt:disableDepthOfField"),
+                                        VtValue(info->disableDepthOfField || product.disableDepthOfField));
         const std::string camera = !product.camera.empty() ? product.camera : info->camera;
         auto image = render(camera, time, product.width, product.height, technique);
         if (!image) return std::move(image).error();

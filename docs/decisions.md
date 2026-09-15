@@ -2570,7 +2570,14 @@ emissive geometry sums its groups short of the beauty by exactly those.
 `materialBindingPurposes` is applied since the usd-wg end to end (below):
 this line used to say the delegate bound `full`, and it bound Hydra's
 default, `preview`. Products' `disableMotionBlur` and
-`disableDepthOfField` are read and not applied. A render var of any other
+`disableDepthOfField` (theirs or their settings prim's) are applied per
+product, through the delegate's `lrt:disableMotionBlur` (one shutter slice)
+and `lrt:disableDepthOfField` (the camera's fStop ignored), reset when the
+products are written: a sliding square under an open shutter and a lens
+focused before it, with both switched off, is bit for bit the stage with
+neither authored (0 words of 18432); the lens alone drawn, 4464 off; the
+blur alone, 7506; a render after the products, the effects again. A render
+var of any other
 light path expression is refused with a message.
 
 ## Complete USD: volumes (M9)

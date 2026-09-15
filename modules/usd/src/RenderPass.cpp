@@ -46,7 +46,7 @@ void HdLrtRenderPass::_Execute(HdRenderPassStateSharedPtr const& state, TfTokenV
         projection.exposure = static_cast<double>(camera->GetExposure());
         // The diaphragm and the distortion, which only the path tracer's own
         // rays can honour. HdCamera's focal length is already in scene units.
-        if (camera->GetFStop() > 0.0F) {
+        if (camera->GetFStop() > 0.0F && (_delegate == nullptr || !_delegate->GetDisableDepthOfField())) {
             projection.lensRadius = static_cast<double>(camera->GetFocalLength()) /
                                     (2.0 * static_cast<double>(camera->GetFStop()));
             projection.focusDistance = static_cast<double>(camera->GetFocusDistance());
@@ -145,7 +145,7 @@ void HdLrtRenderPass::_Execute(HdRenderPassStateSharedPtr const& state, TfTokenV
         _engine->setDenoise(_delegate->GetDenoise());
         _engine->setPathAdaptive(_delegate->GetPathAdaptive());
         _engine->setPathError(_delegate->GetPathError());
-        _engine->setMotionBuckets(_delegate->GetMotionBuckets());
+        _engine->setMotionBuckets(_delegate->GetDisableMotionBlur() ? 1u : _delegate->GetMotionBuckets());
     }
     if (auto drawn =
             _engine->render(projection, settings, *_targets, technique, settle, &renderTags, request, visibility);

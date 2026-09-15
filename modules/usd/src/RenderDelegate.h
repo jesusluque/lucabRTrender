@@ -65,6 +65,11 @@ public:
     [[nodiscard]] uint32_t GetPathSamples() const;
     [[nodiscard]] uint32_t GetPathBounces() const;
     [[nodiscard]] uint32_t GetMotionBuckets() const;
+    /// A render product's (or its settings prim's) disableMotionBlur and
+    /// disableDepthOfField: "lrt:disableMotionBlur" draws one shutter slice,
+    /// "lrt:disableDepthOfField" a pinhole through the camera's lens.
+    [[nodiscard]] bool GetDisableMotionBlur() const;
+    [[nodiscard]] bool GetDisableDepthOfField() const;
     /// Paths a pixel at which a path traced frame is finished
     /// ("lrt:pathTotal"); one, the default, never accumulates.
     [[nodiscard]] uint32_t GetPathTotal() const;
