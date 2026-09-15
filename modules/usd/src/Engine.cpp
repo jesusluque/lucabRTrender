@@ -371,6 +371,34 @@ void Engine::removeMaterial(const pxr::SdfPath& id) {
     materialsChanged_ = true;
 }
 
+void Engine::setVolume(const pxr::SdfPath& id, VolumeArrays arrays) {
+    revision_.fetch_add(1);
+    const std::lock_guard<std::mutex> held(guard_);
+    volumes_[id] = std::move(arrays);
+    ++volumesVersion_;
+}
+
+void Engine::removeVolume(const pxr::SdfPath& id) {
+    revision_.fetch_add(1);
+    const std::lock_guard<std::mutex> held(guard_);
+    volumes_.erase(id);
+    ++volumesVersion_;
+}
+
+void Engine::setVolumeField(const pxr::SdfPath& id, VolumeFieldAsset asset) {
+    revision_.fetch_add(1);
+    const std::lock_guard<std::mutex> held(guard_);
+    volumeFields_[id] = std::move(asset);
+    ++volumesVersion_;
+}
+
+void Engine::removeVolumeField(const pxr::SdfPath& id) {
+    revision_.fetch_add(1);
+    const std::lock_guard<std::mutex> held(guard_);
+    volumeFields_.erase(id);
+    ++volumesVersion_;
+}
+
 void Engine::remove(const pxr::SdfPath& id) {
     const std::lock_guard<std::mutex> held(guard_);
     splats_.erase(id);
@@ -1360,6 +1388,74 @@ Result<void> Engine::render(const render::Projection& projection, const render::
             }
             lightGroupPixels_ = pixels;
             frame.groups = {&lightGroupColour_, lightGroupCount_};
+        }
+        // The frame's volumes, laid out again whenever a volume or a field
+        // changed: each grid read once per file and name.
+        if (pathTracing) {
+            std::vector<world::VolumeInput> inputs;
+            std::vector<std::shared_ptr<const io::NanoGrid>> holding;
+            bool rebuild = false;
+            {
+                const std::lock_guard<std::mutex> held(guard_);
+                rebuild = volumesVersion_ != volumesBuilt_;
+                if (rebuild) {
+                    volumesBuilt_ = volumesVersion_;
+                    for (const auto& [id, volume] : volumes_) {
+                        if (!volume.visible || volume.field.IsEmpty()) {
+                            continue;
+                        }
+                        const auto field = volumeFields_.find(volume.field);
+                        if (field == volumeFields_.end() || field->second.path.empty()) {
+                            continue;   // its field has not arrived
+                        }
+                        const auto key = std::make_pair(field->second.path, field->second.gridName);
+                        auto cached = nanoGrids_.find(key);
+                        if (cached == nanoGrids_.end()) {
+                            auto read = io::readVdbGrid(field->second.path, field->second.gridName);
+                            if (!read) {
+                                log::warn("hdLrt: volume {}: {}", id.GetString(), read.error().toString());
+                            }
+                            cached = nanoGrids_
+                                         .emplace(key, read ? std::make_shared<const io::NanoGrid>(std::move(*read))
+                                                            : std::shared_ptr<const io::NanoGrid>())
+                                         .first;
+                        }
+                        if (cached->second == nullptr) {
+                            continue;
+                        }
+                        world::VolumeInput input;
+                        input.grid = cached->second.get();
+                        input.objectToWorld = volume.objectToWorld;
+                        input.densityScale = volume.densityScale;
+                        input.albedo = volume.albedo;
+                        input.g = volume.g;
+                        inputs.push_back(input);
+                        holding.push_back(cached->second);
+                    }
+                }
+            }
+            if (rebuild) {
+                if (!volumeSet_.has_value()) {
+                    auto made = world::VolumeSet::create(*library_);
+                    if (!made) return std::move(made).error();
+                    volumeSet_.emplace(std::move(*made));
+                }
+                gpu::CommandBatch volumeBatch(*device_);
+                LRT_TRY(volumeSet_->set(volumeBatch, inputs));
+                LRT_TRY(volumeBatch.submit(true));
+                volumesDrawn_ = static_cast<uint32_t>(inputs.size());
+            }
+            if (volumesDrawn_ > 0) {
+                frame.volumes = &volumeSet_->words();
+                frame.volumeCount = volumesDrawn_;
+            }
+        } else if (!volumesUndrawnSaid_) {
+            const std::lock_guard<std::mutex> held(guard_);
+            if (!volumes_.empty()) {
+                volumesUndrawnSaid_ = true;
+                log::info("hdLrt: volumes are drawn by the rt technique; this frame's is {}",
+                          technique == Technique::Raster ? "raster" : "rt without meshes");
+            }
         }
         const technique::MaterialFrame* cutouts = (materialCutouts_ || scene_->anyHidden()) ? &frame : nullptr;
             gpu::CommandBatch batch(*device_);

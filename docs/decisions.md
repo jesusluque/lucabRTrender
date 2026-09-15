@@ -2554,6 +2554,115 @@ what the delegate binds). Products' `disableMotionBlur` and
 `disableDepthOfField` are read and not applied. A render var of any other
 light path expression is refused with a message.
 
+## Complete USD: volumes (M9)
+
+### From .vdb to the device, with no statistic on the host
+
+`io::readVdbGrid` reads a float grid with OpenVDB, voxelises its active
+tiles (so the tree the kernels walk is leaves alone) and lays it out with
+NanoVDB's converter with statistics and checksum off: what crosses to the
+device is the layout and the header's leaf count. The rule's exception is
+bounded to a re-layout, as decompressing SPZ is, and nothing about the
+values is read on the host. `world::VolumeSet` puts every volume of the
+frame in **one buffer of words** -- a header, a 32-word record a volume
+(world to index, extinction scale, albedo, phase g, and what the finish
+kernel writes: index bounds, leaf 0's word, majorant), the grids, then each
+leaf's largest value -- because the traced kernel has one Metal buffer
+slot left. `volume_prepare.slang`'s kernels take the bounds from the
+leaves' origins, each leaf's maximum over its active voxels and the
+grid's majorant.
+
+PNanoVDB compiles as Slang: `lrt/volume/nanovdb.slang` includes
+`PNanoVDB.h` as HLSL (its buffer is a `StructuredBuffer<uint>`) and exports
+grids and leaves by offset; `slangc` takes it to Metal, CUDA and SPIR-V. The
+header travels with the shaders from the USD prefix. NanoVDB 32's
+`GridBuilder` still names `std::result_of`, removed in C++20, which libc++
+keeps behind `_LIBCPP_ENABLE_CXX20_REMOVED_TYPE_TRAITS`.
+
+**Checked** on a fixture of two boxes (32^3 voxels at 0.5, 8^3 apart at
+2.0): 33280 active voxels counted through the leaf masks, bounds
+[0,48)x[0,32)x[0,32), all 65 leaf maxima matching a voxel-by-voxel recount
+through the accessor, majorant 2.0.
+
+### The medium: delta and ratio tracking leaf by leaf
+
+`medium.slang` walks a volume's leaves with PNanoVDB's HDDA at the leaf's
+size and, inside each, samples free flights (delta tracking) and
+transmittance (ratio tracking) under **that leaf's** majorant, so an empty
+leaf costs one step and a dense one is sampled at its own rate. The ray is
+taken to index space with its parameter kept in world units.
+Henyey-Greenstein for the phase, drawn with its own density.
+
+**Checked** through the dense box along six axis directions and one
+oblique ray: ratio tracking's transmittance and delta tracking's scatter
+fraction both on Beer-Lambert within the standard error the kernel
+measures (|z| <= 1.2 over 16384 rays each); no density over the leaf
+majorant at 16384 random points in and about the box; the leaf walk
+crossing exactly the cells a walk of a tenth of a voxel crosses. That last
+one needed the walk to skip cells a rounding sliver long at a boundary.
+
+### In the path tracer
+
+The traced kernel's sample loop now walks vertices that are either a
+surface the ray met or a collision in a medium before it. A collision
+gathers light through the phase (lights chosen by power) and sends the path
+on by the phase; transmittance to a light is ratio-tracked -- **only for a
+light that casts shadows**, since a volume is an occluder like any other and
+`shadow:enable` off means none dims it. A pixel whose ray finds no surface
+still walks the medium along its camera ray. An imageless dome is drawn
+uniformly over the sphere at a point in a medium: its cosine sampling about
+a normal never draws the half behind, and flipping between halves weighs a
+sample near their horizon by one over its cosine. A frame without volumes
+compiles exactly the kernel it did (`kVolumes` stubs).
+
+**Checked**, pixel by pixel, with an absorbing box (albedo 0) over the right
+half of a sun-lit plane: every pixel sees one radiance per sample, so the
+frame with the box over the frame without is a binomial mean whose
+expectation is Beer-Lambert along the pixel's own ray and whose deviation
+the check derives from the path count. At 1024 paths, 0 of 9801 pixels
+beyond five deviations and mean z^2 0.986 with the sun's shadows off
+(camera chord only); 0 and 0.992 with them on (camera and light chords);
+the 9680 pixels outside the box unchanged. **The volume furnace**: an
+albedo-one medium of optical depth at most 0.56 under a dome of radiance 1,
+32 bounces -- every walk ends where an escape would have seen the dome, so a
+pixel reads 1 whatever the phase: 0.99983 isotropic, 1.00228 at g 0.7, within
+0.2 and 0.6 standard errors measured from the pixels' own spread.
+
+The first pass at the Beer-Lambert check read the square of the expected
+transmittance: the renderer was right (the sun's light crosses the box
+too) and the expectation was missing a chord. And one bug was the host's:
+`VolumeSet` read OpenVDB's row-vector map untransposed and composed it on
+the wrong side, so a translated volume sat offset by its translation in
+voxels. A pure scale -- the first fixture -- cannot show that.
+
+### Through Hydra
+
+`HdLrtVolume` (the `volume` rprim) takes the field named `density`, else the
+first, its transform, and constant primvars `lrt:densityScale` (default 1),
+`lrt:albedo` (0.8) and `lrt:anisotropy` (g, 0); `HdLrtVolumeField` (the
+`openvdbAsset` bprim) takes the file and grid name. The engine reads each
+grid once per file and name, lays the frame's volumes out again whenever a
+volume or field changes, and a change raises the path tracer's revision.
+**Checked** with the same box authored as a `Volume` and an `OpenVDBAsset`
+over a mesh plane under a `DistantLight`: 0 of 9801 pixels beyond five
+deviations, mean z^2 1.014, mean ratio 0.1920 against 0.1921, the outside
+unchanged.
+
+### Not done
+
+- **A frame of volumes alone is not drawn**: path tracing needs the mesh
+  layer, which needs a mesh. The raster technique draws no volume, and the
+  engine says so once.
+- Only float grids, one field a volume (density); no temperature, emission
+  or colour fields, no `UsdVol` material networks -- the medium's
+  parameters are the three primvars.
+- Light groups do not collect light scattered in a medium differently from
+  a surface's: a collision's light goes to its light's group, as a
+  surface's does.
+- In a medium lights are chosen by power, not through the light BVH.
+- No MIS in media; no spectral tracking for a coloured extinction.
+- Verified on Metal; the L4 run of these tests is M11's.
+
 ## Linux, on the 94 (M11's first half)
 
 ### The first table, after the port was reconciled with engine

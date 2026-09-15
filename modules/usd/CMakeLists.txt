@@ -9,6 +9,7 @@ set(LRT_USD_SOURCES
     src/Light.cpp
     src/Material.cpp
     src/Points.cpp
+    src/Volume.cpp
     src/Curves.cpp
     src/RenderPass.cpp
     src/RenderDelegate.cpp)

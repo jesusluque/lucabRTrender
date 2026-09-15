@@ -38,6 +38,8 @@
 #include "lrt/geom/Subdivision.h"
 #include "lrt/lod/Lod.h"
 #include "lrt/technique/Visibility.h"
+#include "lrt/io/Vdb.h"
+#include "lrt/world/VolumeSet.h"
 #include "lrt/world/GpuScene.h"
 #include "lrt/world/Instancing.h"
 #include "lrt/lod/Lrtc.h"
@@ -255,6 +257,12 @@ public:
     /// The coordinate systems bound to a mesh prim, as its last Sync read them.
     [[nodiscard]] std::vector<CoordSysBinding> coordSysOf(const pxr::SdfPath& id) const;
     [[nodiscard]] uint64_t meshPositionsRevision() const noexcept;
+    /// Volumes and the field assets they read. The medium is path traced;
+    /// the raster technique draws no volume, and says so once.
+    void setVolume(const pxr::SdfPath& id, VolumeArrays arrays);
+    void removeVolume(const pxr::SdfPath& id);
+    void setVolumeField(const pxr::SdfPath& id, VolumeFieldAsset asset);
+    void removeVolumeField(const pxr::SdfPath& id);
     void setInstancer(const pxr::SdfPath& id, const pxr::SdfPath& parent, InstancerArrays arrays);
     void removeInstancer(const pxr::SdfPath& id);
     void remove(const pxr::SdfPath& id);
@@ -350,6 +358,16 @@ private:
         bool                       chainDirty = false;
     };
     std::map<pxr::SdfPath, LightEntry>        lights_;
+    std::map<pxr::SdfPath, VolumeArrays>      volumes_;
+    std::map<pxr::SdfPath, VolumeFieldAsset>  volumeFields_;
+    /// Grids read, by file and grid name; null for one that failed to read
+    /// (reported once).
+    std::map<std::pair<std::string, std::string>, std::shared_ptr<const io::NanoGrid>> nanoGrids_;
+    std::optional<world::VolumeSet>           volumeSet_;
+    uint64_t                                  volumesVersion_ = 1;   ///< raised by any volume or field change
+    uint64_t                                  volumesBuilt_ = 0;     ///< the version volumeSet_ holds
+    uint32_t                                  volumesDrawn_ = 0;     ///< how many volumes volumeSet_ holds
+    bool                                      volumesUndrawnSaid_ = false;
     /// IES profiles by path, read once; a file that cannot be read is said
     /// once and the light goes unshaped.
     std::map<std::string, std::shared_ptr<const io::IesProfile>> iesProfiles_;

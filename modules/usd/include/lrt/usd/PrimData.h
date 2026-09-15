@@ -31,6 +31,24 @@ struct ParticleFieldArrays {
     pxr::VtValue shCoefficients;   ///< VtVec3fArray or VtVec3hArray, (degree+1)^2 per particle, DC first
 };
 
+/// A volume's field asset, as UsdVolOpenVDBAsset names it.
+struct VolumeFieldAsset {
+    std::string path;       ///< the .vdb, resolved
+    std::string gridName;   ///< the grid in it; empty: the first
+};
+
+/// A volume as Sync reads it: which field is its medium, where it stands,
+/// how it scatters.
+struct VolumeArrays {
+    pxr::SdfPath         field;       ///< the field prim (an openvdbAsset bprim)
+    std::string          fieldName;   ///< the volume's name for it ("density")
+    render::Mat4         objectToWorld = render::Mat4::identity();
+    float                densityScale = 1.0F;
+    std::array<float, 3> albedo{0.8F, 0.8F, 0.8F};
+    float                g = 0.0F;
+    bool                 visible = true;
+};
+
 struct PointsArrays {
     pxr::VtValue positions;   ///< VtVec3fArray or VtVec3hArray
     pxr::VtValue colours;     ///< displayColor: VtVec3fArray (one or per point) or GfVec3f; linear

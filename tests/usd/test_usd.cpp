@@ -33,6 +33,7 @@
 
 #include "lrt/technique/Visibility.h"
 #include "lrt/io/Exr.h"
+#include "lrt/io/Vdb.h"
 #include "lrt/io/Readers.h"
 #include "lrt/lod/Lod.h"
 #include "lrt/lod/Lrtc.h"
@@ -3995,4 +3996,121 @@ TEST_CASE("shadow rays over an unoccluded floor change nothing through Hydra, ra
                     static_cast<unsigned long long>(*words), w * h * 4);
         CHECK(*words == 0);
     }
+}
+
+
+// Volumes through Hydra (M9): a UsdVolVolume whose density field is a
+// UsdVolOpenVDBAsset, between the camera and a sun-lit plane, rendered by
+// the rt technique. The volume's constant primvars make it absorb
+// (lrt:albedo 0); the sun casts no shadows. Judged as the technique-level
+// test judges it: each pixel's ratio against the stage without the volume
+// on Beer-Lambert along its own ray, within five binomial deviations of the
+// path count, and the pixels outside the box unchanged.
+TEST_CASE("a UsdVol volume with an OpenVDB field absorbs as Beer-Lambert says through Hydra",
+          "[usd][gpu][mesh][volume]") {
+    LRT_REQUIRE_GPU(gpu);
+    const gpu::Caps& caps = gpu->device->caps();
+    if (!caps.rasterization || !caps.rayQuery || !caps.accelerationStructure) {
+        SKIP("needs rasterisation and ray queries");
+    }
+    if (!io::haveOpenVdb()) {
+        SKIP("built without OpenVDB");
+    }
+    const fs::path vdb = scratch("hydra_box.vdb");
+    const io::VdbBox box{{0, 0, 0}, {32, 32, 32}, 0.5F};
+    REQUIRE(io::writeVdbBoxes(vdb, "density", 0.1, std::span<const io::VdbBox>(&box, 1)));
+    const auto stage = [&](bool volume) {
+        const fs::path path = scratch(volume ? "volume_on.usda" : "volume_off.usda");
+        std::ofstream out(path);
+        out << "#usda 1.0\n(\n    upAxis = \"Y\"\n)\n"
+               "def Mesh \"Plane\"\n{\n"
+               "    int[] faceVertexCounts = [4]\n"
+               "    int[] faceVertexIndices = [0, 1, 2, 3]\n"
+               "    point3f[] points = [(-4, -4, -4), (4, -4, -4), (4, 4, -4), (-4, 4, -4)]\n"
+               "    color3f[] primvars:displayColor = [(0.8, 0.8, 0.8)]\n"
+               "    uniform token subdivisionScheme = \"none\"\n}\n"
+               "def DistantLight \"Sun\"\n{\n"
+               "    float inputs:intensity = 3\n    float inputs:angle = 0\n"
+               "    bool inputs:shadow:enable = 0\n}\n";
+        if (volume) {
+            out << "def Volume \"Box\"\n{\n"
+                   "    double3 xformOp:translate = (0, -1.6, -3.8)\n"
+                   "    uniform token[] xformOpOrder = [\"xformOp:translate\"]\n"
+                   "    rel field:density = </Box/density>\n"
+                   "    float primvars:lrt:densityScale = 1\n"
+                   "    color3f primvars:lrt:albedo = (0, 0, 0)\n"
+                   "    def OpenVDBAsset \"density\"\n    {\n"
+                   "        asset filePath = @" << vdb.string() << "@\n"
+                   "        token fieldName = \"density\"\n    }\n}\n";
+        }
+        return path;
+    };
+    const uint32_t w = 161;
+    const uint32_t h = 121;
+    render::Camera camera = render::Camera::lookingAt({0.0, 0.0, 0.0}, {0.0, 0.0, -1.0});
+    camera.lens.focal = 35.0;
+    const render::Projection projection = render::projectionFor(camera, w, h);
+    constexpr uint32_t kPaths = 1024;
+    const auto render = [&](bool volume) {
+        auto renderer = usd::StageRenderer::open(stage(volume));
+        if (!renderer) FAIL(renderer.error().toString());
+        (*renderer)->setPathSamples(256);
+        (*renderer)->setPathBounces(0);
+        (*renderer)->setPathTotal(kPaths);
+        auto image = (*renderer)->render(camera, 0.0, w, h, "rt");
+        if (!image) FAIL(image.error().toString());
+        gpu::BufferDesc desc;
+        desc.bytes = image->rgba.size() * 4;
+        desc.elementBytes = 16;
+        auto made = gpu::Buffer::create(*gpu->device, desc, image->rgba.data());
+        REQUIRE(made);
+        if (volume) test::dumpPpm("volume_hydra", image->rgba.data(), w, h);
+        return std::move(*made);
+    };
+    gpu::Buffer without = render(false);
+    gpu::Buffer with = render(true);
+    auto made = gpu::ComputeKernel::create(*gpu->library, "lrt/test/volume_render_check", "volumeRenderCheck");
+    if (!made) FAIL(made.error().toString());
+    gpu::Buffer counts = test::uintBuffer(*gpu->device, 5, "volume.hydra.counts");
+    gpu::Buffer sums = test::uintBuffer(*gpu->device, 4, "volume.hydra.sums");
+    {
+        gpu::CommandBatch batch(*gpu->device);
+        made->dispatch(batch, {1, 1, 1}, [&](rhi::ShaderCursor c) {
+            technique::setCamera(c["camera"], projection, w, h);
+            const std::array<float, 12> rows = aofx::xform::inverseAffine(projection.worldToView).rows3x4();
+            c["toWorld"]["row0"].setData(rows.data(), sizeof(float) * 4);
+            c["toWorld"]["row1"].setData(rows.data() + 4, sizeof(float) * 4);
+            c["toWorld"]["row2"].setData(rows.data() + 8, sizeof(float) * 4);
+            const float boxMin[3] = {0.0F, -1.6F, -3.8F};
+            const float boxMax[3] = {3.2F, 1.6F, -0.6F};
+            const float towardLight[3] = {0.0F, 0.0F, 1.0F};
+            c["check"]["boxMin"].setData(boxMin, sizeof(boxMin));
+            c["check"]["boxMax"].setData(boxMax, sizeof(boxMax));
+            c["check"]["towardLight"].setData(towardLight, sizeof(towardLight));
+            c["check"]["planeZ"].setData(-4.0F);
+            c["check"]["sigma"].setData(0.5F);
+            c["check"]["paths"].setData(static_cast<float>(kPaths));
+            c["check"]["deviations"].setData(5.0F);
+            c["check"]["shadows"].setData(uint32_t{0});
+            c["with"].setBinding(with.rhi());
+            c["without"].setBinding(without.rhi());
+            c["counts"].setBinding(counts.rhi());
+            c["zBits"].setBinding(sums.rhi());
+        });
+        REQUIRE(batch.submit(true));
+    }
+    uint32_t n[5] = {};
+    float s[4] = {};
+    REQUIRE(counts.read(*gpu->device, 0, sizeof(n), n));
+    REQUIRE(sums.read(*gpu->device, 0, sizeof(s), s));
+    const double meanSquare = n[0] > 0 ? s[0] / n[0] : 0.0;
+    std::printf("  through Hydra: %u pixels through the box, %u beyond 5 binomial deviations, mean z^2 %.3f, mean "
+                "ratio %.4f against %.4f; %u outside, %u changed; %u uncovered\n",
+                n[0], n[1], meanSquare, n[0] ? s[1] / n[0] : 0.0F, n[0] ? s[2] / n[0] : 0.0F, n[2], n[3], n[4]);
+    CHECK(n[0] > 3000);
+    CHECK(n[1] == 0);
+    CHECK(meanSquare > 0.7);
+    CHECK(meanSquare < 1.3);
+    CHECK(n[2] > 3000);
+    CHECK(n[3] == 0);
 }

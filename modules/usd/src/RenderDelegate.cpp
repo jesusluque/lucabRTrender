@@ -30,6 +30,7 @@
 #include "RenderBuffer.h"
 #include "RenderPass.h"
 #include "RenderSettings.h"
+#include "Volume.h"
 #include "lrt/core/Log.h"
 
 PXR_NAMESPACE_OPEN_SCOPE
@@ -181,7 +182,8 @@ void HdLrtRenderDelegate::_Setup() {
 
 TfTokenVector const& HdLrtRenderDelegate::GetSupportedRprimTypes() const {
     static const TfTokenVector types{HdPrimTypeTokens->mesh, HdPrimTypeTokens->particleField,
-                                     HdPrimTypeTokens->points, HdPrimTypeTokens->basisCurves};
+                                     HdPrimTypeTokens->points, HdPrimTypeTokens->basisCurves,
+                                     HdPrimTypeTokens->volume};
     return types;
 }
 
@@ -200,7 +202,8 @@ TfTokenVector HdLrtRenderDelegate::GetMaterialRenderContexts() const {
 }
 
 TfTokenVector const& HdLrtRenderDelegate::GetSupportedBprimTypes() const {
-    static const TfTokenVector types{HdPrimTypeTokens->renderBuffer, HdPrimTypeTokens->renderSettings};
+    static const TfTokenVector types{HdPrimTypeTokens->renderBuffer, HdPrimTypeTokens->renderSettings,
+                                     TfToken("openvdbAsset")};
     return types;
 }
 
@@ -379,6 +382,9 @@ HdRprim* HdLrtRenderDelegate::CreateRprim(TfToken const& typeId, SdfPath const& 
     if (typeId == HdPrimTypeTokens->mesh) {
         return new HdLrtMesh(id);
     }
+    if (typeId == HdPrimTypeTokens->volume) {
+        return new HdLrtVolume(id);
+    }
     return nullptr;
 }
 
@@ -433,12 +439,18 @@ HdBprim* HdLrtRenderDelegate::CreateBprim(TfToken const& typeId, SdfPath const& 
     if (typeId == HdPrimTypeTokens->renderSettings) {
         return new HdLrtRenderSettings(id);
     }
+    if (typeId == TfToken("openvdbAsset")) {
+        return new HdLrtVolumeField(id);
+    }
     return typeId == HdPrimTypeTokens->renderBuffer ? new HdLrtRenderBuffer(id, _engine.get()) : nullptr;
 }
 
 HdBprim* HdLrtRenderDelegate::CreateFallbackBprim(TfToken const& typeId) {
     if (typeId == HdPrimTypeTokens->renderSettings) {
         return new HdLrtRenderSettings(SdfPath::EmptyPath());
+    }
+    if (typeId == TfToken("openvdbAsset")) {
+        return new HdLrtVolumeField(SdfPath::EmptyPath());
     }
     return typeId == HdPrimTypeTokens->renderBuffer ? new HdLrtRenderBuffer(SdfPath::EmptyPath(), _engine.get())
                                                     : nullptr;

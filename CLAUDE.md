@@ -15,7 +15,7 @@ cmake --build build/macos-arm64-debug --target lrt_render_tests   # one test bin
 ```
 
 - **Test binaries** are `lrt_<area>_tests` (gpu, scene, render, geom,
-  material, technique, lod, usd, view, gpu_host, aofx, sched), from
+  material, technique, lod, volume, usd, view, gpu_host, aofx, sched), from
   `tests/<area>/`.
   `lrt_storm_oracle_tests` compares Hydra outputs with Storm's; it needs
   `HDX_MSAA_SAMPLE_COUNT=1` in the environment, which ctest sets.
