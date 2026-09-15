@@ -16,7 +16,9 @@ cmake --build build/macos-arm64-debug --target lrt_render_tests   # one test bin
 
 - **Test binaries** are `lrt_<area>_tests` (gpu, scene, render, geom,
   material, technique, lod, volume, usd, view, gpu_host, aofx, sched), from
-  `tests/<area>/`.
+  `tests/<area>/`. `lrt_host_tests` (tests/usd/test_host.cpp) drives the
+  plugin through `UsdImagingGLEngine` and deliberately links no `lrt::usd`,
+  so the delegate's classes exist only in the plugin.
   `lrt_storm_oracle_tests` compares Hydra outputs with Storm's; it needs
   `HDX_MSAA_SAMPLE_COUNT=1` in the environment, which ctest sets.
 - **Timings** are medians of `lrt stage --frames` and `lrt view --frames`
@@ -83,7 +85,7 @@ the ones above it.
 | world | `GpuScene` (vertex/index/primvar pools, instance records), `Instancing` (Hydra instancer chains), `RayTracingScene` (BLAS/TLAS), `BvhScene` (two-level compute LBVH) |
 | material | `TextureStore` (decode, mips, UDIM, the texture table), `MaterialCompiler` (MaterialX graphs into Slang), the lobe library |
 | light | UsdLux lights on the device: a record per light, and how a shading point samples one |
-| technique | how a frame is drawn: `VisibilityRaster` / `VisibilityTrace` / `VisibilityBvh` (same ids), `HeadlightShading`, `AovShading`, `Denoiser` (OIDN on the engine's own Metal queue) |
+| technique | how a frame is drawn: `VisibilityRaster` / `VisibilityTrace` / `VisibilityBvh` (same ids), `HeadlightShading`, `AovShading`, `Denoiser` (OIDN on the engine's own queue: Metal, CUDA, and Vulkan through CUDA with imported memory), `DisplayTransform` (view transforms, and OpenColorIO compiled into a kernel) |
 | lod | `LodBuilder`, `CutSelector`; `Lrtc.h` for the `.lrtc` reader/writer and `StreamingPool` |
 | usd | `Engine`, `StageRenderer`, `Export`; the `hdLrt` plugin; codeless schemas in `modules/usd/schemas` |
 | aofx | openFXplayer's plugin SDK (ABI 23) and host |

@@ -1703,6 +1703,14 @@ host. What that took, in the order it was found:
   seeded from the input, so the alpha that comes back is the input's.
 - On CUDA the engine's buffers are shared directly (`oidnNewSharedBuffer` on
   the pointer); no staging, no copies.
+- On Vulkan OIDN has no device of its own, so it runs on the same GPU through
+  CUDA and imports the staging buffers' memory: they are created
+  `BufferUsage::Shared`, slang-rhi exports an opaque file descriptor
+  (`getSharedHandle`), and `oidnNewSharedBufferFromFD` takes a duplicate of
+  it -- OIDN owns the descriptor it is given, slang-rhi keeps its own. The
+  copies in and out are Metal's kernels. `create` refuses where the CUDA
+  device reports no `OPAQUE_FD` in `externalMemoryTypes` rather than
+  producing a wrong image.
 
 **Checked**: sixteen paths against a 4096-path reference, relMSE 3.65e-4
 noisy, **7.17e-5** denoised with the first hit's albedo and normal, 6.27e-5
