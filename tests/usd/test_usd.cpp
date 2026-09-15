@@ -3995,6 +3995,89 @@ TEST_CASE("shadow rays over an unoccluded floor change nothing through Hydra, ra
 }
 
 
+// A light's shadowLink collection through Hydra: an occluder between a
+// sphere light and a floor, both out of the camera's view, so the only
+// thing the occluder can change in the image is the shadow. With the
+// collection left to include everything the floor is shadowed; with a
+// membership expression naming the floor alone the occluder casts nothing,
+// and the frame is bit for bit the frame without the occluder -- under
+// the raster's shading and under the path tracer's direct light alike.
+TEST_CASE("a UsdLux light's shadowLink collection decides what casts its shadow",
+          "[usd][gpu][mesh][lights][linking][shadows]") {
+    LRT_REQUIRE_GPU(gpu);
+    const gpu::Caps& caps = gpu->device->caps();
+    if (!caps.rasterization || !caps.rayQuery || !caps.accelerationStructure) {
+        SKIP("needs rasterisation and ray queries");
+    }
+    enum class Occluder { None, Casting, Unlinked };
+    const auto stage = [&](Occluder occluder) {
+        const char* names[] = {"shadow_link_none.usda", "shadow_link_casting.usda", "shadow_link_unlinked.usda"};
+        const fs::path path = scratch(names[int(occluder)]);
+        std::ofstream out(path);
+        out << "#usda 1.0\n(\n    upAxis = \"Y\"\n)\n"
+               "def Mesh \"Floor\"\n{\n"
+               "    int[] faceVertexCounts = [4]\n"
+               "    int[] faceVertexIndices = [0, 1, 2, 3]\n"
+               "    point3f[] points = [(-6, -1, -2), (6, -1, -2), (6, -1, -14), (-6, -1, -14)]\n"
+               "    color3f[] primvars:displayColor = [(0.8, 0.8, 0.8)]\n"
+               "    uniform token subdivisionScheme = \"none\"\n}\n";
+        if (occluder != Occluder::None) {
+            // Above the top of the frame (it ends 0.9 degrees above the
+            // horizon; this is 3.6 degrees up), below the light.
+            out << "def Mesh \"Occluder\"\n{\n"
+                   "    int[] faceVertexCounts = [4]\n"
+                   "    int[] faceVertexIndices = [0, 1, 2, 3]\n"
+                   "    point3f[] points = [(-1, 2, -7), (1, 2, -7), (1, 2, -9), (-1, 2, -9)]\n"
+                   "    uniform token subdivisionScheme = \"none\"\n}\n";
+        }
+        out << "def SphereLight \"Key\"\n{\n"
+               "    float inputs:intensity = 40\n    float inputs:radius = 0.3\n"
+               "    double3 xformOp:translate = (0, 3, -8)\n"
+               "    uniform token[] xformOpOrder = [\"xformOp:translate\"]\n";
+        if (occluder == Occluder::Unlinked) {
+            out << "    uniform token collection:shadowLink:mode = \"expression\"\n"
+                   "    uniform pathExpression collection:shadowLink:membershipExpression = \"/Floor\"\n";
+        }
+        out << "}\n"
+               "def Camera \"Camera\"\n{\n"
+               "    float focalLength = 24\n"
+               "    float horizontalAperture = 24.576\n    float verticalAperture = 16.384\n"
+               "    float2 clippingRange = (0.1, 1000)\n"
+               "    double3 xformOp:translate = (0, 1.5, 0)\n"
+               "    double xformOp:rotateX = -18\n"
+               "    uniform token[] xformOpOrder = [\"xformOp:translate\", \"xformOp:rotateX\"]\n}\n";
+        return path;
+    };
+    const uint32_t w = 96, h = 64;
+    for (const char* technique : {"raster", "rt"}) {
+        const auto render = [&](Occluder occluder) {
+            auto renderer = usd::StageRenderer::open(stage(occluder));
+            if (!renderer) FAIL(renderer.error().toString());
+            (*renderer)->setPathSamples(16);
+            (*renderer)->setPathBounces(0);
+            auto image = (*renderer)->render("/Camera", 0.0, w, h, technique);
+            if (!image) FAIL(image.error().toString());
+            gpu::BufferDesc desc;
+            desc.bytes = image->rgba.size() * 4;
+            desc.elementBytes = 16;
+            auto made = gpu::Buffer::create(*gpu->device, desc, image->rgba.data());
+            REQUIRE(made);
+            return std::move(*made);
+        };
+        gpu::Buffer none = render(Occluder::None);
+        gpu::Buffer casting = render(Occluder::Casting);
+        gpu::Buffer unlinked = render(Occluder::Unlinked);
+        auto shadowed = render::countDifferent(*gpu->library, casting, none, w * h * 4);
+        auto ignored = render::countDifferent(*gpu->library, unlinked, none, w * h * 4);
+        REQUIRE(shadowed);
+        REQUIRE(ignored);
+        std::printf("  %-6s: occluder in the shadow link changes %llu words, outside it %llu, of %u\n", technique,
+                    static_cast<unsigned long long>(*shadowed), static_cast<unsigned long long>(*ignored), w * h * 4);
+        CHECK(*shadowed > 200);
+        CHECK(*ignored == 0);
+    }
+}
+
 // Volumes through Hydra (M9): a UsdVolVolume whose density field is a
 // UsdVolOpenVDBAsset, between the camera and a sun-lit plane, rendered by
 // the rt technique. The volume's constant primvars make it absorb

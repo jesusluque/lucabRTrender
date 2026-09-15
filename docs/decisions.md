@@ -1439,8 +1439,13 @@ enough that what is left is the light and not the noise.
   where it projects, and with it naming another the plane is lit as if
   nothing were there -- 0 pixels of 7440 away from the closed form either
   way. From USD a shadow link comes through the same filter as a light
-  link, which was missing for the reason found at M9 (above); no USD case
-  for shadow links is written, so that half is not checked.
+  link, which was missing for the reason found at M9 (above). Checked from
+  USD too ("a UsdLux light's shadowLink collection decides what casts its
+  shadow"): a sphere light and an occluder, both above the frame, over a
+  floor. With the collection left whole the occluder's shadow changes 9108
+  words of 24576 under raster and 12396 under rt (no bounces); with
+  `collection:shadowLink` naming `/Floor` alone the frame is bit for bit
+  the frame without the occluder, 0 words, under both.
 - **Light instancing arrived with M6**, below. (So did the cylinder and IES
   profiles.)
 - **Splats are relit where their prim asks**, and baked everywhere else.
