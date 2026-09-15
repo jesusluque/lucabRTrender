@@ -49,7 +49,9 @@ Result<LightTable> LightTable::create(gpu::ShaderLibrary& library) {
     bvhKernels.sort_.emplace(std::move(*sort));
     table.prefix_.emplace(std::move(*prefix));
     table.iesPrepare_.emplace(std::move(*iesPrepare));
-    table.instances_.emplace(std::move(*instances));    table.bvhLeaves_ = std::move(bvhKernels.bvhLeaves_);
+    table.instances_.emplace(std::move(*instances));
+    LRT_TRY(make(table.instancesMotion_, "lrt/light/light_instances", "lightInstancesMotion"));
+    table.bvhLeaves_ = std::move(bvhKernels.bvhLeaves_);
     table.bvhPack_ = std::move(bvhKernels.bvhPack_);
     table.bvhParents_ = std::move(bvhKernels.bvhParents_);
     table.bvhSettle_ = std::move(bvhKernels.bvhSettle_);
@@ -122,6 +124,8 @@ Result<void> LightTable::set(std::span<const Light> lights, float sceneRadius) {
         uint32_t           base;
         uint32_t           count;
         const gpu::Buffer* rows;
+        const gpu::Buffer* rowsStart;   ///< the chain at the shutter's samples; null: it stands
+        const gpu::Buffer* rowsEnd;
     };
     std::vector<Expansion> expansions;
     std::vector<const io::IesProfile*> profiles;
@@ -154,7 +158,8 @@ Result<void> LightTable::set(std::span<const Light> lights, float sceneRadius) {
         }
         if (light.instanceRows != nullptr && light.instanceCount > 0) {
             // Once per instance; the placements are the device's to write.
-            expansions.push_back({static_cast<uint32_t>(records.size()), light.instanceCount, light.instanceRows});
+            expansions.push_back({static_cast<uint32_t>(records.size()), light.instanceCount, light.instanceRows,
+                                  light.instanceRowsStart, light.instanceRowsEnd});
             records.insert(records.end(), light.instanceCount, record);
         } else {
             records.push_back(record);
@@ -185,21 +190,39 @@ Result<void> LightTable::set(std::span<const Light> lights, float sceneRadius) {
     // Moving lights, after the nodes: for every record its rows at the two
     // shutter samples and their times -- a still record's times equal, which
     // is how the path tracer tells it stands. Only where something moves.
-    anyMoves_ = std::any_of(lights.begin(), lights.end(),
-                            [](const Light& l) { return l.moves && (l.instanceRows == nullptr || l.instanceCount == 0); });
+    // An instanced light's copies hold the prototype's rows here, which a
+    // kernel places by the chain at each sample, as the frame's records are.
+    anyMoves_ = std::any_of(lights.begin(), lights.end(), [](const Light& l) { return l.movesUnderShutter(); });
     motionBase_ = 0;
+    struct MotionExpansion {
+        uint32_t           at;        ///< the first copy's floats
+        uint32_t           count;
+        const gpu::Buffer* rowsStart;
+        const gpu::Buffer* rowsEnd;
+    };
+    std::vector<MotionExpansion> motionExpansions;
     if (anyMoves_) {
         motionBase_ = static_cast<uint32_t>(iesValues.size());
         for (const Light& light : lights) {
-            const uint32_t copies = light.instanceRows != nullptr && light.instanceCount > 0 ? light.instanceCount : 1u;
-            const bool moving = light.moves && copies == 1;
-            const std::array<float, 12> start = (moving ? light.lightToWorldStart : light.lightToWorld).rows3x4();
-            const std::array<float, 12> end = (moving ? light.lightToWorldEnd : light.lightToWorld).rows3x4();
+            const bool instanced = light.instanceRows != nullptr && light.instanceCount > 0;
+            const uint32_t copies = instanced ? light.instanceCount : 1u;
+            const bool moving = light.movesUnderShutter();
+            const bool chainMoves = instanced && light.instanceRowsStart != nullptr && light.instanceRowsEnd != nullptr;
+            const std::array<float, 12> start = (light.moves ? light.lightToWorldStart : light.lightToWorld).rows3x4();
+            const std::array<float, 12> end = (light.moves ? light.lightToWorldEnd : light.lightToWorld).rows3x4();
+            // The chain's times where the chain moves, as a mesh's; else the light's.
+            const float t0 = !moving ? 0.0F : chainMoves ? light.instanceTimeStart : light.timeStart;
+            const float t1 = !moving ? 0.0F : chainMoves ? light.instanceTimeEnd : light.timeEnd;
+            if (instanced && moving) {
+                motionExpansions.push_back({static_cast<uint32_t>(iesValues.size()), copies,
+                                            chainMoves ? light.instanceRowsStart : light.instanceRows,
+                                            chainMoves ? light.instanceRowsEnd : light.instanceRows});
+            }
             for (uint32_t c = 0; c < copies; ++c) {
                 iesValues.insert(iesValues.end(), start.begin(), start.end());
                 iesValues.insert(iesValues.end(), end.begin(), end.end());
-                iesValues.push_back(moving ? light.timeStart : 0.0F);
-                iesValues.push_back(moving ? light.timeEnd : 0.0F);
+                iesValues.push_back(t0);
+                iesValues.push_back(t1);
             }
         }
     }
@@ -223,6 +246,19 @@ Result<void> LightTable::set(std::span<const Light> lights, float sceneRadius) {
             cursor["iesValues"].setBinding(iesValues_.rhi());
             cursor["iesCount"].setData(iesCount_);
         });
+        LRT_TRY(batch.submit(true));
+    }
+    if (!motionExpansions.empty()) {
+        gpu::CommandBatch batch(*device_);
+        for (const MotionExpansion& e : motionExpansions) {
+            instancesMotion_->dispatch(batch, {e.count, 1, 1}, [&](rhi::ShaderCursor cursor) {
+                cursor["motionValues"].setBinding(iesValues_.rhi());
+                cursor["chainRowsStart"].setBinding(e.rowsStart->rhi());
+                cursor["chainRowsEnd"].setBinding(e.rowsEnd->rhi());
+                cursor["motionAt"].setData(e.at);
+                cursor["count"].setData(e.count);
+            });
+        }
         LRT_TRY(batch.submit(true));
     }
     if (records.empty()) {

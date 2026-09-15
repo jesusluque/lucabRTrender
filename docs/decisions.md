@@ -2163,7 +2163,19 @@ own filtering scene index when the shutter it reads differs from the one
 the prims were sampled about -- meshes, instancers, lights and the camera
 alike -- and the frame after the edit is bit for bit the authored stage's.
 
-**Not done.** An instanced light does not move. A host driving the plugin
+**Instanced lights move.** A light under an instancer composes its chain
+at the shutter's samples as a mesh does (`composeChains`, one helper for
+both now), and the table writes each copy's 26 floats as the prototype's
+rows at the two samples; `lightInstancesMotion` places them by the chain's
+rows at the same samples on the device, as `lightInstances` places the
+frame's. The times are the chain's where it moves, the light's where only
+the prototype does. Checked in the moving light's test: the bulb as a
+`PointInstancer` prototype whose one position slides 0 -> 2, against the
+bulb's own transform sliding so -- relMSE 0, max 0; with the chain's
+samples withheld the instanced frame parted from it by 3.1e-4, the still
+light's distance.
+
+**Not done.** A host driving the plugin
 itself (not `StageRenderer`) has only the pass's tracker marks when its
 camera's shutter changes. The raster technique draws the
 frame's time, no blur. A turn between the two shutter samples is
@@ -3337,9 +3349,14 @@ in opposite places.**
   viewed as another format, which slang-rhi does not ask for.
 
 So the packed route trades a CUDA bug for a Metal one, and was reverted after
-being measured; Metal is back to its 451 assertions exactly. What is left is
-to decode into a buffer and copy the buffer into the texture, which asks
-neither backend to reinterpret anything. That is not attempted here.
+being measured; Metal is back to its 451 assertions exactly.
+
+**What the texture store does about it.** `Caps::unormStores` says whether
+the store converts, false on CUDA, and the probe checks the capability tells
+the truth either way -- on CUDA that the texel is *not* the colour. Where it
+is false the store holds 8-bit images in `RGBA16Float`, decoded to light
+when sRGB like 16-bit images, and mips average them as floats: twice the
+memory for an 8-bit image, on CUDA only, and no store asked to convert.
 
 `lrt_gpu_tests` keeps the probes that establish all of the above, and they
 pass on both backends bar the one that names the defect.
@@ -3481,9 +3498,9 @@ a WebGPU build would take the engine's records, not Hydra's prims.
 
 ### Not done
 
-- The texture surface write: an 8-bit texture written as float4 needs either a
-  target the backend converts into or a store that converts itself. Until then
-  every test that shades through a decoded 8-bit image is wrong here.
+- The texture surface write itself on CUDA: 8-bit images go into half-float
+  textures there instead (`Caps::unormStores`), which costs memory, not
+  pixels.
 - A release build and any timing beyond the sort's own.
 - gpe on Vulkan: gpe has no Vulkan backend, so its tests and aofx's host
   run on CUDA and Metal only.

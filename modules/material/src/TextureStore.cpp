@@ -177,8 +177,10 @@ Result<uint32_t> TextureStore::loadFile(const std::string& path, ColourSpace spa
     info.height = h;
 
     // 8-bit sRGB stays 8-bit behind an sRGB view; anything else sRGB is
-    // decoded to light; floats keep their precision.
-    const bool eightBit = layout.component == 0;
+    // decoded to light; floats keep their precision. A device whose store
+    // into an 8-bit texture does not convert (CUDA) holds 8-bit images as
+    // half floats, decoded to light like the rest.
+    const bool eightBit = layout.component == 0 && device_->caps().unormStores;
     gpu::TextureDesc desc;
     desc.width = w;
     desc.height = h;

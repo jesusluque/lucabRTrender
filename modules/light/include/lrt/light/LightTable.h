@@ -66,10 +66,24 @@ struct Light {
     /// record once per instance and a kernel places each copy.
     const gpu::Buffer* instanceRows = nullptr;
     uint32_t     instanceCount = 0;
+    /// Under a shutter, when an instancer in the chain moves: the chain's
+    /// rows at the samples bracketing it, and when those are. The copies are
+    /// placed between them as `instanceRows` places them at the frame.
+    const gpu::Buffer* instanceRowsStart = nullptr;
+    const gpu::Buffer* instanceRowsEnd = nullptr;
+    float        instanceTimeStart = 0.0F;
+    float        instanceTimeEnd = 1.0F;
+    /// Whether the path tracer places this light between shutter samples:
+    /// the light itself moves, or the instancer chain above it does.
+    [[nodiscard]] bool movesUnderShutter() const noexcept {
+        return moves || (instanceRows != nullptr && instanceCount > 0 && instanceRowsStart != nullptr &&
+                         instanceRowsEnd != nullptr);
+    }
     /// Under a shutter, when the light moves: its transform at the samples
     /// bracketing it, and when those are (in the shutter's units). The
     /// record keeps `lightToWorld`, the frame's; the path tracer's samples
-    /// place the light between these. Not for an instanced light.
+    /// place the light between these. Under an instancer, the copies take
+    /// these as the prototype's own at the samples.
     bool         moves = false;
     render::Mat4 lightToWorldStart = render::Mat4::identity();
     render::Mat4 lightToWorldEnd = render::Mat4::identity();
@@ -191,6 +205,7 @@ private:
     gpu::Buffer  records_;
     std::optional<gpu::ComputeKernel> prefix_;   ///< light_prefix: each light's cumulative share, on the device
     std::optional<gpu::ComputeKernel> iesPrepare_;   ///< ies_prepare: each profile's power
+    std::optional<gpu::ComputeKernel> instancesMotion_;   ///< light_instances: a moving instanced light's samples
     std::optional<gpu::ComputeKernel> instances_;    ///< light_instances: an instanced light's placements
     gpu::Buffer  iesRecords_;
     gpu::Buffer  iesValues_;

@@ -3429,7 +3429,9 @@ TEST_CASE("a light moving under the shutter lights and shadows as the scene movi
     // SceneMoves: the light stands at x 1 and the camera, floor and occluder
     // slide x 1 -> -1, so that everything less the light is -2t either way.
     // Still: the light at its frame position, x 1, nothing moving.
-    enum class Arrangement { LightMoves, SceneMoves, Still };
+    // InstancedMoves: LightMoves with the light a PointInstancer's prototype,
+    // its one position sliding x 0 -> 2 instead of the light's transform.
+    enum class Arrangement { LightMoves, SceneMoves, Still, InstancedMoves };
     const auto stage = [&](const char* name, Arrangement arrangement) {
         const fs::path path = scratch(name);
         std::ofstream out(path);
@@ -3456,15 +3458,26 @@ TEST_CASE("a light moving under the shutter lights and shadows as the scene movi
                "    point3f[] points = [(-0.5, 0.2, -4.5), (0.5, 0.2, -4.5), (0.5, 0.2, -5.5), (-0.5, 0.2, -5.5)]\n"
                "    uniform token subdivisionScheme = \"none\"\n"
                "    color3f[] primvars:displayColor = [(0.8, 0.8, 0.8)] ( interpolation = \"constant\" )\n"
-            << slide("(1, 0, 0)", "(-1, 0, 0)") << "}\n"
-            << "def SphereLight \"Bulb\"\n{\n    float inputs:intensity = 30\n    float inputs:radius = 0.2\n";
-        if (arrangement == Arrangement::LightMoves) {
-            out << "    double3 xformOp:translate.timeSamples = {\n        0: (0, 2, -5),\n        1: (2, 2, -5),\n    }\n";
+            << slide("(1, 0, 0)", "(-1, 0, 0)") << "}\n";
+        if (arrangement == Arrangement::InstancedMoves) {
+            out << "def PointInstancer \"Many\"\n{\n"
+                   "    rel prototypes = [</Many/Prototypes/Bulb>]\n"
+                   "    int[] protoIndices = [0]\n"
+                   "    point3f[] positions.timeSamples = {\n        0: [(0, 2, -5)],\n        1: [(2, 2, -5)],\n    }\n"
+                   "    def Scope \"Prototypes\"\n    {\n"
+                   "        def SphereLight \"Bulb\"\n        {\n"
+                   "            float inputs:intensity = 30\n            float inputs:radius = 0.2\n"
+                   "        }\n    }\n}\n";
         } else {
-            out << "    double3 xformOp:translate = (1, 2, -5)\n";
+            out << "def SphereLight \"Bulb\"\n{\n    float inputs:intensity = 30\n    float inputs:radius = 0.2\n";
+            if (arrangement == Arrangement::LightMoves) {
+                out << "    double3 xformOp:translate.timeSamples = {\n        0: (0, 2, -5),\n        1: (2, 2, -5),\n    }\n";
+            } else {
+                out << "    double3 xformOp:translate = (1, 2, -5)\n";
+            }
+            out << "    uniform token[] xformOpOrder = [\"xformOp:translate\"]\n}\n";
         }
-        out << "    uniform token[] xformOpOrder = [\"xformOp:translate\"]\n}\n"
-               "def Camera \"Camera\"\n{\n"
+        out << "def Camera \"Camera\"\n{\n"
                "    float focalLength = 24\n"
                "    float horizontalAperture = 24.576\n    float verticalAperture = 18.432\n"
                "    float2 clippingRange = (0.1, 1000)\n"
@@ -3497,10 +3510,16 @@ TEST_CASE("a light moving under the shutter lights and shadows as the scene movi
     const gpu::Buffer lightMoves = frame(stage("light_moves.usda", Arrangement::LightMoves));
     const gpu::Buffer sceneMoves = frame(stage("light_moves_scene.usda", Arrangement::SceneMoves));
     const gpu::Buffer still = frame(stage("light_still.usda", Arrangement::Still));
+    const gpu::Buffer instancedMoves = frame(stage("light_moves_instanced.usda", Arrangement::InstancedMoves));
     auto same = render::compareHdr(*gpu->library, lightMoves, sceneMoves, w, h);
     auto moved = render::compareHdr(*gpu->library, lightMoves, still, w, h);
+    auto instanced = render::compareHdr(*gpu->library, instancedMoves, lightMoves, w, h);
     REQUIRE(same);
     REQUIRE(moved);
+    REQUIRE(instanced);
+    std::printf("  an instancer moving its light against the light moving: relMSE %.2e (max relative %.2e)\n",
+                instanced->relMse, instanced->maxRelative);
+    CHECK(instanced->relMse < moved->relMse / 1000.0);
     std::printf("  a moving light against the scene moving the other way: relMSE %.2e (p99 relative %.2e); against the "
                 "light still %.2e\n",
                 same->relMse, same->p99Relative, moved->relMse);

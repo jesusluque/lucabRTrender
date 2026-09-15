@@ -362,6 +362,10 @@ private:
         light::Light               lamp;
         std::vector<InstancerLink> instancing;
         world::InstanceChain       chain;
+        world::InstanceChain       chainStart;       ///< as a mesh's: where an instancer in the chain moves
+        world::InstanceChain       chainEnd;
+        double                     chainTimeStart = 0.0;
+        double                     chainTimeEnd = 0.0;
         std::vector<uint64_t>      chainVersions;
         bool                       chainDirty = false;
     };
