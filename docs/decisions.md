@@ -2711,9 +2711,18 @@ by the object-to-view determinant, which covers mirrored instances too.
 radiance 1 reads 0.18 at every pixel (worst 1.7e-5 relative) with computed
 and with authored normals, raster and rt; without the fix the authored
 case is 1.09 off, the computed one passes -- as the cause says. The whole
-suite passes with the sign; nothing depended on it. **Not checked**: the
-dielectric's `inside`, which read the same flipped test, has no fixture
-through a camera.
+suite passes with the sign; nothing depended on it.
+
+The dielectric's `inside`, which read the same flipped test, is checked
+through a camera on a closed cube (`inside_check.slang`, "a closed mesh is
+inside only where it is seen from within"): every covered pixel's
+`MaterialInputs` counted, with the camera outside the cube and within it,
+the cube plain, mirrored, and authored left-handed. Outside: 7078 pixels, 0
+inside; within: all 7081 inside; the shading normal handed to the material
+faces the eye at every pixel of the six. Without the sign the plain and
+left-handed cubes invert exactly (7078 inside from outside, 0 from within)
+and the mirrored one reads right, its reflection cancelling the view's --
+which is why no mirrored fixture could have caught it.
 
 ### A dome's share of the lights' power ignored the scene's size
 

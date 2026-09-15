@@ -9,6 +9,7 @@
 
 #include "lrt/geom/Mesh.h"
 #include "lrt/render/ReferenceRenderer.h"
+#include "lrt/technique/MaterialPrograms.h"
 #include "lrt/technique/Visibility.h"
 #include "lrt/world/GpuScene.h"
 #include "lrt/world/Instancing.h"
@@ -436,6 +437,102 @@ TEST_CASE("a single-sided mesh shows its front only, mirrored or not", "[techniq
     CHECK(backTwoSided == front);
     CHECK(mirroredFront == front);
     CHECK(mirroredBack == 0);
+}
+
+// A dielectric turns its IOR on the side a pixel sees, and the shading
+// normal it is handed must face the eye. Both come from the geometric normal
+// in view space, whose sign a transform of negative determinant -- the view
+// is one -- reverses: before that was accounted for, every front face read
+// as inside. A closed cube is the case with an answer: from outside no pixel
+// is inside, from within every one is, mirrored or authored left-handed.
+TEST_CASE("a closed mesh is inside only where it is seen from within, mirrored or left-handed",
+          "[technique][visibility][inside]") {
+    LRT_REQUIRE_GPU(gpu);
+    if (!gpu->device->caps().rasterization) {
+        SKIP("no rasterisation on this device");
+    }
+    auto r = renderer(*gpu);
+    const uint32_t w = 97;
+    const uint32_t h = 73;
+    const auto cube = [&](bool leftHanded) {
+        static std::vector<float> points;
+        points = {-1, -1, -1, 1, -1, -1, 1, 1, -1, -1, 1, -1, -1, -1, 1, 1, -1, 1, 1, 1, 1, -1, 1, 1};
+        static const std::vector<int32_t> counts{4, 4, 4, 4, 4, 4};
+        // Counter-clockwise seen from outside; the left-handed cube lists
+        // each face the other way round, so its outside is the same.
+        static const std::vector<int32_t> rightIndices{4, 5, 6, 7, 0, 3, 2, 1, 1, 2, 6, 5,
+                                                       0, 4, 7, 3, 3, 7, 6, 2, 0, 1, 5, 4};
+        static const std::vector<int32_t> leftIndices{7, 6, 5, 4, 1, 2, 3, 0, 5, 6, 2, 1,
+                                                      3, 7, 4, 0, 2, 6, 7, 3, 4, 5, 1, 0};
+        geom::MeshInput in;
+        in.source = leftHanded ? "cube left" : "cube";
+        in.points = {std::as_bytes(std::span<const float>(points)), false};
+        in.faceVertexCounts = counts;
+        in.faceVertexIndices = leftHanded ? leftIndices : rightIndices;
+        in.leftHanded = leftHanded;
+        in.smoothNormals = false;
+        auto mesh = r->builder.build(in);
+        if (!mesh) FAIL(mesh.error().toString());
+        return std::make_shared<const geom::GpuMesh>(std::move(*mesh));
+    };
+    const auto right = cube(false);
+    const auto left = cube(true);
+    auto check = gpu::ComputeKernel::create(*gpu->library, "lrt/test/inside_check", "insideCheck");
+    if (!check) FAIL(check.error().toString());
+    struct Seen {
+        uint32_t covered, inside, away;
+    };
+    const auto seen = [&](const char* name, const render::Vec3& eye, const std::shared_ptr<const geom::GpuMesh>& mesh,
+                          const render::Mat4& transform) {
+        const render::Projection projection = render::projectionFor(render::Camera::lookingAt(eye, {0.2, -0.1, 0.0}), w, h);
+        world::MeshInstance i;
+        i.mesh = mesh;
+        i.objectToWorld = transform * aofx::xform::scaling({2.0, 2.0, 2.0});
+        i.doubleSided = true;   // from within, single sided would cull every face
+        REQUIRE(r->scene.update(std::span<const world::MeshInstance>(&i, 1), projection));
+        gpu::Buffer counts = test::uintBuffer(*gpu->device, 3, "counts");
+        gpu::CommandBatch batch(*gpu->device);
+        REQUIRE(r->raster.render(batch, r->scene, projection, w, h, r->visibility));
+        auto ids = r->visibility.ids.view(0);
+        REQUIRE(ids);
+        const std::array<float, 12> toWorld = aofx::xform::inverseAffine(projection.worldToView).rows3x4();
+        check->dispatch(batch, {1, 1, 1}, [&](rhi::ShaderCursor cursor) {
+            technique::bindScene(cursor, r->scene);
+            cursor["visibility"].setBinding((*ids).get());
+            cursor["counts"].setBinding(counts.rhi());
+            technique::setCamera(cursor["camera"], projection, w, h);
+            cursor["toWorld"]["row0"].setData(toWorld.data(), sizeof(float) * 4);
+            cursor["toWorld"]["row1"].setData(toWorld.data() + 4, sizeof(float) * 4);
+            cursor["toWorld"]["row2"].setData(toWorld.data() + 8, sizeof(float) * 4);
+        });
+        REQUIRE(batch.submit(true));
+        Seen out{};
+        uint32_t c[3] = {};
+        REQUIRE(counts.read(*gpu->device, 0, sizeof(c), c));
+        out = {c[0], c[1], c[2]};
+        std::printf("  %-26s: %u covered, %u inside, %u normals facing away\n", name, out.covered, out.inside, out.away);
+        return out;
+    };
+    const render::Vec3 outside{3.0, 4.0, 6.0};
+    const render::Vec3 within{0.3, -0.2, 0.4};
+    const render::Mat4 mirror = aofx::xform::translation({0.1, 0.0, 0.0}) * aofx::xform::scaling({-1.0, 1.0, 1.0});
+    const render::Mat4 still = aofx::xform::translation({0.1, 0.0, 0.0});
+    const Seen a = seen("outside", outside, right, still);
+    const Seen b = seen("outside, mirrored", outside, right, mirror);
+    const Seen c = seen("outside, left-handed", outside, left, still);
+    const Seen d = seen("within", within, right, still);
+    const Seen e = seen("within, mirrored", within, right, mirror);
+    const Seen f = seen("within, left-handed", within, left, still);
+    for (const Seen& s : {a, b, c}) {
+        CHECK(s.covered > 500);
+        CHECK(s.inside == 0);
+        CHECK(s.away == 0);
+    }
+    for (const Seen& s : {d, e, f}) {
+        CHECK(s.covered == w * h);
+        CHECK(s.inside == s.covered);
+        CHECK(s.away == 0);
+    }
 }
 
 // A mesh deformed in place: rebuilt with the same topology key and layout,
