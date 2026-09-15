@@ -14,6 +14,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <atomic>
 #include <memory>
 #include <string>
 
@@ -80,6 +81,9 @@ private:
     genlock::Alignment                 alignment_;
     int64_t                            taiMinusUtcNs_ = 0;
     std::unique_ptr<genlock::PtpClock> ptp_;
+    /// How far short of a frame a wait stops sleeping and yields instead:
+    /// the worst a sleep has overrun here, learnt as frames are waited for.
+    mutable std::atomic<int64_t>       spinNs_{200'000};
 };
 
 /// A timecode from a count of frames since midnight at `rate`: drop-frame at

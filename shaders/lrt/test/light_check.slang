@@ -283,48 +283,74 @@ void lightRoundTrip(uint3 tid: SV_DispatchThreadID) {
 /// The density a sample was drawn with, against the density the same
 /// direction has: a disagreement here is a sampler and its pdf parting ways,
 /// which no amount of binning would show and which MIS would weigh wrongly.
+/// One thread a sample, each writing what it found: a million samples of an
+/// imaged dome looped in one invocation ran past the Vulkan driver's patience
+/// on an NVIDIA L4 (VK_ERROR_DEVICE_LOST), while Metal took it.
+RWStructuredBuffer<uint>  sampleFlags;   // per sample: bit 0 pdf differs, bit 1 lightHit does not find it
+RWStructuredBuffer<float> sampleGaps;    // per sample: its pdf's relative difference
+
+[shader("compute")]
+[numthreads(256, 1, 1)]
+void lightConsistent(uint3 tid: SV_DispatchThreadID) {
+    const uint i = tid.x;
+    if (i >= params.samples) {
+        return;
+    }
+    sampleFlags[i] = 0;
+    sampleGaps[i] = 0.0;
+    const LightSample s = sampleLightImaged(lights[0], params.point.xyz, params.normal.xyz, sampleAt(i));
+    if (!s.valid || s.delta) {
+        return;
+    }
+    // An area light's pdf divides by the emitter's cosine, so beside its
+    // silhouette the comparison measures conditioning, not agreement.
+    // For a curved emitter the hit is found through sqrt(h^2 / a) with
+    // h^2 = r^2 - |c|^2 vanishing at a tangent ray: h^2 carries an
+    // absolute error of about 1e-8, the root turns that into 5e-6 in t,
+    // the normal into 1.7e-5, and the pdf into 1.7e-5 / cos -- past 1e-3
+    // until cos reaches 0.017. The light arriving from that band is of
+    // order cos^2 / 2 of the whole, 0.02%. Measured on a cylinder before
+    // the guard: 7826 of a million samples with the b^2 - 4ac form, 2378
+    // with the closest-approach one, 2026 above a guard of 1e-3.
+    if (s.emitterCosine < 2.0e-2) {
+        return;
+    }
+    const float density = lightPdfImaged(lights[0], params.point.xyz, params.normal.xyz, s.wi);
+    const float relative = abs(density - s.pdf) / max(s.pdf, 1.0e-9);
+    sampleGaps[i] = relative;
+    uint flags = relative > 1.0e-3 ? 1u : 0u;
+    // And the direction found again by the ray: the light met, at the
+    // distance the sample was drawn at, with the radiance it reported.
+    const LightHit h = lightHitImaged(lights[0], params.point.xyz, s.wi);
+    bool agrees = h.valid;
+    if (agrees) {
+        const float3 gap = abs(h.radiance - s.radiance) / max(abs(s.radiance), float3(1.0e-9));
+        agrees = all(gap <= float3(1.0e-3));
+        if (s.distance < 1.0e29) {
+            agrees = agrees && abs(h.t - s.distance) <= 1.0e-3 * max(s.distance, 1.0e-3);
+        } else {
+            agrees = agrees && h.t >= 1.0e29;
+        }
+    }
+    flags |= agrees ? 0u : 2u;
+    sampleFlags[i] = flags;
+}
+
+/// The samples' findings summed: a loop of reads and additions.
 [shader("compute")]
 [numthreads(1, 1, 1)]
-void lightConsistent(uint3 tid: SV_DispatchThreadID) {
+void lightConsistentReduce(uint3 tid: SV_DispatchThreadID) {
+    if (tid.x != 0) {
+        return;
+    }
     uint differ = 0;
     uint hitsDiffer = 0;
     float worstRelative = 0.0;
     for (uint i = 0; i < params.samples; ++i) {
-        const LightSample s = sampleLightImaged(lights[0], params.point.xyz, params.normal.xyz, sampleAt(i));
-        if (!s.valid || s.delta) {
-            continue;
-        }
-        // An area light's pdf divides by the emitter's cosine, so beside its
-        // silhouette the comparison measures conditioning, not agreement.
-        // For a curved emitter the hit is found through sqrt(h^2 / a) with
-        // h^2 = r^2 - |c|^2 vanishing at a tangent ray: h^2 carries an
-        // absolute error of about 1e-8, the root turns that into 5e-6 in t,
-        // the normal into 1.7e-5, and the pdf into 1.7e-5 / cos -- past 1e-3
-        // until cos reaches 0.017. The light arriving from that band is of
-        // order cos^2 / 2 of the whole, 0.02%. Measured on a cylinder before
-        // the guard: 7826 of a million samples with the b^2 - 4ac form, 2378
-        // with the closest-approach one, 2026 above a guard of 1e-3.
-        if (s.emitterCosine < 2.0e-2) {
-            continue;
-        }
-        const float density = lightPdfImaged(lights[0], params.point.xyz, params.normal.xyz, s.wi);
-        const float relative = abs(density - s.pdf) / max(s.pdf, 1.0e-9);
-        worstRelative = max(worstRelative, relative);
-        differ += relative > 1.0e-3 ? 1u : 0u;
-        // And the direction found again by the ray: the light met, at the
-        // distance the sample was drawn at, with the radiance it reported.
-        const LightHit h = lightHitImaged(lights[0], params.point.xyz, s.wi);
-        bool agrees = h.valid;
-        if (agrees) {
-            const float3 gap = abs(h.radiance - s.radiance) / max(abs(s.radiance), float3(1.0e-9));
-            agrees = all(gap <= float3(1.0e-3));
-            if (s.distance < 1.0e29) {
-                agrees = agrees && abs(h.t - s.distance) <= 1.0e-3 * max(s.distance, 1.0e-3);
-            } else {
-                agrees = agrees && h.t >= 1.0e29;
-            }
-        }
-        hitsDiffer += agrees ? 0u : 1u;
+        const uint flags = sampleFlags[i];
+        differ += flags & 1u;
+        hitsDiffer += (flags >> 1) & 1u;
+        worstRelative = max(worstRelative, sampleGaps[i]);
     }
     mismatches[0] = differ;
     mismatches[1] = hitsDiffer;

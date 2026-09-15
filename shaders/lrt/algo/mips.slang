@@ -14,7 +14,8 @@ struct MipParams {
     uint width;
     uint height;
     uint srgb;   // 1: texels hold sRGB-encoded colour; averaged as light, stored encoded
-    uint pad0; uint pad1; uint pad2;
+    uint levels; // 255 for an 8-bit target: stored as its nearest code; 0 for a float target
+    uint pad1; uint pad2;
 };
 
 float decodeSrgb(float x) {
@@ -76,6 +77,15 @@ void mipDownsample(uint3 tid: SV_DispatchThreadID) {
     }
     if (params.srgb != 0) {
         sum.rgb = float3(encodeSrgb(sum.r), encodeSrgb(sum.g), encodeSrgb(sum.b));
+    }
+    // An 8-bit target is written its nearest code, a quarter code in from the
+    // lower edge, so the store gives that code whether the driver rounds or
+    // truncates: Vulkan leaves the conversion to the implementation, and on
+    // an NVIDIA L4 each level lost about half a code to it -- the chain's
+    // mean drifted 0.7 of a code below level 0's, where Metal's stayed within.
+    if (params.levels != 0) {
+        const float levels = float(params.levels);
+        sum = (round(saturate(sum) * levels) + 0.25) / levels;
     }
     target[tid.xy] = sum;
 }

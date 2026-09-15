@@ -494,11 +494,18 @@ public LightHit lightHit(LightRecord l, float3 p, float3 wi) {
         if (radius <= 0.0 || distance2 <= radius * radius) {
             return h;
         }
-        const float b = dot(wi, offset);
-        const float discriminant = b * b - (distance2 - radius * radius);
-        if (discriminant < 0.0) {
+        // Inside the cone the sphere subtends, as lightPdf and sampleLight
+        // decide it, and the near root with the discriminant clamped as the
+        // sampler clamps it: a ray drawn at the cone's edge is tangent, and
+        // rounding (FMA contraction on NVIDIA's compiler) left its
+        // discriminant a hair below zero -- 4 samples in a million missed.
+        const float distance = sqrt(distance2);
+        const float cosMax = sqrt(max(0.0, 1.0 - radius * radius / distance2));
+        if (dot(wi, offset / distance) < cosMax) {
             return h;
         }
+        const float b = dot(wi, offset);
+        const float discriminant = max(0.0, b * b - (distance2 - radius * radius));
         const float t = b - sqrt(discriminant);
         if (!(t > 0.0)) {
             return h;

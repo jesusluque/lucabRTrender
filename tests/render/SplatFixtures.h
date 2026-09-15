@@ -67,10 +67,19 @@ inline CloudBuilder randomCloud(uint32_t count, uint64_t seed, float minSize = 0
         for (float& v : rest) {
             v = rng.range(-0.3F, 0.3F);
         }
-        b.add(rng.range(-2.0F, 2.0F), rng.range(-1.5F, 1.5F), rng.range(-2.0F, 2.0F),
-              rng.range(minOpacity, maxOpacity), size, size * stretch, size * rng.range(0.1F, 1.0F),
-              {rng.range(-1, 1), rng.range(-1, 1), rng.range(-1, 1), rng.range(-1, 1)},
-              {rng.range(0.0F, 1.2F), rng.range(0.0F, 1.2F), rng.range(0.0F, 1.2F)}, rest);
+        // Drawn into names first: the order a call evaluates its arguments
+        // in is unspecified, and GCC takes them right to left where Clang
+        // takes them left to right -- the same seed made another cloud on
+        // Linux, which the EWA comparison measured as a different scene.
+        const float x = rng.range(-2.0F, 2.0F);
+        const float y = rng.range(-1.5F, 1.5F);
+        const float z = rng.range(-2.0F, 2.0F);
+        const float opacity = rng.range(minOpacity, maxOpacity);
+        const float thin = rng.range(0.1F, 1.0F);
+        const std::array<float, 4> turn{rng.range(-1, 1), rng.range(-1, 1), rng.range(-1, 1), rng.range(-1, 1)};
+        const std::array<float, 3> dc{rng.range(0.0F, 1.2F), rng.range(0.0F, 1.2F), rng.range(0.0F, 1.2F)};
+        b.add(x, y, z, opacity, size, size * stretch, size * thin, {turn[0], turn[1], turn[2], turn[3]},
+              {dc[0], dc[1], dc[2]}, rest);
     }
     return b;
 }

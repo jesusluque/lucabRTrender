@@ -1,6 +1,12 @@
 // Copyright (c) 2026 lucabRTrender contributors.
 #include "lrt/core/Platform.h"
 
+#if defined(LRT_HAVE_EGL)
+#define EGL_EGLEXT_PROTOTYPES 1   // the device extensions' declarations
+#include <EGL/egl.h>
+#include <EGL/eglext.h>
+#endif
+
 #include <cstdlib>
 #include <utility>
 
@@ -113,6 +119,73 @@ void sleepPrecisely(std::chrono::nanoseconds duration) {
     std::this_thread::sleep_for(duration);
 #else
     std::this_thread::sleep_for(duration);
+#endif
+}
+
+int duplicateDescriptor(int descriptor) {
+#if defined(_WIN32)
+    (void)descriptor;
+    return -1;
+#else
+    return ::dup(descriptor);
+#endif
+}
+
+bool makeHeadlessGlContextCurrent() {
+#if defined(LRT_HAVE_EGL)
+    static EGLDisplay display = EGL_NO_DISPLAY;
+    static EGLContext context = EGL_NO_CONTEXT;
+    static EGLSurface surface = EGL_NO_SURFACE;
+    static bool tried = false;
+    if (!tried) {
+        tried = true;
+        // A display on the first GPU device, needing no X server.
+        // glvnd's libEGL dispatches the device extension without exporting
+        // it: found by name.
+        using QueryDevices = EGLBoolean (*)(EGLint, EGLDeviceEXT*, EGLint*);
+        const auto queryDevices = reinterpret_cast<QueryDevices>(eglGetProcAddress("eglQueryDevicesEXT"));
+        EGLDeviceEXT devices[8];
+        EGLint count = 0;
+        if (queryDevices != nullptr && queryDevices(8, devices, &count) && count > 0) {
+            for (EGLint k = 0; k < count && display == EGL_NO_DISPLAY; ++k) {
+                EGLDisplay candidate = eglGetPlatformDisplay(EGL_PLATFORM_DEVICE_EXT, devices[k], nullptr);
+                EGLint major = 0;
+                EGLint minor = 0;
+                if (candidate != EGL_NO_DISPLAY && eglInitialize(candidate, &major, &minor)) {
+                    display = candidate;
+                }
+            }
+        }
+        if (display == EGL_NO_DISPLAY) {
+            return false;
+        }
+        const EGLint attributes[] = {EGL_SURFACE_TYPE,    EGL_PBUFFER_BIT, EGL_RENDERABLE_TYPE, EGL_OPENGL_BIT,
+                                     EGL_RED_SIZE,        8,               EGL_GREEN_SIZE,      8,
+                                     EGL_BLUE_SIZE,       8,               EGL_DEPTH_SIZE,      24,
+                                     EGL_NONE};
+        EGLConfig config = nullptr;
+        EGLint configs = 0;
+        if (!eglChooseConfig(display, attributes, &config, 1, &configs) || configs == 0 ||
+            !eglBindAPI(EGL_OPENGL_API)) {
+            return false;
+        }
+        const EGLint pbuffer[] = {EGL_WIDTH, 1, EGL_HEIGHT, 1, EGL_NONE};
+        surface = eglCreatePbufferSurface(display, config, pbuffer);
+        // Compatibility, not core: Storm's state holder and draws use enums a
+        // core profile refuses (measured: GL "invalid enum" and "invalid
+        // operation" at every draw, and Kitchen_set drawn as nothing).
+        const EGLint version[] = {EGL_CONTEXT_MAJOR_VERSION,       4,
+                                  EGL_CONTEXT_MINOR_VERSION,       5,
+                                  EGL_CONTEXT_OPENGL_PROFILE_MASK, EGL_CONTEXT_OPENGL_COMPATIBILITY_PROFILE_BIT,
+                                  EGL_NONE};
+        context = eglCreateContext(display, config, EGL_NO_CONTEXT, version);
+        if (surface == EGL_NO_SURFACE || context == EGL_NO_CONTEXT) {
+            return false;
+        }
+    }
+    return context != EGL_NO_CONTEXT && eglMakeCurrent(display, surface, surface, context) == EGL_TRUE;
+#else
+    return false;
 #endif
 }
 

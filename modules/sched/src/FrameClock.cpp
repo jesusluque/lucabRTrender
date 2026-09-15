@@ -1,6 +1,7 @@
 // Copyright (c) 2026 lucabRTrender contributors.
 #include "lrt/sched/FrameClock.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <thread>
@@ -85,10 +86,21 @@ Tick FrameClock::waitFor(int64_t index) const {
         if (left <= 0) {
             break;
         }
-        if (left > 200'000) {
-            // Short of the point: the clock is read again, since a PTP
-            // correction may have moved it meanwhile.
-            platform::sleepPrecisely(std::chrono::nanoseconds(left - 100'000));
+        const int64_t spin = spinNs_.load(std::memory_order_relaxed);
+        if (left > spin) {
+            // Short of the point by what a sleep may overrun here: the clock
+            // is read again, since a PTP correction may have moved it
+            // meanwhile. The overrun is the platform's -- on a Mac under a
+            // real-time constraint well under a millisecond, on a virtual
+            // machine (an EC2 g6 instance) 2 ms -- so it is measured, not
+            // assumed: a sleep that overruns widens the margin, up to 10 ms.
+            const int64_t asked = left - spin;
+            const int64_t before = nowTaiNs();
+            platform::sleepPrecisely(std::chrono::nanoseconds(asked));
+            const int64_t overrun = (nowTaiNs() - before) - asked;
+            if (overrun + 100'000 > spin) {
+                spinNs_.store(std::min<int64_t>(overrun + 100'000, 10'000'000), std::memory_order_relaxed);
+            }
         } else {
             std::this_thread::yield();
         }

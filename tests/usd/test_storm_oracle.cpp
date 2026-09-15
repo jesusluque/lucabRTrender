@@ -83,6 +83,12 @@ std::vector<uint8_t> mapped(HdRenderBuffer* buffer) {
 }
 
 Outputs storm(const fs::path& stagePath, const render::Camera& camera, uint32_t w, uint32_t h, bool colour = false) {
+#if defined(__linux__)
+    // Storm draws through OpenGL here, and HgiGL expects a context current.
+    if (!platform::makeHeadlessGlContextCurrent()) {
+        SKIP("no OpenGL context could be made for Storm (EGL on a GPU device)");
+    }
+#endif
     HgiUniquePtr hgi = Hgi::CreatePlatformDefaultHgi();
     REQUIRE(hgi);
     HdDriver driver{HgiTokens->renderDriver, VtValue(hgi.get())};

@@ -368,6 +368,7 @@ TEST_CASE("each light's samples follow the density it reports", "[technique][lig
     gpu::ComputeKernel expect = kernel("lightExpect");
     gpu::ComputeKernel statistic = kernel("lightStatistic");
     gpu::ComputeKernel consistent = kernel("lightConsistent");
+    gpu::ComputeKernel consistentReduce = kernel("lightConsistentReduce");
     gpu::ComputeKernel roundTrip = kernel("lightRoundTrip");
 
     // Fine enough that a light of small support is resolved by its bins and
@@ -382,6 +383,9 @@ TEST_CASE("each light's samples follow the density it reports", "[technique][lig
     binDesc.label = "light.bins";
     auto binBuffer = gpu::Buffer::create(*gpu->device, binDesc);
     REQUIRE(binBuffer);
+    gpu::Buffer sampleFlags = test::uintBuffer(*gpu->device, samples, "light.sampleFlags");
+    auto sampleGaps = gpu::Buffer::fromSpan<float>(*gpu->device, std::vector<float>(samples, 0.0F), "light.sampleGaps");
+    REQUIRE(sampleGaps);
     const std::vector<float> zeros(size_t{bins} + 1, 0.0F);
     auto observed = gpu::Buffer::fromSpan<float>(*gpu->device, zeros, "light.observed");
     auto expected = gpu::Buffer::fromSpan<float>(*gpu->device, zeros, "light.expected");
@@ -424,6 +428,8 @@ TEST_CASE("each light's samples follow the density it reports", "[technique][lig
             // which this program does not declare.
             cursor["lights"].setBinding(table->records().rhi());
             cursor["bins"].setBinding(binBuffer->rhi());
+            cursor["sampleFlags"].setBinding(sampleFlags.rhi());
+            cursor["sampleGaps"].setBinding(sampleGaps->rhi());
             cursor["observed"].setBinding(observed->rhi());
             cursor["expected"].setBinding(expected->rhi());
             cursor["result"].setBinding(result->rhi());
@@ -441,7 +447,8 @@ TEST_CASE("each light's samples follow the density it reports", "[technique][lig
         };
         {
             gpu::CommandBatch batch(*gpu->device);
-            consistent.dispatch(batch, {1, 1, 1}, bind);
+            consistent.dispatch(batch, {samples, 1, 1}, bind);
+            consistentReduce.dispatch(batch, {1, 1, 1}, bind);
             roundTrip.dispatch(batch, {1, 1, 1}, bind);
             draw.dispatch(batch, {samples, 1, 1}, bind);
             count.dispatch(batch, {1, 1, 1}, bind);
@@ -539,6 +546,7 @@ TEST_CASE("a dome with a sun in it samples what its density describes",
     gpu::ComputeKernel expect = kernel("lightExpect");
     gpu::ComputeKernel statistic = kernel("lightStatistic");
     gpu::ComputeKernel consistent = kernel("lightConsistent");
+    gpu::ComputeKernel consistentReduce = kernel("lightConsistentReduce");
     gpu::ComputeKernel pyramidCheck = kernel("lightPyramid");
 
     const uint32_t thetaBins = 32;
@@ -551,6 +559,9 @@ TEST_CASE("a dome with a sun in it samples what its density describes",
     binDesc.label = "dome.bins";
     auto binBuffer = gpu::Buffer::create(*gpu->device, binDesc);
     REQUIRE(binBuffer);
+    gpu::Buffer sampleFlags = test::uintBuffer(*gpu->device, samples, "light.sampleFlags");
+    auto sampleGaps = gpu::Buffer::fromSpan<float>(*gpu->device, std::vector<float>(samples, 0.0F), "light.sampleGaps");
+    REQUIRE(sampleGaps);
     const std::vector<float> zeros(size_t{bins} + 1, 0.0F);
     auto observed = gpu::Buffer::fromSpan<float>(*gpu->device, zeros, "dome.observed");
     auto expected = gpu::Buffer::fromSpan<float>(*gpu->device, zeros, "dome.expected");
@@ -567,6 +578,8 @@ TEST_CASE("a dome with a sun in it samples what its density describes",
         cursor["lights"].setBinding(table->records().rhi());
         (*textures)->bind(cursor["gTextures"]);
         cursor["bins"].setBinding(binBuffer->rhi());
+        cursor["sampleFlags"].setBinding(sampleFlags.rhi());
+        cursor["sampleGaps"].setBinding(sampleGaps->rhi());
         cursor["observed"].setBinding(observed->rhi());
         cursor["expected"].setBinding(expected->rhi());
         cursor["result"].setBinding(result->rhi());
@@ -585,7 +598,8 @@ TEST_CASE("a dome with a sun in it samples what its density describes",
     };
     {
         gpu::CommandBatch batch(*gpu->device);
-        consistent.dispatch(batch, {1, 1, 1}, bind);
+        consistent.dispatch(batch, {samples, 1, 1}, bind);
+        consistentReduce.dispatch(batch, {1, 1, 1}, bind);
         pyramidCheck.dispatch(batch, {1, 1, 1}, bind);
         draw.dispatch(batch, {samples, 1, 1}, bind);
         count.dispatch(batch, {1, 1, 1}, bind);

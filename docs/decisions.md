@@ -3418,12 +3418,55 @@ voxel for voxel, and the medium's Beer-Lambert, majorant and leaf-walk
 checks -- passes on CUDA as on Metal, so PNanoVDB as Slang holds on both.
 The path-traced volume tests need ray queries, so they skip on CUDA.
 
-**Vulkan is not measured.** slang-rhi's Vulkan backend is built on the 94,
-but the machine has only Mesa's Vulkan drivers, and `lvp` (lavapipe) runs
-on the CPU, which is no device for this table. With NVIDIA's Vulkan driver
-(`libnvidia-gl-580-server`) installed, `LRT_BACKEND=vulkan
-scripts/remote-test.sh` runs the same suite on the L4 with rasterisation and
-ray queries -- the column most of CUDA's skips would move to.
+### Vulkan on the L4
+
+With NVIDIA's Vulkan driver (`libnvidia-gl-580-server`) installed,
+`LRT_BACKEND=vulkan` runs the suite on the L4 with rasterisation and ray
+queries, the column most of CUDA's skips move to. The first run left four
+failures and a handful of skips; each was a real difference between the
+backends, fixed where it lives rather than excused.
+
+- **A dispatch that runs too long loses the device.** The lights' chi-square
+  consistency check walked every sample in one invocation, which Metal's
+  watchdog tolerates and NVIDIA's Vulkan driver answers with
+  `VK_ERROR_DEVICE_LOST`. It is a parallel kernel now (`lightConsistent`
+  writes a flag and a gap per sample, `lightConsistentReduce` counts them), so
+  no invocation is long on any backend.
+- **A sphere light's `lightHit` missed at the tangent.** Deciding a hit by the
+  sign of the ray-sphere discriminant is at the mercy of FMA: a direction
+  `sampleLight` drew inside the cone came back a miss on Vulkan, where the
+  compiler contracts differently. The hit is decided by the cone itself --
+  `dot(wi, toCentre) >= cosMax`, the same test the pdf uses -- and the
+  distance takes a clamped discriminant, so sampling and `lightHit` agree by
+  construction.
+- **An 8-bit mip level drifted by one.** Writing a float into a `UNORM8`
+  texture rounds as the implementation pleases, and Vulkan's differs from
+  Metal's at the half. The mip kernel quantises itself for 8-bit formats,
+  `(round(saturate(v) * 255) + 0.25) / 255`, so the store has nothing to round.
+- **A fixture drew its random numbers in argument order.** GCC evaluates
+  function arguments right to left and Clang left to right, so the EWA
+  cloud fixture built a different cloud on Linux. Draws go into named
+  locals first (`SplatFixtures.h`, `test_lod.cpp`).
+- **The free-running clock missed its deadline by the sleep's overrun.**
+  `FrameClock` spins the last part of a wait; the margin is learnt now
+  (`spinNs_`, from 0.2 ms up to 10 ms as overruns are seen) instead of fixed.
+- **Storm needs OpenGL, and a headless box has no window to get it from.**
+  `platform::makeHeadlessGlContextCurrent()` opens an EGL display on the GPU
+  itself (`EGL_EXT_device_enumeration` through glvnd's dispatch, since the
+  prototypes resolve only by `eglGetProcAddress`), a 1x1 pbuffer and a
+  GL 4.5 *compatibility* context -- HgiGL issues calls a core profile rejects
+  as an invalid enum. The Storm oracle runs before `CreatePlatformDefaultHgi`
+  with it, and Kitchen_set against Storm passes on the L4.
+- **The denoiser runs on Vulkan through OIDN's CUDA device.** OIDN has no
+  Vulkan device, but its CUDA device imports external memory: the staging
+  buffers are created `BufferUsage::Shared`, slang-rhi exports their memory
+  as an opaque file descriptor, and `oidnNewSharedBufferFromFD` imports a
+  duplicate of it (OIDN takes ownership of the one it is given). The copies
+  in and out are the Metal staging path's kernels. Measured on the L4, 16
+  paths against 4096: relMSE 3.65e-4 noisy, 7.16e-5 denoised with albedo
+  and normal, 6.29e-5 without -- the same shape as on Metal -- and the
+  `lrt:denoise` render setting changes 8748 of 27648 words at the total and
+  none before it.
 
 ### A note on WebGPU
 
@@ -3442,7 +3485,7 @@ a WebGPU build would take the engine's records, not Hydra's prims.
   target the backend converts into or a store that converts itself. Until then
   every test that shades through a decoded 8-bit image is wrong here.
 - A release build and any timing beyond the sort's own.
-- Vulkan: the backend is compiled in and untried, since CUDA is what gpe
-  shares.
+- gpe on Vulkan: gpe has no Vulkan backend, so its tests and aofx's host
+  run on CUDA and Metal only.
 - OptiX: absent on this box, so slang-rhi warns and falls back to CUDA
   compute.

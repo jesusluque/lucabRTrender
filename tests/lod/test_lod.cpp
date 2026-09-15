@@ -114,9 +114,15 @@ TEST_CASE("a cell holding one splat merges into that splat", "[lod][gpu]") {
     const std::array<std::array<float, 3>, 6> at{{{-2, -2, -2}, {2, -2, -2}, {-2, 2, -2}, {2, 2, 2}, {-2, 2, 2}, {2, -2, 2}}};
     test::Lcg rng;
     for (const auto& p : at) {
-        b.add(p[0], p[1], p[2], rng.range(0.3F, 0.95F), rng.range(0.1F, 0.5F), rng.range(0.1F, 0.5F),
-              rng.range(0.1F, 0.5F), {rng.range(-1, 1), rng.range(-1, 1), rng.range(-1, 1), rng.range(-1, 1)},
-              {rng.range(0.1F, 1.0F), rng.range(0.1F, 1.0F), rng.range(0.1F, 1.0F)},
+        // In names, in order: a call's arguments are evaluated in no order
+        // the language fixes (SplatFixtures.h says what that did).
+        const float opacity = rng.range(0.3F, 0.95F);
+        const float sx = rng.range(0.1F, 0.5F);
+        const float sy = rng.range(0.1F, 0.5F);
+        const float sz = rng.range(0.1F, 0.5F);
+        const std::array<float, 4> turn{rng.range(-1, 1), rng.range(-1, 1), rng.range(-1, 1), rng.range(-1, 1)};
+        const std::array<float, 3> dc{rng.range(0.1F, 1.0F), rng.range(0.1F, 1.0F), rng.range(0.1F, 1.0F)};
+        b.add(p[0], p[1], p[2], opacity, sx, sy, sz, {turn[0], turn[1], turn[2], turn[3]}, {dc[0], dc[1], dc[2]},
               {0.2F, -0.1F, 0.3F, 0.0F, 0.1F, -0.2F, 0.1F, 0.0F, -0.3F});
     }
     auto cloud = h->loader.upload(b.raw, 3);

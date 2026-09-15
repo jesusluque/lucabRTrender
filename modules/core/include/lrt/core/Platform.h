@@ -57,6 +57,18 @@ private:
 /// timer slack goes to 1 ns.
 void sleepPrecisely(std::chrono::nanoseconds duration);
 
+/// An OpenGL 4.5 context made current on this thread with no window, for a
+/// library that draws with OpenGL itself -- USD's Storm on Linux, whose
+/// HgiGL expects one current. Through EGL on a GPU device (EGL_EXT_platform_
+/// device), with a 1x1 pbuffer; made once per process. False where none can
+/// be made, or on macOS, where Storm draws through Metal and needs none.
+[[nodiscard]] bool makeHeadlessGlContextCurrent();
+
+/// A second descriptor for the same open file or memory object, for a
+/// library that takes ownership of the one it is given (OIDN importing a
+/// Vulkan buffer's memory). -1 where there is none (Windows).
+[[nodiscard]] int duplicateDescriptor(int descriptor);
+
 /// Every shared library the process has loaded, by path.
 [[nodiscard]] std::vector<std::string> loadedLibraries();
 
