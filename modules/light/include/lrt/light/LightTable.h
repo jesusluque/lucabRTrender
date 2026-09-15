@@ -150,7 +150,10 @@ public:
     [[nodiscard]] static Result<LightTable> create(gpu::ShaderLibrary& library);
 
     /// The frame's lights, uploaded. The buffer is remade when it must grow.
-    [[nodiscard]] Result<void> set(std::span<const Light> lights);
+    /// `sceneRadius` is how far the scene reaches, in its own units: a dome
+    /// or a sun spreads its light over all of it, so its power, set against
+    /// an area light's, is its radiance over the scene's cross-section.
+    [[nodiscard]] Result<void> set(std::span<const Light> lights, float sceneRadius = 1.0F);
 
     [[nodiscard]] uint32_t count() const noexcept { return count_; }
     [[nodiscard]] bool     anyShadow() const noexcept { return shadows_; }

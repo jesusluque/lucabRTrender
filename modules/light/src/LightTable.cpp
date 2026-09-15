@@ -1,6 +1,8 @@
 // Copyright (c) 2026 lucabRTrender contributors.
 #include "lrt/light/LightTable.h"
 
+#include <algorithm>
+
 #include <functional>
 
 #include "lrt/gpu/CommandBatch.h"
@@ -108,7 +110,7 @@ LightRecord LightTable::recordOf(const Light& light) {
 }
 
 /// What a light is worth to a frame: its emission times what it emits over.
-Result<void> LightTable::set(std::span<const Light> lights) {
+Result<void> LightTable::set(std::span<const Light> lights, float sceneRadius) {
     std::vector<LightRecord> records;
     records.reserve(lights.size() + 1);
     shadows_ = false;
@@ -229,6 +231,7 @@ Result<void> LightTable::set(std::span<const Light> lights) {
         prefix_->dispatch(batch, {1, 1, 1}, [&](rhi::ShaderCursor cursor) {
             cursor["records"].setBinding(records_.rhi());
             cursor["count"].setData(count_);
+            cursor["sceneRadius"].setData(std::max(sceneRadius, 1.0e-6F));
         });
         LRT_TRY(batch.submit(true));
     }

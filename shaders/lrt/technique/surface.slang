@@ -77,7 +77,20 @@ public Surface surfaceFromWeights(uint4 seen, float3 weights, float3 viewDirecti
     s.viewDirection = viewDirection;
     s.viewPosition = a * weights.x + b * weights.y + c * weights.z;
     s.depth = s.viewPosition.z;
-    s.geometricNormal = normalize(cross(b - a, c - a));
+    // The cross product of the view-space corners, turned by the sign of the
+    // object-to-view determinant: a cross product under a transform of
+    // negative determinant comes out reversed, and the view is one (it
+    // flips z to look down +z), as is a mirrored instance. Without the sign
+    // the geometric normal pointed away from the side it was authored on,
+    // the backface test read every front face as a back one, and an
+    // authored normal -- carried by the normal matrix, which has no such
+    // sign -- ended facing away: a dome, which samples about that normal,
+    // lit nothing, while every lobe evaluated with an absolute cosine hid
+    // it. A computed normal is the geometric one, whose two reversals
+    // cancelled.
+    const float handedness =
+        dot(r.view0.xyz, cross(r.view1.xyz, r.view2.xyz)) < 0.0 ? -1.0 : 1.0;
+    s.geometricNormal = normalize(cross(b - a, c - a)) * handedness;
     s.normal = s.geometricNormal;
     const uint normals = primvarRecordOf(s.mesh, kSlotNormals);
     if (normals != kNoPrimvar) {

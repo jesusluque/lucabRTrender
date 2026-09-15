@@ -2683,6 +2683,58 @@ from the dome.
 - No MIS in media; no spectral tracking for a coloured extinction.
 - Verified on Metal; the L4 run of these tests is M11's.
 
+## End to end: Kitchen_set lit, and two defects only a real stage showed
+
+The plan closes with real stages through `lrt stage`. Kitchen_set with the
+lights `Kitchen_set_lit.usda` adds (a dome, a window rect, two normalised
+spheres), from inside the kitchen, rendered black under both techniques --
+while the same view without lights, under the headlight, was right to the
+last texture. Two defects, each hidden from the suite by the shape of its
+fixtures.
+
+### The geometric normal was reversed in view space
+
+`surface.slang` formed a triangle's geometric normal as the cross product
+of its view-space corners. The view is a reflection -- it flips z to look
+down +z -- and a cross product under a transform of negative determinant
+comes out reversed. So every front face read as a back one, and the
+backface test flipped the shading normal. With a computed normal (the
+geometric one) the two reversals cancelled; with an **authored** normal,
+carried by the normal matrix which has no such sign, the shading normal
+ended facing away. Lobes are evaluated with an absolute cosine, so a
+sphere, a rect, a sun and the headlight all lit such a surface correctly;
+a dome samples its directions about that normal, and lit nothing. Every
+lighting fixture computed its normals. The geometric normal is now signed
+by the object-to-view determinant, which covers mirrored instances too.
+
+**Checked**: a Lambert plane of albedo 0.18 under an imageless dome of
+radiance 1 reads 0.18 at every pixel (worst 1.7e-5 relative) with computed
+and with authored normals, raster and rt; without the fix the authored
+case is 1.09 off, the computed one passes -- as the cause says. The whole
+suite passes with the sign; nothing depended on it. **Not checked**: the
+dielectric's `inside`, which read the same flipped test, has no fixture
+through a camera.
+
+### A dome's share of the lights' power ignored the scene's size
+
+The path tracer chooses one light a sample by power. An area light's power
+was its radiance over its area in the scene's units; a dome's was its
+radiance alone. In a kitchen in centimetres beside a 120 x 160 window light
+the dome's share was 2.4e-6 -- unbiased, and dark and blotchy at 256 paths
+a pixel, where the raster, which loops over every light, was lit. A dome of
+radiance L lights a scene of radius R with pi L pi R^2 and a sun of
+irradiance E with E pi R^2; over the pi common to every emitter these are
+L pi R^2 and E R^2, set against an area light's L A. The table takes the
+scene's radius; the engine reads it from `GpuScene::worldBounds` (a
+kernel's) when the mesh set or its points change. **Checked** by a kernel
+writing the shares again from the records at scene radii 1 and 400: 0 of 3
+off (worst 3e-8). **Not done**: an instance moving without a change of the
+mesh set keeps the old radius, which costs sampling efficiency and not
+correctness.
+
+After both, Kitchen_set lit renders under both techniques from inside the
+kitchen; the path traced frame at 256 paths is clean without the denoiser.
+
 ## Linux, on the 94 (M11's first half)
 
 ### The first table, after the port was reconciled with engine

@@ -4192,3 +4192,63 @@ TEST_CASE("a frame of volumes alone is path traced through Hydra, and an albedo-
     CHECK(n[0] > 1000);
     CHECK(std::abs(mean - 1.0) < 5.0 * standardError);
 }
+
+// Authored normals and a dome, through Hydra. Under a dome of radiance 1
+// with no image, a Lambert plane of albedo 0.18 reads exactly 0.18 --
+// cosine sampling makes the estimate the albedo at every sample -- whether
+// its normals are computed or authored, on both techniques. With authored
+// normals it read 0: the view-space geometric normal came out reversed
+// under the view's reflection, the backface test flipped the authored
+// normal away, and only the dome, which samples about that normal, showed
+// it (surface.slang says the rest).
+TEST_CASE("a plane with authored normals under a dome reads its albedo through Hydra, on both techniques",
+          "[usd][gpu][mesh][lights][normals]") {
+    LRT_REQUIRE_GPU(gpu);
+    const gpu::Caps& caps = gpu->device->caps();
+    if (!caps.rasterization || !caps.rayQuery || !caps.accelerationStructure) {
+        SKIP("needs rasterisation and ray queries");
+    }
+    const uint32_t w = 64, h = 48;
+    std::vector<float> expected(size_t{w} * h * 4);
+    for (size_t p = 0; p < size_t{w} * h; ++p) {
+        expected[p * 4] = expected[p * 4 + 1] = expected[p * 4 + 2] = 0.18F;
+        expected[p * 4 + 3] = 1.0F;
+    }
+    gpu::BufferDesc desc;
+    desc.bytes = expected.size() * 4;
+    desc.elementBytes = 16;
+    auto reference = gpu::Buffer::create(*gpu->device, desc, expected.data());
+    REQUIRE(reference);
+    for (const bool authored : {false, true}) {
+        const fs::path path = scratch(authored ? "dome_normals_authored.usda" : "dome_normals_computed.usda");
+        {
+            std::ofstream out(path);
+            // The square fills the view: 4 wide at distance 1.5 against a 35mm lens.
+            out << "#usda 1.0\n(\n    upAxis = \"Y\"\n)\n"
+                   "def Mesh \"Square\"\n{\n"
+                   "    int[] faceVertexCounts = [4]\n    int[] faceVertexIndices = [0, 1, 2, 3]\n"
+                   "    point3f[] points = [(-4, -4, -1.5), (4, -4, -1.5), (4, 4, -1.5), (-4, 4, -1.5)]\n"
+                << (authored ? "    normal3f[] normals = [(0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1)] (interpolation = \"vertex\")\n"
+                             : "")
+                << "    uniform token subdivisionScheme = \"none\"\n}\n"
+                   "def DomeLight \"Sky\"\n{\n    float inputs:intensity = 1\n}\n"
+                   "def Camera \"Camera\"\n{\n    float focalLength = 35\n"
+                   "    float horizontalAperture = 24.576\n    float verticalAperture = 18.432\n"
+                   "    float2 clippingRange = (0.1, 1000)\n}\n";
+        }
+        auto renderer = usd::StageRenderer::open(path);
+        if (!renderer) FAIL(renderer.error().toString());
+        for (const char* technique : {"raster", "rt"}) {
+            auto image = (*renderer)->render("/Camera", 0.0, w, h, technique);
+            if (!image) FAIL(image.error().toString());
+            auto frame = gpu::Buffer::create(*gpu->device, desc, image->rgba.data());
+            REQUIRE(frame);
+            auto difference = render::compareHdr(*gpu->library, *frame, *reference, w, h);
+            REQUIRE(difference);
+            std::printf("  normals %s, %s: %llu pixels, worst %.2e relative to 0.18\n", authored ? "authored" : "computed",
+                        technique, static_cast<unsigned long long>(difference->pixels), difference->maxRelative);
+            CHECK(difference->pixels == uint64_t{w} * h);
+            CHECK(difference->maxRelative < 1e-4);
+        }
+    }
+}

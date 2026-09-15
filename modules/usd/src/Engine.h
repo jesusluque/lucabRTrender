@@ -358,6 +358,9 @@ private:
         bool                       chainDirty = false;
     };
     std::map<pxr::SdfPath, LightEntry>        lights_;
+    float                                     lightSceneRadius_ = 1.0F;   ///< the scene's reach, for domes' and suns' power
+    uint64_t                                  lightRadiusGeneration_ = ~uint64_t{0};
+    uint64_t                                  lightRadiusRevision_ = ~uint64_t{0};
     std::map<pxr::SdfPath, VolumeArrays>      volumes_;
     std::map<pxr::SdfPath, VolumeFieldAsset>  volumeFields_;
     /// Grids read, by file and grid name; null for one that failed to read

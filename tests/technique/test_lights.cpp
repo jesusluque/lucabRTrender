@@ -3836,3 +3836,56 @@ TEST_CASE("an albedo-one medium under a uniform dome reads the dome's radiance, 
         CHECK(std::abs(mean - 1.0) < 5.0 * standardError);
     }
 }
+
+// A dome's and a sun's share of the lights' power, against an area light's
+// (light_prefix.slang): a dome of radiance L over a scene of radius R counts
+// L pi R^2 and a sun of irradiance E counts E R^2, beside a rectangle's L A.
+// Before, a dome counted L whatever the scene's size, and a kitchen in
+// centimetres chose its dome once in four hundred thousand samples beside a
+// window light. Checked by a kernel that writes the shares again from the
+// records, at two scene radii.
+TEST_CASE("a dome's and a sun's share of the lights' power grows with the scene they light",
+          "[technique][lights][power]") {
+    LRT_REQUIRE_GPU(gpu);
+    auto table = light::LightTable::create(*gpu->library);
+    if (!table) FAIL(table.error().toString());
+    auto made = gpu::ComputeKernel::create(*gpu->library, "lrt/test/light_power_check", "lightPowerCheck");
+    if (!made) FAIL(made.error().toString());
+    light::Light dome;
+    dome.kind = light::LightKind::Dome;
+    dome.intensity = 0.4F;
+    light::Light sun;
+    sun.kind = light::LightKind::Distant;
+    sun.intensity = 2.0F;
+    light::Light window;
+    window.kind = light::LightKind::Rect;
+    window.width = 120.0F;
+    window.height = 160.0F;
+    window.intensity = 6.0F;
+    const std::vector<light::Light> lights{dome, sun, window};
+    for (const float radius : {1.0F, 400.0F}) {
+        REQUIRE(table->set(lights, radius));
+        gpu::Buffer counts = test::uintBuffer(*gpu->device, 2, "power.counts");
+        gpu::Buffer worst = test::uintBuffer(*gpu->device, 1, "power.worst");
+        {
+            gpu::CommandBatch batch(*gpu->device);
+            made->dispatch(batch, {1, 1, 1}, [&](rhi::ShaderCursor c) {
+                c["lights"].setBinding(table->records().rhi());
+                c["check"]["count"].setData(uint32_t{3});
+                c["check"]["sceneRadius"].setData(radius);
+                c["check"]["tolerance"].setData(1e-4F);
+                c["counts"].setBinding(counts.rhi());
+                c["worst"].setBinding(worst.rhi());
+            });
+            REQUIRE(batch.submit(true));
+        }
+        uint32_t n[2] = {};
+        float e = 0.0F;
+        REQUIRE(counts.read(*gpu->device, 0, sizeof(n), n));
+        REQUIRE(worst.read(*gpu->device, 0, 4, &e));
+        std::printf("  scene radius %.0f: %u of %u shares off the written-again powers (worst %.2e)\n",
+                    static_cast<double>(radius), n[0], n[1], static_cast<double>(e));
+        CHECK(n[1] == 3);
+        CHECK(n[0] == 0);
+    }
+}

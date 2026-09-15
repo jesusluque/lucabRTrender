@@ -1352,7 +1352,22 @@ Result<void> Engine::render(const render::Projection& projection, const render::
                 return std::move(loaded).error();
             }
         }
-        LRT_TRY(lightTable_->set(lamps));
+        // The scene's reach, for a dome's or a sun's share of the lights'
+        // power: its bounds are a kernel's, read again when the mesh set or
+        // its points change.
+        if (scene_->generation() != lightRadiusGeneration_ || scene_->positionsRevision() != lightRadiusRevision_) {
+            lightRadiusGeneration_ = scene_->generation();
+            lightRadiusRevision_ = scene_->positionsRevision();
+            auto bounds = scene_->worldBounds();
+            if (!bounds) return std::move(bounds).error();
+            lightSceneRadius_ = 1.0F;
+            if (bounds->has_value()) {
+                const scene::Bounds& b = **bounds;
+                const float dx = b.max[0] - b.min[0], dy = b.max[1] - b.min[1], dz = b.max[2] - b.min[2];
+                lightSceneRadius_ = std::max(0.5F * std::sqrt(dx * dx + dy * dy + dz * dz), 1.0e-3F);
+            }
+        }
+        LRT_TRY(lightTable_->set(lamps, lightSceneRadius_));
         // A path traced surface needs a structure whatever the lights do --
         // its bounce is a ray -- while shading needs one only where a light
         // casts a shadow. The same structure serves both, and a path traced
