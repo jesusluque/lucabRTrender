@@ -4184,6 +4184,107 @@ TEST_CASE("a render product's disableMotionBlur and disableDepthOfField draw it 
     CHECK(*again > 100);
 }
 
+// A dome seen by the camera is in its light group -- C.*<L.'NAME'> matches
+// the camera's ray meeting the dome with `.*` empty -- and the camera's
+// exposure scales the groups as it scales the beauty. Before, both left
+// the groups short of the beauty: the sky's pixels in no group, and every
+// pixel by the exposure's factor.
+TEST_CASE("a dome's background is in its light group, and the exposure in every group, raster and path traced",
+          "[usd][gpu][mesh][lights][light-groups][dome]") {
+    LRT_REQUIRE_GPU(gpu);
+    const gpu::Caps& caps = gpu->device->caps();
+    if (!caps.rasterization || !caps.rayQuery || !caps.accelerationStructure) {
+        SKIP("needs rasterisation and ray queries");
+    }
+    const fs::path path = scratch("light_groups_dome.usda");
+    {
+        std::ofstream out(path);
+        out << "#usda 1.0\n(\n    upAxis = \"Y\"\n)\n"
+               "def Mesh \"Floor\"\n{\n"
+               "    int[] faceVertexCounts = [4]\n"
+               "    int[] faceVertexIndices = [0, 1, 2, 3]\n"
+               "    point3f[] points = [(-6, -1, -2), (6, -1, -2), (6, -1, -14), (-6, -1, -14)]\n"
+               "    color3f[] primvars:displayColor = [(0.8, 0.8, 0.8)]\n"
+               "    uniform token subdivisionScheme = \"none\"\n}\n"
+               "def SphereLight \"Key\"\n{\n"
+               "    float inputs:intensity = 40\n    float inputs:radius = 0.3\n"
+               "    string lrt:lightGroup = \"key\"\n"
+               "    double3 xformOp:translate = (-2, 2, -8)\n"
+               "    uniform token[] xformOpOrder = [\"xformOp:translate\"]\n}\n"
+               "def DomeLight \"Sky\"\n{\n"
+               "    float inputs:intensity = 0.5\n    color3f inputs:color = (0.4, 0.6, 1)\n"
+               "    bool inputs:shadow:enable = 0\n"
+               "    string lrt:lightGroup = \"sky\"\n}\n"
+               "def Camera \"Camera\"\n{\n"
+               "    float focalLength = 24\n"
+               "    float horizontalAperture = 24.576\n    float verticalAperture = 16.384\n"
+               "    float2 clippingRange = (0.1, 1000)\n"
+               "    float exposure = 1\n"
+               "    double3 xformOp:translate = (0, 1.5, 0)\n"
+               "    double xformOp:rotateX = -8\n"
+               "    uniform token[] xformOpOrder = [\"xformOp:translate\", \"xformOp:rotateX\"]\n}\n";
+    }
+    auto renderer = usd::StageRenderer::open(path);
+    if (!renderer) FAIL(renderer.error().toString());
+    auto sumKernel = gpu::ComputeKernel::create(*gpu->library, "lrt/test/light_group_check", "lightGroupSum");
+    if (!sumKernel) FAIL(sumKernel.error().toString());
+    const uint32_t w = 96, h = 64;
+    const size_t pixels = size_t{w} * h;
+    struct Counts {
+        uint32_t off, emptyNonzero, covered, checked;
+        float    worst;
+    };
+    const auto run = [&](const char* technique) {
+        (*renderer)->requestOutputs({"lightGroup:key", "lightGroup:sky", "lightGroup:none"});
+        auto image = (*renderer)->render("/Camera", 0.0, w, h, technique);
+        if (!image) FAIL(image.error().toString());
+        auto beauty = (*renderer)->mappedOutput("color");
+        REQUIRE(beauty);
+        std::vector<uint8_t> planes;
+        for (const char* group : {"lightGroup:key", "lightGroup:sky", "lightGroup:none"}) {
+            auto plane = (*renderer)->mappedOutput(group);
+            REQUIRE(plane);
+            planes.insert(planes.end(), plane->begin(), plane->end());
+        }
+        REQUIRE(beauty->size() == pixels * 16);
+        auto b = gpu::Buffer::fromSpan<uint8_t>(*gpu->device, *beauty, "dome.beauty");
+        auto p = gpu::Buffer::fromSpan<uint8_t>(*gpu->device, planes, "dome.planes");
+        REQUIRE(b);
+        REQUIRE(p);
+        gpu::Buffer counts = test::uintBuffer(*gpu->device, 4, "dome.counts");
+        gpu::Buffer worst = test::uintBuffer(*gpu->device, 1, "dome.worst");
+        gpu::CommandBatch batch(*gpu->device);
+        sumKernel->dispatch(batch, {static_cast<uint32_t>(pixels), 1, 1}, [&](rhi::ShaderCursor c) {
+            c["check"]["pixels"].setData(static_cast<uint32_t>(pixels));
+            c["check"]["groups"].setData(uint32_t{3});
+            c["check"]["empty"].setData(uint32_t{2});
+            c["check"]["tolerance"].setData(1.0e-4F);
+            c["beauty"].setBinding(b->rhi());
+            c["planes"].setBinding(p->rhi());
+            c["counts"].setBinding(counts.rhi());
+            c["worst"].setBinding(worst.rhi());
+        });
+        REQUIRE(batch.submit(true));
+        Counts out{};
+        REQUIRE(counts.read(*gpu->device, 0, 16, &out));
+        REQUIRE(worst.read(*gpu->device, 0, 4, &out.worst));
+        std::printf("  %-6s: %u of %u pixels covered (floor and sky); groups summed off the beauty at %u (worst %.2e "
+                    "relative); the empty group nonzero at %u\n",
+                    technique, out.covered, out.checked, out.off, static_cast<double>(out.worst), out.emptyNonzero);
+        return out;
+    };
+    const Counts raster = run("raster");
+    CHECK(raster.covered == pixels);
+    CHECK(raster.off == 0);
+    CHECK(raster.emptyNonzero == 0);
+    (*renderer)->setPathSamples(4);
+    (*renderer)->setPathTotal(8);
+    const Counts traced = run("rt");
+    CHECK(traced.covered == pixels);
+    CHECK(traced.off == 0);
+    CHECK(traced.emptyNonzero == 0);
+}
+
 // Light groups (M10): a light's `lrt:lightGroup` puts its direct light,
 // at every bounce, into a plane of its own beside the beauty, asked for as
 // the "lightGroup:NAME" output -- or, through a render product, as the var

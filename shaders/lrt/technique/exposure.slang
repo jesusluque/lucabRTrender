@@ -22,3 +22,19 @@ void applyExposure(uint3 tid: SV_DispatchThreadID) {
         colour[tid.x] = float4(c.rgb * params.scale, c.a);
     }
 }
+
+/// Planes copied out of a larger buffer, scaled on the way: the path tracer's
+/// light group means, which accumulate in its own buffer and must not be
+/// scaled where they stand (a converged pixel is not written again, and would
+/// take the exposure twice).
+StructuredBuffer<float4> source;
+uniform uint             sourceBase;   // entries
+
+[shader("compute")]
+[numthreads(256, 1, 1)]
+void copyScaled(uint3 tid: SV_DispatchThreadID) {
+    if (tid.x < params.pixels) {
+        const float4 c = source[sourceBase + tid.x];
+        colour[tid.x] = float4(c.rgb * params.scale, c.a);
+    }
+}

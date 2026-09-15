@@ -891,11 +891,10 @@ AovView Engine::aovView(const render::RenderTargets& targets, AovSource aov) con
         if (aov.primvar >= lightGroupCount_ || lightGroupPixels_ != uint64_t{targets.width} * targets.height) {
             return view;
         }
-        if (pathState_.traced && pathTracer_.has_value() && pathTracer_->lightGroups() > aov.primvar) {
-            // The path tracer's means, in its accumulation after the colour's plane.
-            view.buffer = &pathTracer_->sum();
-            view.offset = static_cast<uint32_t>(pathTracer_->lightGroupMeanOffset(aov.primvar));
-        } else if (lightGroupColour_.valid()) {
+        // The raster's shading writes the planes; a path traced frame's means
+        // are copied there (gatherLightGroups) before the domes and the
+        // exposure reach them.
+        if (lightGroupColour_.valid()) {
             view.buffer = &lightGroupColour_;
             view.offset = static_cast<uint32_t>(aov.primvar * lightGroupPixels_);
         }
@@ -1701,9 +1700,33 @@ Result<void> Engine::render(const render::Projection& projection, const render::
     } else {
         LRT_TRY(rasterizer_->render(projection, splats, settings, targets, points, nullptr, &splatLights));
     }
+    LRT_TRY(gatherLightGroups(pathTracing, settings.width, settings.height));
     LRT_TRY(paintDomes(projection, settings.width, settings.height, targets));
     LRT_TRY(applyExposure(projection.exposure, settings.width, settings.height, targets));
     return ok();
+}
+
+Result<void> Engine::gatherLightGroups(bool traced, uint32_t width, uint32_t height) {
+    const uint64_t pixels = uint64_t{width} * height;
+    if (!traced || lightGroupCount_ == 0 || !lightGroupColour_.valid() || lightGroupPixels_ != pixels ||
+        !pathTracer_.has_value() || pathTracer_->lightGroups() < lightGroupCount_) {
+        return ok();
+    }
+    if (!groupsScaled_.has_value()) {
+        auto made = gpu::ComputeKernel::create(*library_, "lrt/technique/exposure", "copyScaled");
+        if (!made) return std::move(made).error();
+        groupsScaled_.emplace(std::move(*made));
+    }
+    gpu::CommandBatch batch(*device_);
+    const uint32_t entries = static_cast<uint32_t>(pixels * lightGroupCount_);
+    groupsScaled_->dispatch(batch, {entries, 1, 1}, [&](rhi::ShaderCursor cursor) {
+        cursor["source"].setBinding(pathTracer_->sum().rhi());
+        cursor["sourceBase"].setData(static_cast<uint32_t>(pathTracer_->lightGroupMeanOffset(0)));
+        cursor["colour"].setBinding(lightGroupColour_.rhi());
+        cursor["params"]["scale"].setData(1.0F);
+        cursor["params"]["pixels"].setData(entries);
+    });
+    return batch.submit(true);
 }
 
 Result<void> Engine::applyExposure(double stops, uint32_t width, uint32_t height, render::RenderTargets& targets) {
@@ -1722,6 +1745,15 @@ Result<void> Engine::applyExposure(double stops, uint32_t width, uint32_t height
         cursor["params"]["scale"].setData(static_cast<float>(std::exp2(stops)));
         cursor["params"]["pixels"].setData(pixels);
     });
+    // The light groups are what the colour is made of, and take its exposure.
+    if (lightGroupCount_ > 0 && lightGroupColour_.valid() && lightGroupPixels_ == pixels) {
+        const uint32_t entries = pixels * lightGroupCount_;
+        exposure_->dispatch(batch, {entries, 1, 1}, [&](rhi::ShaderCursor cursor) {
+            cursor["colour"].setBinding(lightGroupColour_.rhi());
+            cursor["params"]["scale"].setData(static_cast<float>(std::exp2(stops)));
+            cursor["params"]["pixels"].setData(entries);
+        });
+    }
     return batch.submit(true);
 }
 
@@ -1754,6 +1786,30 @@ Result<void> Engine::paintDomes(const render::Projection& projection, uint32_t w
             cursor["background"][kNames[k]].setData(toWorld[k]);
         }
     });
+    // And in the light groups' planes: a dome seen by the camera is its group's.
+    if (lightGroupCount_ > 0 && lightGroupColour_.valid() && lightGroupPixels_ == uint64_t{width} * height) {
+        if (!domeGroups_.has_value()) {
+            auto made = gpu::ComputeKernel::create(*library_, "lrt/technique/dome_background", "domeBackgroundGroups");
+            if (!made) return std::move(made).error();
+            domeGroups_.emplace(std::move(*made));
+        }
+        domeGroups_->dispatch(batch, {width, height, 1}, [&](rhi::ShaderCursor cursor) {
+            lightTable_->bind(cursor);
+            if (textures_) {
+                textures_->bind(cursor["gTextures"]);
+            }
+            cursor["depth"].setBinding(targets.depth.rhi());
+            cursor["groupPlanes"].setBinding(lightGroupColour_.rhi());
+            cursor["groupBase"].setData(uint32_t{0});
+            cursor["groupCount"].setData(lightGroupCount_);
+            technique::setCamera(cursor["camera"], projection, width, height);
+            static constexpr const char* kNames[12] = {"v00", "v01", "v02", "v03", "v10", "v11",
+                                                       "v12", "v13", "v20", "v21", "v22", "v23"};
+            for (size_t k = 0; k < 12; ++k) {
+                cursor["background"][kNames[k]].setData(toWorld[k]);
+            }
+        });
+    }
     LRT_TRY(batch.submit(true));
     return ok();
 }

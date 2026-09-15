@@ -456,10 +456,16 @@ private:
     std::optional<gpu::ComputeKernel>          nearest_;
     std::optional<gpu::ComputeKernel>          domeBackground_;
     std::optional<gpu::ComputeKernel>          exposure_;   ///< made on first use
+    std::optional<gpu::ComputeKernel>          domeGroups_;     ///< the domes' background in their groups' planes
+    std::optional<gpu::ComputeKernel>          groupsScaled_;   ///< the path tracer's group means, copied out
     /// The camera's exposure over the composed frame, once, after everything.
     [[nodiscard]] Result<void> applyExposure(double stops, uint32_t width, uint32_t height,
                                              render::RenderTargets& targets);
     /// The frame's domes over what it drew nothing on, after everything else.
+    /// The frame's light group planes into lightGroupColour_: the path
+    /// tracer's means copied out of its accumulation (the raster writes
+    /// there itself), so the domes and the exposure change a copy.
+    [[nodiscard]] Result<void> gatherLightGroups(bool traced, uint32_t width, uint32_t height);
     [[nodiscard]] Result<void> paintDomes(const render::Projection& projection, uint32_t width, uint32_t height,
                                           render::RenderTargets& targets);
     technique::VisibilityTargets              visibility_;

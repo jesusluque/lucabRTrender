@@ -2564,9 +2564,21 @@ one thing the host would compute -- is not in the tree; ACES 2.0 analytic
 is the default and the only colour management, and `renderingColorSpace`
 is read from the settings prim and reported, not acted on.
 
-**Not done.** Light groups collect direct light only: emission seen by the
-camera or a bounce, and the background, are in no group, so a frame with
-emissive geometry sums its groups short of the beauty by exactly those.
+**Light groups and what is not a light.** A dome the camera sees is in its
+dome's group: `C.*<L.'NAME'>` matches the camera's ray meeting the light
+with `.*` empty. The engine paints it into the group planes as it paints
+the colour's background, and the camera's exposure scales the planes as it
+scales the colour. For that the path tracer's group means are copied out of
+its accumulation each frame into the engine's plane buffer (the raster
+writes there itself): scaled in place, a converged pixel that no pass
+rewrites would take the exposure twice. Checked with a sky dome in a group
+of its own under one stop of exposure: the groups sum to the beauty at all
+6144 pixels, sky included, raster and path traced; before, every pixel was
+off (relative 1.0, the factor of two). Emission stays in no group, as the
+expression says (an emitting surface is `O`, not `L`): a frame with
+emissive geometry sums its groups short of the beauty by exactly that.
+
+**Not done.**
 `materialBindingPurposes` is applied since the usd-wg end to end (below):
 this line used to say the delegate bound `full`, and it bound Hydra's
 default, `preview`. Products' `disableMotionBlur` and
