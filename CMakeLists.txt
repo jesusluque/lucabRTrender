@@ -19,7 +19,7 @@ endif()
 #   - gpe (submodule) is the compute/video engine openFXplayer already uses. It
 #     does not make a second device: it adopts slang-rhi's, so a buffer written
 #     by one is read by the other with nothing in between.
-#   - aofx is openFXplayer's plugin SDK at its current ABI (22), unchanged in shape, so the
+#   - aofx is openFXplayer's plugin SDK at its current ABI (23), unchanged in shape, so the
 #     bundles openFXplayer builds load here.
 #   - OpenUSD is where entities live; a Hydra 2.0 render delegate feeds the
 #     engine's flat RenderScene.

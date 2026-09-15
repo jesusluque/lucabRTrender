@@ -85,7 +85,7 @@ the ones above it.
 | technique | how a frame is drawn: `VisibilityRaster` / `VisibilityTrace` / `VisibilityBvh` (same ids), `HeadlightShading`, `AovShading`, `Denoiser` (OIDN on the engine's own Metal queue) |
 | lod | `LodBuilder`, `CutSelector`; `Lrtc.h` for the `.lrtc` reader/writer and `StreamingPool` |
 | usd | `Engine`, `StageRenderer`, `Export`; the `hdLrt` plugin; codeless schemas in `modules/usd/schemas` |
-| aofx | openFXplayer's plugin SDK (ABI 22) and host |
+| aofx | openFXplayer's plugin SDK (ABI 23) and host |
 | view | `lrt view`: GLFW `Window`, `ImGuiRenderer` (Dear ImGui on the engine's device), `runViewer` |
 
 How the pieces fit:

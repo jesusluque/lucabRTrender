@@ -363,6 +363,20 @@ struct ClipDesc {
     /// than a hole.
     std::vector<int> alsoFrames;
 
+    /// The same clip at the frame an Integer parameter of this effect names,
+    /// whatever frame is being rendered.
+    ///
+    /// For a tracker with a reference frame: the picture it tracks against
+    /// is the one at `reference`, and until this existed the only way to
+    /// see it was for the playhead to pass through that frame -- so a
+    /// tracker that lost its memory, on a worker that was restarted, on a
+    /// document opened at frame nine hundred, waited for somebody to scrub
+    /// back. Named here, the host renders that frame beside the current one
+    /// (a cache hit after the first) and `RenderRequest::inputAt(clip,
+    /// frame)` answers it on every render. Clamped to the project's range;
+    /// empty, or a parameter that is not there, asks for nothing.
+    std::string alsoAtParam;
+
     /// The input a picture comes *through* this effect from.
     ///
     /// With one input the question does not arise, and the host used "the first

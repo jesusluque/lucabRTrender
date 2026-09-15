@@ -144,7 +144,11 @@ namespace aofx {
 /// inventing a second one. A struct layout change, so every bundle is
 /// rebuilt: one built against 21 would read every field after it from the
 /// wrong offset.
-inline constexpr int kAbiVersion = 22;
+/// 23: `ClipDesc::alsoAtParam`, a clip at the frame a parameter names --
+/// a tracker's reference frame beside every frame it renders, so it can
+/// read its reference again without the playhead going there. A struct
+/// layout change, so every bundle is rebuilt.
+inline constexpr int kAbiVersion = 23;
 
 /// What this translation unit was compiled with.
 ///
