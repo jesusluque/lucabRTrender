@@ -112,6 +112,8 @@ public:
                                       bool otherMotion = false);
 
     [[nodiscard]] uint32_t instanceCount() const noexcept { return instanceCount_; }
+    /// The meshes the records index, in the order `MeshRecord`s hold them.
+    [[nodiscard]] std::span<const std::shared_ptr<const geom::GpuMesh>> meshes() const noexcept { return meshes_; }
     [[nodiscard]] uint32_t buckets() const noexcept { return buckets_; }
     /// The records a ray tracing structure is built over.
     [[nodiscard]] uint32_t tlasFirst() const noexcept { return tlasFirst_; }

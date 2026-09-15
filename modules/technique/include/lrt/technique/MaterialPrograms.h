@@ -111,6 +111,11 @@ struct MaterialFrame {
     /// lights; null or none: no medium. The raster technique draws none.
     const gpu::Buffer*            volumes = nullptr;
     uint32_t                      volumeCount = 0;
+    /// The emitting triangles as a light (EmissiveTable's buffer), for the
+    /// path tracer's next event estimation; null, or no power: none. Not in a
+    /// frame with volumes.
+    const gpu::Buffer*            emissive = nullptr;
+    float                         emissivePower = 0.0F;
 
     [[nodiscard]] bool valid() const noexcept {
         return programs != nullptr && scene != nullptr && records != nullptr && records->valid() && blob != nullptr &&

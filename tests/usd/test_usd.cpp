@@ -2214,6 +2214,101 @@ TEST_CASE("MIS weighs light and material sampling into the same image with less 
     }
 }
 
+// Emitting geometry as a light: a quad whose material emits, sampled by next
+// event estimation and weighed against the material's rays, must light a
+// floor as a UsdLux rect light of its size and radiance does -- both above
+// the frame, so only the light they lay on the floor is seen -- and with
+// less noise than the material's rays alone find it.
+TEST_CASE("an emitting quad lights a floor as a rect light of its radiance, sampled as a light",
+          "[usd][gpu][mesh][path][mis][emissive]") {
+    LRT_REQUIRE_GPU(gpu);
+    const gpu::Caps& caps = gpu->device->caps();
+    if (!caps.rasterization || !caps.rayQuery || !caps.accelerationStructure) {
+        SKIP("needs rasterisation and ray queries");
+    }
+    const auto stage = [&](const char* name, bool emitter) {
+        const fs::path path = scratch(name);
+        std::ofstream out(path);
+        out << "#usda 1.0\n(\n    upAxis = \"Y\"\n)\n"
+               "def Mesh \"Floor\"\n{\n"
+               "    int[] faceVertexCounts = [4]\n    int[] faceVertexIndices = [0, 1, 2, 3]\n"
+               "    point3f[] points = [(-6, 0, 3), (6, 0, 3), (6, 0, -9), (-6, 0, -9)]\n"
+               "    uniform token subdivisionScheme = \"none\"\n"
+               "    color3f[] primvars:displayColor = [(0.8, 0.8, 0.8)] ( interpolation = \"constant\" )\n}\n";
+        if (emitter) {
+            // A 1 x 1 quad at y 2.5 facing down, emitting 3 each side.
+            out << "def Mesh \"Panel\" (\n    prepend apiSchemas = [\"MaterialBindingAPI\"]\n)\n{\n"
+                   "    int[] faceVertexCounts = [4]\n    int[] faceVertexIndices = [0, 1, 2, 3]\n"
+                   "    point3f[] points = [(-0.5, 2.5, -3.5), (0.5, 2.5, -3.5), (0.5, 2.5, -2.5), (-0.5, 2.5, -2.5)]\n"
+                   "    uniform token subdivisionScheme = \"none\"\n"
+                   "    rel material:binding = </Materials/Glow>\n}\n"
+                   "def Scope \"Materials\"\n{\n"
+                   "    def Material \"Glow\"\n    {\n"
+                   "        token outputs:mtlx:surface.connect = </Materials/Glow/Surface.outputs:out>\n"
+                   "        def Shader \"Surface\"\n        {\n"
+                   "            uniform token info:id = \"ND_surface_unlit\"\n"
+                   "            float inputs:emission = 3\n"
+                   "            color3f inputs:emission_color = (1, 1, 1)\n"
+                   "            token outputs:out\n        }\n    }\n}\n";
+        } else {
+            out << "def RectLight \"Panel\"\n{\n"
+                   "    float inputs:intensity = 3\n    float inputs:width = 1\n    float inputs:height = 1\n"
+                   "    double3 xformOp:translate = (0, 2.5, -3)\n"
+                   "    double xformOp:rotateX = -90\n"
+                   "    uniform token[] xformOpOrder = [\"xformOp:translate\", \"xformOp:rotateX\"]\n}\n";
+        }
+        out << "def Camera \"Camera\"\n{\n"
+               "    float focalLength = 24\n"
+               "    float horizontalAperture = 24.576\n    float verticalAperture = 18.432\n"
+               "    float2 clippingRange = (0.1, 1000)\n"
+               "    double3 xformOp:translate = (0, 1.2, 2)\n"
+               "    double xformOp:rotateX = -30\n"
+               "    uniform token[] xformOpOrder = [\"xformOp:translate\", \"xformOp:rotateX\"]\n}\n";
+        return path;
+    };
+    const uint32_t w = 64, h = 48;
+    const auto frame = [&](const fs::path& path, bool mis, uint32_t total) {
+        auto renderer = usd::StageRenderer::open(path);
+        if (!renderer) FAIL(renderer.error().toString());
+        (*renderer)->setPathMis(mis);
+        (*renderer)->setPathSamples(std::min<uint32_t>(total, 256));
+        (*renderer)->setPathTotal(total);
+        (*renderer)->setPathBounces(1);
+        auto image = (*renderer)->render("/Camera", 0.0, w, h, "rt");
+        if (!image) FAIL(image.error().toString());
+        gpu::BufferDesc desc;
+        desc.bytes = image->rgba.size() * sizeof(float);
+        desc.elementBytes = 16;
+        auto made = gpu::Buffer::create(*gpu->device, desc, image->rgba.data());
+        REQUIRE(made);
+        return std::move(*made);
+    };
+    const fs::path quad = stage("emissive_quad.usda", true);
+    const fs::path rect = stage("emissive_rect.usda", false);
+    const gpu::Buffer rectDeep = frame(rect, true, 8192);
+    const gpu::Buffer quadDeep = frame(quad, true, 8192);
+    const gpu::Buffer quadLight = frame(quad, true, 32);
+    const gpu::Buffer quadRays = frame(quad, false, 32);
+    auto same = render::compareHdr(*gpu->library, quadDeep, rectDeep, w, h);
+    auto errLight = render::compareHdr(*gpu->library, quadLight, rectDeep, w, h);
+    auto errRays = render::compareHdr(*gpu->library, quadRays, rectDeep, w, h);
+    REQUIRE(same);
+    REQUIRE(errLight);
+    REQUIRE(errRays);
+    std::vector<float> blank(size_t{w} * h * 4, 0.0F);
+    auto empty = gpu::Buffer::fromSpan<float>(*gpu->device, blank, "blank");
+    REQUIRE(empty);
+    auto lit = render::compareHdr(*gpu->library, rectDeep, *empty, w, h);
+    REQUIRE(lit);
+    std::printf("  an emitting quad against a rect light, deep: relMSE %.3e (p99 relative %.3e); at 32 paths, the "
+                "material's rays alone %.3e, sampled as a light %.3e (%.1f times less); lit against blank %.2e\n",
+                same->relMse, same->p99Relative, errRays->relMse, errLight->relMse,
+                errRays->relMse / std::max(errLight->relMse, 1e-30), lit->relMse);
+    CHECK(lit->relMse > 0.1);
+    CHECK(same->relMse < errLight->relMse / 32.0);
+    CHECK(errLight->relMse < errRays->relMse / 4.0);
+}
+
 // The traced technique over a mesh, through Hydra: what used to trace splats
 // and return now path traces the surfaces. A plane alone under one light has
 // nothing for a bounce to find, so the traced frame and the raster frame are

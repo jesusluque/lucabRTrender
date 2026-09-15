@@ -1863,8 +1863,8 @@ radian sun reads 0 of 8281 pixels beyond 2%, worst 0.01%.
   condition had been unmet since meshes arrived. Medians of `lrt stage
   --frames` and `lrt view --frames` are what is recorded, where there is
   something to compare against.
-- **Emissive geometry by next event estimation**: meshes that emit are still
-  reached by the material's sampling alone.
+- **Emissive geometry is a light** since the motion work (below, "Emitting
+  triangles as a light").
 
 ### Multiple importance sampling
 
@@ -1913,6 +1913,60 @@ sameness is shown on a rough diffuse floor under the same dome, where light
 sampling converges: deep frames 2.6e-7 apart, their summed noise about
 4e-7, and MIS 1.1 times less error there, as expected where the material's
 density and the dome's are the same function.
+### Emitting triangles as a light
+
+**The table** (`technique::EmissiveTable`). Each material row's emission is
+probed once on the device -- the material evaluated at a neutral point, its
+emission's luminance -- and every triangle of the frame's records weighed by
+its world area times its row's luminance, accumulated in order into a
+distribution. It lives in one float buffer with its counts, the rows'
+luminances and each record's first triangle, since the path tracer's kernel
+had one binding left. The probe shapes where samples go, not what they
+carry: a textured emitter whose probe point is dark is simply left to the
+material's rays, and nothing is biased by it. Rebuilt when the scene, its
+positions, the materials or the engine's revision change; not in a frame
+with volumes, whose kernel does not sample it.
+
+**Sampling it without a second material call.** The emission a sample
+brings back must be the material's at the point it lands on, and a second
+place in the kernel that evaluates materials is what ran the Metal compiler
+out (the usd-wg section). So the vertex loop became steps: a step shades
+either a vertex of the path or the point next event estimation chose on an
+emitting triangle, through the one call; a vertex that chose such a point
+waits a step, takes its emission, and goes on. The trip count is a
+uniform's, so the loop cannot be unrolled into copies. The choice between
+the lights and the emitting triangles is by power (an area light's L A
+against a triangle's area times luminance), and each side's density carries
+the other's share.
+
+**The weights.** Next event estimation's sample of a triangle is weighed by
+the power heuristic against the material's density in its direction; emission
+the material's ray meets is weighed against the density next event estimation
+gives that point -- the triangle's tabled power over the total, times its
+distance squared over the cosine and the area, where the area cancels. Both
+sides take that tabled density, so the weights sum to one; the estimate
+divides by the density the sample was actually drawn with. Emission is
+two-sided in both. With `lrt:pathMis` off, next event estimation leaves the
+emitting triangles to the material's rays, as before -- otherwise both would
+count them.
+
+**A defect on the way:** the shadow ray to the chosen point was cut a
+relative 1e-4 short, but `pathOccluded` moves its origin up to 2e-3 of the
+scale along the ray, so it reached the emitting triangle and every sample
+was its own shadow: the frame came out black. It now stops 3e-3 of the scale
+short.
+
+**Checked** through Hydra: a 1 x 1 quad whose MaterialX `surface_unlit`
+emits 3, above the frame, lighting a floor, against a UsdLux rect light of
+the same size and radiance in its place (one bounce, 64x48): deep frames of
+8192 paths agree to relMSE 4.1e-7, and at 32 paths the error is 8.7e-5 sampled
+as a light against 11.75 by the material's rays alone.
+
+**Not done.** Emitting triangles are not sampled from inside media, nor
+under motion at their shutter slice (the table is the frame's). A table of
+millions of triangles accumulates in float: a triangle whose power is below
+the running total's precision is sampled with a rounded probability.
+
 ## Complete USD: animation and movement (M7)
 
 ### Deformation in place, and refit instead of rebuild

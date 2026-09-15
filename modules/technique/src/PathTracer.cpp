@@ -263,6 +263,9 @@ void endGroups(uint at, uint pixels, Groups g, float alpha, float totalSamples) 
 /// a frame that has volumes; stubs that scatter nothing otherwise, so a
 /// frame without compiles exactly the kernel it always did.
 const char* kVolumes = R"(
+static const bool kEmissive = false;
+static const uint emissiveOn = 0;
+float emissiveWord(uint i) { return 0.0; }
 static const bool kVolumes = true;
 StructuredBuffer<uint> volumeWords;   // world::VolumeSet's words: header, records, grids, leaf maxima
 /// The first real collision along the ray among the frame's volumes before
@@ -298,6 +301,11 @@ float mediumTransmittanceAny(float3 origin, float3 direction, float tMin, float 
 
 const char* kNoVolumes = R"(
 static const bool kVolumes = false;
+// Emitting triangles as a light (EmissiveTable.h): a frame without media only.
+static const bool kEmissive = true;
+StructuredBuffer<float>        emissiveTable;
+uniform uint                   emissiveOn;
+float emissiveWord(uint i) { return emissiveTable[i]; }
 bool mediumScatterAny(float3 origin, float3 direction, float tMin, float tMax, inout uint rng, out float t,
                       out float3 albedo, out float g) {
     t = tMax;
@@ -573,17 +581,178 @@ LightRecord lightFor(uint k, uint2 pixel, uint sample) {
     return l;
 }
 
-/// Light k's probability of being chosen at p, n, as gatherLight chooses.
+// ---- emitting triangles as a light -------------------------------------------
+
+uint emissiveCount(uint word) {
+    return asuint(emissiveWord(word));
+}
+
+/// The emitting triangles' share of next event estimation's choices: their
+/// power against the lights'. 0 where nothing emits or the frame has media.
+float emissiveShare() {
+    // Without MIS the material's rays gather emission at full weight, so
+    // next event estimation leaves the emitting triangles to them.
+    if (!kEmissive || emissiveOn == 0 || path.mis == 0) {
+        return 0.0;
+    }
+    const float emitted = emissiveWord(2);
+    if (!(emitted > 0.0)) {
+        return 0.0;
+    }
+    const float lit = lightCount > 0 ? max(lights[lightCount - 1].cumulative, 0.0) : 0.0;
+    return emitted / (emitted + lit);
+}
+
+/// A surface's triangle in world space, as the record that drew it holds it.
+void worldTriangle(InstanceRecord r, MeshRecord m, uint triangle, out float3 a, out float3 b, out float3 c) {
+    const uint t = m.firstTriangle + triangle;
+    const uint base = m.firstPoint + r.pointsOffset;
+    a = rowsApply(r.world0, r.world1, r.world2, positions[base + indices[t * 3]].xyz, 1.0);
+    b = rowsApply(r.world0, r.world1, r.world2, positions[base + indices[t * 3 + 1]].xyz, 1.0);
+    c = rowsApply(r.world0, r.world1, r.world2, positions[base + indices[t * 3 + 2]].xyz, 1.0);
+}
+
+/// The density, per solid angle at `from`, that next event estimation gives
+/// the direction that met surface s at `at` -- by the table's own weights
+/// (area times the row's luminance), so the two strategies' weights sum to one.
+float emissivePdfAt(Surface s, float3 at, float3 from) {
+    const float share = emissiveShare();
+    if (!(share > 0.0)) {
+        return 0.0;
+    }
+    const uint rows = emissiveCount(3);
+    const uint row = materialRowOf(s);
+    const float luminance = row < rows ? emissiveWord(4 + row) : 0.0;
+    if (!(luminance > 0.0)) {
+        return 0.0;
+    }
+    float3 a, b, c;
+    worldTriangle(s.instance, s.mesh, s.triangle, a, b, c);
+    const float3 crossed = cross(b - a, c - a);
+    const float twiceArea = length(crossed);
+    const float3 offset = at - from;
+    const float distance2 = dot(offset, offset);
+    if (!(twiceArea > 0.0) || !(distance2 > 0.0)) {
+        return 0.0;
+    }
+    const float cosine = abs(dot(crossed / twiceArea, offset / sqrt(distance2)));
+    if (cosine <= 1.0e-6) {
+        return 0.0;
+    }
+    return share * luminance * distance2 / (cosine * emissiveWord(2));
+}
+
+/// A point on an emitting triangle, for next event estimation from `from`:
+/// the triangle chosen by its power, the point uniform over it. The surface
+/// comes back unshaded -- its emission is the material's, evaluated where
+/// every material is -- with the true density it was drawn with (`pdf`) and
+/// the tabled one both strategies weigh by (`weighPdf`).
+struct LightPoint {
+    Found  found;
+    float3 wi;
+    float  distance;
+    float  pdf;
+    float  weighPdf;
+    bool   valid;
+};
+
+LightPoint sampleEmissive(float3 from, float u, float2 v) {
+    LightPoint lp;
+    lp.valid = false;
+    lp.pdf = 0.0;
+    lp.weighPdf = 0.0;
+    lp.distance = 0.0;
+    lp.wi = float3(0.0, 0.0, 1.0);
+    const float share = emissiveShare();
+    const uint triangles = emissiveCount(0);
+    const uint records = emissiveCount(1);
+    const uint rows = emissiveCount(3);
+    const float emitted = emissiveWord(2);
+    if (!(share > 0.0) || triangles == 0) {
+        return lp;
+    }
+    const uint cumulative = 4 + rows + records + 1;
+    const float target = clamp(u, 0.0, 0.999999) * emitted;
+    uint lo = 0;
+    uint hi = triangles - 1;
+    while (lo < hi) {
+        const uint mid = (lo + hi) / 2;
+        if (emissiveWord(cumulative + 1 + mid) <= target) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    const uint g = lo;
+    const float probability = (emissiveWord(cumulative + 1 + g) - emissiveWord(cumulative + g)) / emitted;
+    if (!(probability > 0.0)) {
+        return lp;
+    }
+    uint rlo = 0;
+    uint rhi = records;
+    while (rhi - rlo > 1) {
+        const uint mid = (rlo + rhi) / 2;
+        if (emissiveCount(4 + rows + mid) <= g) {
+            rlo = mid;
+        } else {
+            rhi = mid;
+        }
+    }
+    const uint triangle = g - emissiveCount(4 + rows + rlo);
+    const InstanceRecord r = instances[rlo];
+    const MeshRecord m = meshes[r.mesh];
+    float3 a, b, c;
+    worldTriangle(r, m, triangle, a, b, c);
+    const float root = sqrt(v.x);
+    const float3 weights = float3(1.0 - root, v.y * root, root * (1.0 - v.y));
+    const float3 at = a * weights.x + b * weights.y + c * weights.z;
+    const float3 crossed = cross(b - a, c - a);
+    const float twiceArea = length(crossed);
+    const float3 offset = at - from;
+    const float distance2 = dot(offset, offset);
+    if (!(twiceArea > 0.0) || !(distance2 > 0.0)) {
+        return lp;
+    }
+    lp.distance = sqrt(distance2);
+    lp.wi = offset / lp.distance;
+    const float cosine = abs(dot(crossed / twiceArea, lp.wi));
+    if (cosine <= 1.0e-6) {
+        return lp;
+    }
+    lp.pdf = share * probability * distance2 / (cosine * 0.5 * twiceArea);
+    // The surface there, rebuilt as a bounce's hit is: the direction it is
+    // reached along, turned to view space for which side it shows.
+    const float3 w = lp.wi;
+    const float3 viewDirection = float3(toWorld.row0.x * w.x + toWorld.row1.x * w.y + toWorld.row2.x * w.z,
+                                        toWorld.row0.y * w.x + toWorld.row1.y * w.y + toWorld.row2.y * w.z,
+                                        toWorld.row0.z * w.x + toWorld.row1.z * w.y + toWorld.row2.z * w.z);
+    Found f;
+    f.s = surfaceFromWeights(uint4(rlo + 1, triangle, 0, 0), weights, viewDirection);
+    f.valid = true;
+    f.positionWorld = at;
+    f.eye = from;
+    f.rayOrigin = from;
+    f.rayT = lp.distance;
+    f.depth = f.s.depth;
+    lp.found = f;
+    lp.weighPdf = emissivePdfAt(f.s, at, from);
+    lp.valid = lp.weighPdf > 0.0;
+    return lp;
+}
+
+/// Light k's probability of being chosen at p, n, as gatherLight chooses:
+/// among the lights, times the lights' share against the emitting triangles.
 float lightChoiceProbability(uint k, float3 p, float3 n) {
+    const float lights_ = 1.0 - emissiveShare();
     if (path.chooseLights == 2) {
-        return lightPdfChoiceAny(iesValues, lightNodeBase, lightTreeNodes, lightUnboundedCount, lights, k, p, n);
+        return lights_ * lightPdfChoiceAny(iesValues, lightNodeBase, lightTreeNodes, lightUnboundedCount, lights, k, p, n);
     }
     const float power = lights[lightCount - 1].cumulative;
     if (!(power > 0.0)) {
         return 0.0;
     }
     const float before = k == 0 ? 0.0 : lights[k - 1].cumulative;
-    return max(lights[k].cumulative - before, 1.0e-9) / power;
+    return lights_ * max(lights[k].cumulative - before, 1.0e-9) / power;
 }
 
 /// Lights past this many are not met by the material's rays: each bounce
@@ -613,11 +782,14 @@ float3 gatherLight(Shaded sh, uint2 pixel, uint sample, uint bounce, uint mask, 
         // by that.
         return bounce == 0 && path.headlight != 0 ? kPi * stackEval(sh.stack, sh.toEye, sh.toEye) : float3(0.0);
     }
-    const float pick = random(pixel, sample, bounce, 11u);
+    // The choice's first part is the emitting triangles' (the caller takes
+    // those); what is left of the number chooses among the lights.
+    const float share = emissiveShare();
+    const float pick = (random(pixel, sample, bounce, 11u) - share) / max(1.0 - share, 1.0e-9);
     const LightChoice choice = path.chooseLights == 2
                                    ? chooseLightAny(iesValues, lightNodeBase, lightTreeNodes, lightUnboundedCount,
-                                                    sh.inputs.positionWorld, sh.inputs.normalWorld, pick)
-                                   : chooseLight(lights, lightCount, pick);
+                                                    sh.inputs.positionWorld, sh.inputs.normalWorld, saturate(pick))
+                                   : chooseLight(lights, lightCount, saturate(pick));
     if (!choice.valid) {
         return float3(0.0);
     }
@@ -649,7 +821,7 @@ float3 gatherLight(Shaded sh, uint2 pixel, uint sample, uint bounce, uint mask, 
         transmittance = mediumTransmittanceAny(sh.inputs.positionWorld, ls.wi, 1.0e-3 * max(1.0, length(sh.inputs.positionWorld)),
                                                ls.distance, rng);
     }
-    const float density = ls.pdf * choice.probability;
+    const float density = ls.pdf * choice.probability * (1.0 - share);
     // Weighed against the material's strategy by the power heuristic where
     // that strategy reaches this light too: at a vertex the path leaves by
     // sampling its material, whose ray gathers what it meets of the lights
@@ -787,64 +959,131 @@ void tracePaths(uint3 group: SV_GroupID, uint index: SV_GroupIndex) {
         // The vertices, each either a surface the ray met or a collision in
         // a medium before it: each gathers its light through what the path
         // has kept, and sends the path on -- through a lobe or the phase.
-        for (uint bounce = 0; bounce <= path.bounces; ++bounce) {
-            float tS;
-            float3 albedo;
-            float g;
-            const float tMin = bounce == 0 && found.valid && !ownRays ? camera.nearZ : 0.0;
-            if (kVolumes && mediumScatterAny(o, d, tMin, tHit, rng, tS, albedo, g)) {
-                const float3 p = o + d * tS;
-                if (!vertexSeen) {
-                    vertexSeen = true;
-                    opacity = 1.0;
-                    depthHere = found.valid ? found.depth : tS;
+        // Steps, not bounces: a step shades either a vertex of the path or a
+        // point next event estimation chose on an emitting triangle, whose
+        // emission is its material's -- evaluated at the same one call as
+        // every surface's (Found says why there is one). A vertex that chose
+        // such a point waits while it is shaded, then goes on. The trip count
+        // is a uniform's, so the compiler cannot unroll the call into copies.
+        uint bounce = 0;
+        Shaded cur;
+        cur.valid = false;
+        bool   lightStep = false;     // the next step shades the light point, not the path
+        Found  lightPoint;
+        float3 lightScale = float3(0.0);
+        float  previousPdf = 0.0;     // the material's density for the direction that reached `found`
+        bool   previousWeighs = false;   // and whether emission met there is weighed against it
+        const uint steps = 2 * path.bounces + 3;
+        for (uint step = 0; step < steps; ++step) {
+            if (!lightStep) {
+                float tS;
+                float3 albedo;
+                float g;
+                const float tMin = bounce == 0 && found.valid && !ownRays ? camera.nearZ : 0.0;
+                if (kVolumes && mediumScatterAny(o, d, tMin, tHit, rng, tS, albedo, g)) {
+                    const float3 p = o + d * tS;
+                    if (!vertexSeen) {
+                        vertexSeen = true;
+                        opacity = 1.0;
+                        depthHere = found.valid ? found.depth : tS;
+                    }
+                    throughput *= albedo;
+                    const float3 direct = gatherLightMedium(p, -d, g, tid, sample, bounce, mask, group);
+                    carried += throughput * direct;
+                    if (kLightGroups) {
+                        addGroup(groups, group, throughput * direct * opacity);
+                    }
+                    if (bounce == path.bounces || !kTraces) {
+                        break;
+                    }
+                    d = hgSample(-d, g, float2(mediumRandom(rng), mediumRandom(rng)));
+                    o = p;
+                    const PathHit hit = traceNearestFrom(o, d, 1.0e-4 * max(1.0, length(o)), mask);
+                    found = foundHit(hit, o, d);
+                    tHit = hit.seen.x == 0 ? 1.0e30 : hit.t;
+                    previousWeighs = false;
+                    ++bounce;
+                    continue;
                 }
-                throughput *= albedo;
-                const float3 direct = gatherLightMedium(p, -d, g, tid, sample, bounce, mask, group);
-                carried += throughput * direct;
-                if (kLightGroups) {
-                    addGroup(groups, group, throughput * direct * opacity);
+                if (!found.valid) {
+                    break;   // the ray escaped
                 }
-                if (bounce == path.bounces || !kTraces) {
-                    break;
-                }
-                d = hgSample(-d, g, float2(mediumRandom(rng), mediumRandom(rng)));
-                o = p;
-                const PathHit hit = traceNearestFrom(o, d, 1.0e-4 * max(1.0, length(o)), mask);
-                found = foundHit(hit, o, d);
-                tHit = hit.seen.x == 0 ? 1.0e30 : hit.t;
-                continue;
             }
-            if (!found.valid) {
-                break;   // the ray escaped
-            }
-            // The one place materials are evaluated (Found says why); the
-            // camera's hit once a pixel.
-            Shaded cur;
-            if (bounce == 0 && !ownRays && firstShaded) {
-                cur = first;
+            // The one place materials are evaluated; the camera's hit once a pixel.
+            const Found target = lightStep ? lightPoint : found;
+            const bool cameraHit = !lightStep && bounce == 0 && !ownRays;
+            Shaded shaded;
+            if (cameraHit && firstShaded) {
+                shaded = first;
             } else {
-                cur = shadeFound(tid, found);
-                if (bounce == 0 && !ownRays) {
-                    first = cur;
+                shaded = shadeFound(tid, target);
+                if (cameraHit) {
+                    first = shaded;
                     firstShaded = true;
                 }
             }
-            if (bounce == 0 && path.writeAux != 0 && !auxWritten) {
-                aux[at] = float4(stackAlbedo(cur.stack, cur.toEye), 1.0);
-                aux[pixels + at] = float4(cur.inputs.normalWorld, 1.0);
-                auxWritten = true;
+            if (lightStep) {
+                // The light point's emission, back to the vertex that chose it.
+                carried += lightScale * shaded.stack.emission;
+                lightStep = false;
+            } else {
+                cur = shaded;
+                if (bounce == 0 && path.writeAux != 0 && !auxWritten) {
+                    aux[at] = float4(stackAlbedo(cur.stack, cur.toEye), 1.0);
+                    aux[pixels + at] = float4(cur.inputs.normalWorld, 1.0);
+                    auxWritten = true;
+                }
+                if (!vertexSeen) {
+                    vertexSeen = true;
+                    opacity = cur.stack.opacity;
+                    depthHere = cur.depth;
+                }
+                // Emission met by the material's ray, weighed against next event
+                // estimation where that could have chosen this point.
+                float emissionWeight = 1.0;
+                if (previousWeighs && any(cur.stack.emission > float3(0.0))) {
+                    const float other = emissivePdfAt(found.s, found.positionWorld, found.rayOrigin);
+                    emissionWeight = previousPdf * previousPdf / (previousPdf * previousPdf + other * other);
+                }
+                carried += throughput * cur.stack.emission * emissionWeight;
+                const float share = emissiveShare();
+                const bool continues = kTraces && bounce < path.bounces;
+                if (share > 0.0 && random(tid, sample, bounce, 11u) < share) {
+                    // An emitting triangle: sampled here, shaded next step.
+                    const LightPoint lp = sampleEmissive(cur.inputs.positionWorld,
+                                                         random(tid, sample, bounce, 11u) / share,
+                                                         random2(tid, sample, bounce, 3u));
+                    if (lp.valid) {
+                        const float3 f = stackEval(cur.stack, cur.toEye, lp.wi);
+                        // The shadow ray stops short of the emitting triangle by more
+                        // than its origin is moved off the surface (pathOccluded moves
+                        // it up to 2e-3 of the scale along the ray): at a relative
+                        // 1e-4 short it reached the triangle itself, and every sample
+                        // was its own shadow.
+                        const float shortOf = 3.0e-3 * max(1.0, length(cur.inputs.positionWorld));
+                        if (any(f > float3(0.0)) && lp.distance > 2.0 * shortOf &&
+                            !pathOccluded(cur.inputs.positionWorld, cur.inputs.normalWorld, lp.wi,
+                                          lp.distance - shortOf, kLightUnlinked, mask)) {
+                            float weight = 1.0;
+                            if (continues && path.mis != 0) {
+                                const float other = stackPdf(cur.stack, cur.toEye, lp.wi);
+                                weight = lp.weighPdf * lp.weighPdf / (lp.weighPdf * lp.weighPdf + other * other);
+                            }
+                            lightScale = throughput * f * weight / lp.pdf;
+                            lightPoint = lp.found;
+                            lightStep = true;
+                            continue;
+                        }
+                    }
+                } else {
+                    const float3 direct = gatherLight(cur, tid, sample, bounce, mask, group);
+                    carried += throughput * direct;
+                    if (kLightGroups) {
+                        addGroup(groups, group, throughput * direct * opacity);
+                    }
+                }
             }
-            if (!vertexSeen) {
-                vertexSeen = true;
-                opacity = cur.stack.opacity;
-                depthHere = cur.depth;
-            }
-            const float3 direct = gatherLight(cur, tid, sample, bounce, mask, group);
-            carried += throughput * (cur.stack.emission + direct);
-            if (kLightGroups) {
-                addGroup(groups, group, throughput * direct * opacity);
-            }
+            // The path goes on from `cur`.
             if (bounce == path.bounces || !kTraces) {
                 break;
             }
@@ -901,9 +1140,12 @@ void tracePaths(uint3 group: SV_GroupID, uint index: SV_GroupIndex) {
                 }
             }
             // Rebuilt from where the ray met the triangle, its eye where the
-            // bounce left from; shaded when the next vertex comes to it.
+            // bounce left from; shaded when the next step comes to it.
             found = foundHit(hit, p, d);
             tHit = hit.seen.x == 0 ? 1.0e30 : hit.t;
+            previousPdf = ms.pdf;
+            previousWeighs = path.mis != 0 && !ms.delta;
+            ++bounce;
         }
         if (!vertexSeen) {
             continue;   // nothing along the ray at all: transparent, and counted
@@ -1158,6 +1400,13 @@ Result<void> PathTracer::trace(gpu::CommandBatch& batch, const VisibilityTargets
         cursor["path"]["adaptive"].setData(uint32_t{settings.adaptive ? 1u : 0u});
         cursor["path"]["headlight"].setData(uint32_t{settings.headlight ? 1u : 0u});
         cursor["path"]["mis"].setData(uint32_t{settings.mis ? 1u : 0u});
+        // The emitting triangles, where the kernel samples them: their table,
+        // or a word to bind in its place.
+        if (const rhi::ShaderCursor table = cursor["emissiveTable"]; table.isValid()) {
+            const bool on = frame.emissive != nullptr && frame.emissive->valid() && frame.emissivePower > 0.0F;
+            table.setBinding(on ? frame.emissive->rhi() : moments_.rhi());
+            cursor["emissiveOn"].setData(uint32_t{on ? 1u : 0u});
+        }
         // A moving camera: its view to world at the two samples, for the rays.
         cursor["path"]["cameraMoves"].setData(uint32_t{projection.cameraMoves ? 1u : 0u});
         {

@@ -50,6 +50,7 @@
 #include "lrt/technique/MaterialShading.h"
 #include "lrt/technique/Denoiser.h"
 #include "lrt/technique/PathTracer.h"
+#include "lrt/technique/EmissiveTable.h"
 #include "lrt/render/GaussianRayTracer.h"
 #include "lrt/render/PointRasterizer.h"
 #include "lrt/render/TileRasterizer.h"
@@ -472,6 +473,20 @@ private:
     std::optional<gpu::ComputeKernel>          nearest_;
     std::optional<gpu::ComputeKernel>          domeBackground_;
     std::optional<gpu::ComputeKernel>          exposure_;   ///< made on first use
+    /// The emitting triangles as a light, and what they were weighed from.
+    struct EmissiveKey {
+        uint64_t          generation = ~uint64_t{0};
+        uint64_t          positions = 0;
+        uint64_t          revision = 0;
+        rhi::IBuffer*     records = nullptr;
+        uint32_t          instances = 0;
+        [[nodiscard]] bool operator==(const EmissiveKey& o) const {
+            return generation == o.generation && positions == o.positions && revision == o.revision &&
+                   records == o.records && instances == o.instances;
+        }
+    };
+    std::optional<technique::EmissiveTable>    emissiveTable_;
+    EmissiveKey                                emissiveKey_;
     std::optional<gpu::ComputeKernel>          domeGroups_;     ///< the domes' background in their groups' planes
     std::optional<gpu::ComputeKernel>          groupsScaled_;   ///< the path tracer's group means, copied out
     /// The camera's exposure over the composed frame, once, after everything.

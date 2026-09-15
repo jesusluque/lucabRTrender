@@ -1548,6 +1548,27 @@ Result<void> Engine::render(const render::Projection& projection, const render::
                 log::info("hdLrt: volumes are drawn by the rt technique; the raster technique draws none");
             }
         }
+        // The emitting triangles, for the path tracer's next event estimation:
+        // probed and weighed on the device again whenever what they depend on
+        // changed -- the scene, its positions, the materials, anything the
+        // revision counts. Not through media, whose kernel does not sample them.
+        if (pathTracing && frame.volumeCount == 0) {
+            const EmissiveKey key{scene_->generation(), scene_->positionsRevision(), revision_.load(),
+                                  materialRecords_.rhi(), scene_->instanceCount()};
+            if (!emissiveTable_.has_value()) {
+                auto made = technique::EmissiveTable::create(*library_);
+                if (!made) return std::move(made).error();
+                emissiveTable_.emplace(std::move(*made));
+            }
+            if (!(key == emissiveKey_)) {
+                LRT_TRY(emissiveTable_->build(frame, static_cast<uint32_t>(materialRecords_.count())));
+                emissiveKey_ = key;
+            }
+            if (emissiveTable_->totalPower() > 0.0F) {
+                frame.emissive = &emissiveTable_->table();
+                frame.emissivePower = emissiveTable_->totalPower();
+            }
+        }
         const technique::MaterialFrame* cutouts = (materialCutouts_ || scene_->anyHidden()) ? &frame : nullptr;
             gpu::CommandBatch batch(*device_);
         switch (visibility) {

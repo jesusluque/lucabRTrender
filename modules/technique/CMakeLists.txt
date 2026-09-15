@@ -7,6 +7,7 @@ lrt_add_module(technique
         src/Aces2.cpp
         src/MaterialPrograms.cpp
         src/MaterialShading.cpp
+        src/EmissiveTable.cpp
         src/PathTracer.cpp
         src/Visibility.cpp
     PUBLIC_LIBS
