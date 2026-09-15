@@ -28,6 +28,8 @@ struct ViewOptions {
     /// the screen's peak as its peak. On a standard display the same as off.
     bool                  edr = false;
     bool                  visible = true;
+    /// Start with the timeline playing, as the Play button does.
+    bool                  play = false;
     /// Where the last frame goes as it was shown, panels included: an EXR of
     /// display-encoded values. Empty, nowhere.
     std::filesystem::path snapshot;
@@ -38,6 +40,8 @@ struct ViewStats {
     uint64_t snapshotLitPixels = 0;   ///< of the snapshot: pixels brighter than the background
     double   medianDrawMs = 0.0;    ///< Hydra and the engine
     double   medianFrameMs = 0.0;   ///< the whole loop, events to present
+    double   lastTime = 0.0;        ///< the USD time the last frame drew
+    uint32_t distinctTimes = 0;     ///< how many different times the frames drew
 };
 
 [[nodiscard]] Result<ViewStats> runViewer(const ViewOptions& options);

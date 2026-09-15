@@ -147,7 +147,7 @@ struct Choice {
     const char* value;
 };
 
-constexpr std::array<Choice, 2> kTechniques{{{"Raster", "raster"}, {"Ray traced (splats)", "rt"}}};
+constexpr std::array<Choice, 2> kTechniques{{{"Raster", "raster"}, {"Path traced", "rt"}}};
 constexpr std::array<Choice, 4> kVisibility{
     {{"Automatic", "automatic"}, {"Raster", "raster"}, {"Rays", "rays"}, {"Compute BVH", "bvh"}}};
 constexpr std::array<Choice, 7> kAovs{{{"Colour", "color"},
@@ -261,7 +261,9 @@ Result<ViewStats> runViewer(const ViewOptions& options) {
     // The timeline: playing advances the time by the wall clock at the
     // stage's timeCodesPerSecond and wraps at the end. What frame N shows is
     // the stage's business (SetTime); when it is drawn is the clock's.
-    bool playing = false;
+    bool playing = options.play && stage.endTimeCode() > stage.startTimeCode();
+    double drawnTime = time;
+    uint32_t distinctTimes = 0;
     auto lastTick = std::chrono::steady_clock::now();
     double focal = 35.0;
     std::optional<usd::StagePick> picked;
@@ -502,6 +504,12 @@ Result<ViewStats> runViewer(const ViewOptions& options) {
         drawMs.push_back(
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - drawStart).count());
         status = drawn ? std::string() : drawn.error().toString();
+        if (drawn) {
+            if (distinctTimes == 0 || time != drawnTime) {
+                ++distinctTimes;
+            }
+            drawnTime = time;
+        }
 
         rhi::ComPtr<rhi::ITexture> image = surface->acquireNextImage();
         ImGui::Render();
@@ -539,6 +547,8 @@ Result<ViewStats> runViewer(const ViewOptions& options) {
     surface.setNull();
     ViewStats stats;
     stats.frames = frames;
+    stats.lastTime = drawnTime;
+    stats.distinctTimes = distinctTimes;
     stats.snapshotLitPixels = snapshotLit;
     stats.medianDrawMs = median(drawMs);
     stats.medianFrameMs = median(frameMs);

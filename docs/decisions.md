@@ -2865,6 +2865,23 @@ fails without its fix where a control was run:
   closed emissive shell, lit by its emission alone, read 1.67 times its
   series when the kernel lit every lightless frame.
 
+**lrt view and lrt live over the same stages** (release, Apple M5 Pro):
+
+- `lrt view --play` starts the timeline as its Play button does, and
+  `--frames` now reports how many distinct times the frames drew. The
+  skinned arm (raster, 800x600): 240 frames, 240 distinct times, wrapping
+  at the end, draw 8.7 ms; CesiumMan path traced: 240 of 240, draw 21.4 ms,
+  the snapshot mid-walk. Without `--play`, 1 time over 120 frames. The
+  viewer's technique menu said "Ray traced (splats)" for rt, from before rt
+  path traced surfaces: "Path traced".
+- `lrt live` renders a stage without cameras from the framing camera
+  `lrt stage` uses (`StageRenderer::framingCamera`); it refused them. At
+  25 fps on this machine's clock: CesiumMan raster at 1280x720, 50 frames,
+  render 19.5 ms, none skipped; Kitchen_set raster at 1920x1080, 50 frames,
+  render 25 ms, none skipped; the chess set path traced at 1280x720, one
+  pass of one path, render 139 ms, so 25 frames written and 75 skipped for
+  time -- said, not hidden.
+
 Not defects, and left as they are:
 
 - **McUsd blows out.** Its DistantLight and DomeLight leave intensity

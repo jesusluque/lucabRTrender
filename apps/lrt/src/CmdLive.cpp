@@ -15,6 +15,7 @@
 #include <limits>
 #include <cstdio>
 #include <memory>
+#include <optional>
 #include <string>
 
 #include "Commands.h"
@@ -199,9 +200,20 @@ void addLive(CLI::App& app) {
         const double codesPerFrame = (*renderer)->timeCodesPerSecond() * static_cast<double>(rate.denominator) /
                                      static_cast<double>(rate.numerator);
 
+        // A stage without cameras is framed as lrt stage and lrt view frame it.
+        std::optional<render::Camera> own;
+        if (o->camera.empty() && (*renderer)->cameras().empty()) {
+            auto framed = (*renderer)->framingCamera(start, 35.0, o->technique);
+            if (!framed) fail(framed.error().toString());
+            own = *framed;
+        }
+        const auto renderAt = [&](double at) {
+            return own ? (*renderer)->render(*own, at, width, height, o->technique)
+                       : (*renderer)->render(o->camera, at, width, height, o->technique);
+        };
         // A frame before the clock counts: the first render loads the stage
         // onto the device and compiles its shaders, which takes frames.
-        if (auto warm = (*renderer)->render(o->camera, start, width, height, o->technique); !warm) {
+        if (auto warm = renderAt(start); !warm) {
             fail(warm.error().toString());
         }
         const int64_t now = (*clock)->frameAt((*clock)->nowTaiNs()) + 1;
@@ -224,7 +236,7 @@ void addLive(CLI::App& app) {
             worstLate = std::max(worstLate, tick.lateNs());
             const double time = start + static_cast<double>(index - anchor) * codesPerFrame;
             const auto began = std::chrono::steady_clock::now();
-            auto image = (*renderer)->render(o->camera, time, width, height, o->technique);
+            auto image = renderAt(time);
             if (!image) fail(image.error().toString());
             const double renderMs =
                 std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - began).count();

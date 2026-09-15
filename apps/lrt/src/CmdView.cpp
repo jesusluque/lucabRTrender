@@ -24,6 +24,7 @@ void addView(CLI::App& app) {
     cmd->add_flag("--choose-lights", options->chooseLights, "one light a sample, chosen by power");
     cmd->add_flag("--edr", options->edr, "extended dynamic range: a float surface and ACES 2.0 up to the screen's peak");
     cmd->add_option("--snapshot", options->snapshot, "with --frames: the last frame as shown, to this EXR");
+    cmd->add_flag("--play", options->play, "start with the timeline playing");
     cmd->callback([options, size] {
         if (std::sscanf(size->c_str(), "%ux%u", &options->width, &options->height) != 2) {
             std::fprintf(stderr, "--size wants WIDTHxHEIGHT\n");
@@ -34,8 +35,8 @@ void addView(CLI::App& app) {
             std::fprintf(stderr, "%s\n", stats.error().toString().c_str());
             throw CLI::RuntimeError(1);
         }
-        std::printf("%u frames: draw %.2f ms, frame %.2f ms (medians)\n", stats->frames, stats->medianDrawMs,
-                    stats->medianFrameMs);
+        std::printf("%u frames: draw %.2f ms, frame %.2f ms (medians); %u distinct times, the last %.2f\n",
+                    stats->frames, stats->medianDrawMs, stats->medianFrameMs, stats->distinctTimes, stats->lastTime);
     });
 }
 

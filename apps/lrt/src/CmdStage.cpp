@@ -96,47 +96,6 @@ void addConvert(CLI::App& app) {
     });
 }
 
-/// A camera framing what the stage draws, as lrt view opens on a stage: a
-/// small raster frame commits the scene, the engine's bounds of what it
-/// drew (a kernel's) place the camera, from the same yaw and pitch.
-Result<render::Camera> frameAll(usd::StageRenderer& renderer, double time, double focal, const std::string& technique) {
-    const char axis = renderer.upAxis();
-    const std::array<double, 3> up = axis == 'Z' ? std::array<double, 3>{0.0, 0.0, 1.0}
-                                                 : std::array<double, 3>{0.0, 1.0, 0.0};
-    const auto orbit = [&](const std::array<double, 3>& target, double distance, double radius) {
-        const double yaw = 0.6;
-        const double pitch = 0.35;
-        const double cp = std::cos(pitch);
-        const std::array<double, 3> away =
-            axis == 'Z' ? std::array<double, 3>{cp * std::sin(yaw), -cp * std::cos(yaw), std::sin(pitch)}
-                        : std::array<double, 3>{cp * std::sin(yaw), std::sin(pitch), cp * std::cos(yaw)};
-        render::Camera camera = render::Camera::lookingAt(
-            {target[0] + away[0] * distance, target[1] + away[1] * distance, target[2] + away[2] * distance},
-            {target[0], target[1], target[2]}, {up[0], up[1], up[2]});
-        camera.lens.focal = focal;
-        camera.lens.nearZ = std::max(distance * 1e-3, 1e-4);
-        camera.lens.farZ = distance + radius * 8.0 + 1.0;
-        return camera;
-    };
-    LRT_TRY(renderer.draw(orbit({0.0, 0.0, 0.0}, 10.0, 5.0), time, 64, 64, technique == "rt" ? "raster" : technique));
-    auto found = renderer.bounds();
-    if (!found) return std::move(found).error();
-    const std::optional<scene::Bounds>& bounds = *found;
-    if (!bounds) {
-        return Error(ErrorCode::NotFound, "--frame-all: the stage draws nothing to frame");
-    }
-    std::array<double, 3> target{};
-    double diagonal = 0.0;
-    for (size_t k = 0; k < 3; ++k) {
-        target[k] = 0.5 * (double(bounds->min[k]) + double(bounds->max[k]));
-        const double d = double(bounds->max[k]) - double(bounds->min[k]);
-        diagonal += d * d;
-    }
-    const double radius = std::max(0.5 * std::sqrt(diagonal), 1e-3);
-    const double halfFov = std::atan(0.5 * 18.672 / focal);
-    return orbit(target, radius / std::sin(halfFov) * 1.05, radius);
-}
-
 void addStage(CLI::App& app) {
     struct Options {
         std::string stage, camera, output = "out.exr", size = "1920x1080", technique = "raster",
@@ -221,7 +180,7 @@ void addStage(CLI::App& app) {
             camera.lens.farZ = o->farZ;
             own = camera;
         } else if (o->frameAll || (o->camera.empty() && (*renderer)->cameras().empty())) {
-            auto framed = frameAll(**renderer, o->time, o->focal, o->technique);
+            auto framed = (*renderer)->framingCamera(o->time, o->focal, o->technique);
             if (!framed) {
                 std::fprintf(stderr, "%s\n", framed.error().toString().c_str());
                 throw CLI::RuntimeError(1);

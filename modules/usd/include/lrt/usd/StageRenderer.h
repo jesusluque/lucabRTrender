@@ -85,6 +85,13 @@ public:
     /// mesh drew, or one not requested, has no buffer: it shows as the background.
     [[nodiscard]] Result<technique::DisplaySource> displaySource(const std::string& aov);
 
+    /// A camera of the engine's own framing what the stage draws, as lrt view
+    /// opens on a stage: a small frame commits the scene (raster, whatever
+    /// `technique` is), the bounds of what it drew place an orbit camera of
+    /// `focal` mm. For a stage without cameras.
+    [[nodiscard]] Result<render::Camera> framingCamera(double time, double focal = 35.0,
+                                                       const std::string& technique = "raster");
+
     /// Where what the last frame drew is, in world space.
     [[nodiscard]] Result<std::optional<scene::Bounds>> bounds();
 
