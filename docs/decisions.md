@@ -2567,8 +2567,9 @@ is read from the settings prim and reported, not acted on.
 **Not done.** Light groups collect direct light only: emission seen by the
 camera or a bounce, and the background, are in no group, so a frame with
 emissive geometry sums its groups short of the beauty by exactly those.
-`materialBindingPurposes` is read and not applied (one purpose, `full`, is
-what the delegate binds). Products' `disableMotionBlur` and
+`materialBindingPurposes` is applied since the usd-wg end to end (below):
+this line used to say the delegate bound `full`, and it bound Hydra's
+default, `preview`. Products' `disableMotionBlur` and
 `disableDepthOfField` are read and not applied. A render var of any other
 light path expression is refused with a message.
 
@@ -2777,6 +2778,109 @@ they do not are the dome's background seen through the openings, which is
 in no group, as M10 records. The `window` group is empty in this layer
 because its rect, turned 90 degrees about Y, emits away from the kitchen:
 the bench layer's authoring, not the renderer's.
+
+## End to end: usd-wg assets and OpenUSD's own test stages
+
+Nineteen stages, each drawn by `lrt stage` under raster and under rt (64
+paths a pass, 128 in all, 2 bounces) at 640x480: from usd-wg/assets the
+standard shader ball, McUsd, the chess set, the carbon frame bike, the
+elephant with monochord, the spinning pyramids (subdivision, creases), the
+MaterialX texture and texture coordinate tests, the Utah teapot and five
+USDZ glTF conversions (DamagedHelmet, CesiumMan, RiggedFigure, BrainStem,
+AnimatedCube); from OpenUSD's usdImagingGL testenv the basis curves, curves
+with vertex colour, LBS skinning, the skinned arm, blend shapes, a VDB smoke
+volume and the simple volumes. A stage without a camera is framed by a new
+`lrt stage --frame-all`, which is also what a stage with no camera gets: a
+small raster frame commits the scene and the engine's bounds of what it drew
+place an orbit camera, as `lrt view` opens. Nine defects, every one found by
+a real asset and none by a fixture, each now with a case of its own that
+fails without its fix where a control was run:
+
+- **Textures authored relative to their layer did not load.** hdMtlx
+  writes a file input as its *authored* path, so `./textures/wood.jpg`
+  was read relative to the process. The resolved path, which the value
+  carries, goes in first ("a texture authored relative to its layer";
+  without the fix the square reads black). The teapot, the shader ball, the
+  bike and every USDZ lost their textures to this.
+- **A float3 primvar reader into a colour input failed the material.** The
+  reader is a vector to MaterialX; UsdPreviewSurface's diffuseColor a
+  colour. It takes the colour nodedef where what it feeds is one (a tint
+  primvar reads 0.699 0.300 0.499; without, the displayColor fallback).
+- **USD's types for UsdUVTexture's scale and bias, and a colour into the
+  vector normal.** USD authors float4, MaterialX declares color4; a normal
+  map's rgb is a colour into a vector. hdMtlx types inputs by what they were
+  given, the nodedef stops matching and the whole material fails. Inputs of
+  the same float count take the declared type after hdMtlx builds the
+  document. McUsd's 21 materials, the bike's, the helmet's and the
+  elephant's all failed so. hdMtlx still prints its own mismatch messages
+  before the fix-up runs: noise, not failure.
+- **UsdUVTexture's wrap `repeat`** is `periodic` in MaterialX's enum, and
+  `useMetadata` its default: mapped (CesiumMan and AnimatedCube failed).
+- **Material binding purposes.** The delegate never overrode
+  `GetMaterialBindingPurpose`, so Hydra's default, `preview`, was resolved,
+  and a `material:binding:full` -- the shader ball's walls -- was never
+  seen; M10's note said the opposite. The delegate answers `full`, and
+  `StageRenderer` resolves a settings prim's `materialBindingPurposes` in a
+  filtering scene index of its own (`BindingPurposes.h`), since hdsi's
+  resolver fixes its purposes when made and a chain the render index
+  observes cannot swap it. Changing the list dirties every prim with
+  bindings; `HdChangeTracker::MarkAllRprimsDirty` does not, under scene
+  index emulation, reach prims the stage scene index owns (measured: the
+  test's square stayed blue). The case: full, preview then all-purpose,
+  all-purpose alone, and a settings prim's list through its products.
+- **Primvars on the material** (the blend shapes stage's
+  `primvars:displayColor` on its Material) reach bound geometry only
+  through `HdsiMaterialPrimvarTransferSceneIndex`, which Storm registers for
+  itself: now registered for this renderer too, in Storm's phase. The blend
+  shapes read green, as the baseline image does.
+- **Materials identical but for their name compiled apart.** The generator
+  names the surface's variables after the renderable element, which hdMtlx
+  names after the material prim, so the shader ball's 17 materials were 13
+  modules of 5 sources. The renderable is renamed before generation (17
+  materials, 4 modules; "materials that differ in name and values alone
+  share one module").
+- **The path traced kernel ran the Metal compiler service out.** With the
+  shader ball's 13 modules and the chess set's 15, `tracePaths` failed
+  ("XPC_ERROR_CONNECTION_INTERRUPTED ... after multiple retries") after 4 to
+  5 minutes. The front end is not it: `metal -c` on the translated source
+  takes 0.6 s. Timed with a scratch tool that makes the library and the
+  pipeline from the same source (chess, 15 materials, 37k lines of MSL):
+  as generated, 233.6 s and the service gives up; with only the material
+  dispatch marked `noinline`, 5.8 s. The dispatch was reached from five
+  call sites -- the camera's hit, a lens sample's, a surface bounce's, a
+  medium bounce's -- and each inlined copy carried every material. Slang
+  accepts `[noinline]` and emits nothing for Metal, so the kernel was
+  restructured instead: finding a hit (`Found`) and evaluating its material
+  are apart, and materials are evaluated at one site in the vertex loop,
+  the camera's hit still once a pixel. Chess under rt: 31 s for the whole
+  command, the shader ball 30 s. The one behaviour that moved: the aux
+  planes carry the first *shaded* surface hit, which differs from the old
+  first hit only when a medium scatters in front of it on the first path.
+  The raster's shading kernel has one call site and never showed it.
+- **A stage without lights path traced black** while the raster lit it
+  with its headlight. The engine now asks the path tracer for the same
+  headlight when the frame has no lights (`PathSettings::headlight`), at the
+  first vertex only: an unlit stage is the same image under both (p99 0,
+  max 0). It is the engine's to ask and not the kernel's to assume: the
+  closed emissive shell, lit by its emission alone, read 1.67 times its
+  series when the kernel lit every lightless frame.
+
+Not defects, and left as they are:
+
+- **McUsd blows out.** Its DistantLight and DomeLight leave intensity
+  unauthored ("no intensity often helps the viewer pick a default"), and
+  UsdLux's default for a distant light is 50000: with its 1 degree angle
+  that is an illuminance of about 12. The renderer follows the schema.
+- **The MaterialX texture test's teapot is black**: its `.mtlx` sets
+  `fileprefix="./textures/"` and also writes `./textures/` in every value,
+  so the path is `./textures/./textures/brass_color.jpg`; its own flattened
+  sibling authors `textures/brass_color.jpg`.
+- **glslfx materials** (the VDB test's checkerboard, the simple volumes'
+  ellipsoids) are Storm's own and have no MaterialX network: displayColor.
+- **The chess set's glass pawn heads** are black under the raster's
+  headlight, which has no transmission.
+- The shader ball under raster is dim beside rt: the box is lit mostly by
+  its bounces, which raster does not draw.
 
 ## Linux, on the 94 (M11's first half)
 

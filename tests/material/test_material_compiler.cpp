@@ -391,3 +391,26 @@ TEST_CASE("a surface shader's lobes evaluate as MaterialX's own genglsl closures
         }
     }
 }
+
+// Materials that differ only in their values share a module, and a
+// material's name is not a value it has: hdMtlx names the renderable after
+// the material prim, and the generator named the surface's variables after
+// it, so every material on a stage compiled a module of its own.
+TEST_CASE("materials that differ in name and values alone share one module", "[material][materialx][share]") {
+    LRT_REQUIRE_GPU(gpu);
+    auto c = compiler(*gpu);
+    const auto named = [&](const std::string& name, const std::string& colour) {
+        std::string xml = surface("UsdPreviewSurface",
+                                  "    <input name=\"diffuseColor\" type=\"color3\" value=\"" + colour + "\" />\n");
+        const std::string from = "name=\"material\"";
+        xml.replace(xml.find(from), from.size(), "name=\"" + name + "\"");
+        auto compiled = c->compileXml(xml, name, material::ClosureVariant::Lobes);
+        if (!compiled) FAIL(compiled.error().toString());
+        return std::move(*compiled);
+    };
+    const material::CompiledMaterial back = named("back", "0.8, 0.1, 0.1");
+    const material::CompiledMaterial uvgrid = named("uvgrid", "0.1, 0.8, 0.1");
+    std::printf("  'back' is %s, 'uvgrid' is %s\n", back.module.c_str(), uvgrid.module.c_str());
+    CHECK(back.module == uvgrid.module);
+    CHECK(back.source == uvgrid.source);
+}

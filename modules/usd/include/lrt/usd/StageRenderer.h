@@ -170,6 +170,12 @@ public:
     /// The purposes the next renders draw ("default", "render", "proxy",
     /// "guide"): Hydra's render tags. Empty: default and render.
     void setIncludedPurposes(const std::vector<std::string>& purposes);
+    /// The material binding purposes the next renders resolve, in order, as
+    /// a settings prim's `materialBindingPurposes` lists them ("full",
+    /// "preview", "" for the all-purpose binding). Empty: "full", then "".
+    /// The first named purpose is the one looked for, the all-purpose
+    /// binding the fallback: a second named purpose is not consulted.
+    void setMaterialBindingPurposes(const std::vector<std::string>& purposes);
 
     /// The stage's timeCodesPerSecond and startTimeCode: how a frame on a
     /// clock maps to a USD time.

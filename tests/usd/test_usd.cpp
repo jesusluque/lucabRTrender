@@ -608,6 +608,190 @@ TEST_CASE("materials bound in USD shade a mesh: MaterialX with a texture, and Us
             CHECK(centre[k] == Catch::Approx(textureColour[size_t(k)]).epsilon(0.01));
         }
     }
+    SECTION("a texture authored relative to its layer, read from another directory, wrapping as USD spells it") {
+        // The layer in a directory of its own, the image beside it under
+        // textures/: "./textures/orange.png" names it only relative to the
+        // layer, never to the process's working directory.
+        const fs::path directory = scratch("relative_layer");
+        fs::create_directories(directory / "textures");
+        fs::copy_file(png, directory / "textures" / "orange.png", fs::copy_options::overwrite_existing);
+        const fs::path path = directory / "material_relative.usda";
+        {
+            std::ofstream out(path);
+            out << kSquareStage
+                << "def Scope \"Materials\"\n{\n"
+                   "    def Material \"Mat\"\n    {\n"
+                   "        token outputs:surface.connect = </Materials/Mat/Preview.outputs:surface>\n"
+                   "        def Shader \"Preview\"\n        {\n"
+                   "            uniform token info:id = \"UsdPreviewSurface\"\n"
+                   "            color3f inputs:diffuseColor.connect = </Materials/Mat/Texture.outputs:rgb>\n"
+                   "            int inputs:useSpecularWorkflow = 1\n"
+                   "            color3f inputs:specularColor = (0, 0, 0)\n"
+                   "            float inputs:roughness = 1\n"
+                   "            token outputs:surface\n        }\n"
+                   "        def Shader \"Texture\"\n        {\n"
+                   "            uniform token info:id = \"UsdUVTexture\"\n"
+                   "            asset inputs:file = @./textures/orange.png@\n"
+                   "            token inputs:wrapS = \"repeat\"\n"
+                   "            token inputs:wrapT = \"repeat\"\n"
+                   "            token inputs:sourceColorSpace = \"raw\"\n"
+                   "            float2 inputs:st.connect = </Materials/Mat/Reader.outputs:result>\n"
+                   "            color3f outputs:rgb\n        }\n"
+                   "        def Shader \"Reader\"\n        {\n"
+                   "            uniform token info:id = \"UsdPrimvarReader_float2\"\n"
+                   "            string inputs:varname = \"st\"\n"
+                   "            float2 outputs:result\n        }\n    }\n}\n";
+        }
+        REQUIRE(fs::current_path() != directory);
+        auto renderer = usd::StageRenderer::open(path);
+        if (!renderer) FAIL(renderer.error().toString());
+        auto image = (*renderer)->render("/Camera", 0.0, 160, 120);
+        if (!image) FAIL(image.error().toString());
+        const float* centre = image->rgba.data() + (60 * 160 + 80) * 4;
+        std::printf("  relative texture centre: %.4f %.4f %.4f (texture %.4f %.4f %.4f)\n", double(centre[0]),
+                    double(centre[1]), double(centre[2]), double(textureColour[0]), double(textureColour[1]),
+                    double(textureColour[2]));
+        for (int k = 0; k < 3; ++k) {
+            CHECK(centre[k] == Catch::Approx(textureColour[size_t(k)]).epsilon(0.01));
+        }
+    }
+    SECTION("UsdPreviewSurface's diffuseColor from a colour primvar through a float3 reader") {
+        // The reader is a vector to MaterialX and diffuseColor a colour: the
+        // material failed its declaration and the mesh fell back to its
+        // displayColor, (0.1, 0.9, 0.1). The primvar read here is another
+        // colour, so the fallback cannot pass for the material.
+        const fs::path path = scratch("material_preview_reader3.usda");
+        {
+            std::ofstream out(path);
+            std::string square = kSquareStage;
+            const std::string binding = "    rel material:binding";
+            square.insert(square.find(binding),
+                          "    color3f[] primvars:tint = [(0.7, 0.3, 0.5)] (\n        interpolation = \"constant\"\n    )\n");
+            out << square
+                << "def Scope \"Materials\"\n{\n"
+                   "    def Material \"Mat\"\n    {\n"
+                   "        token outputs:surface.connect = </Materials/Mat/Preview.outputs:surface>\n"
+                   "        def Shader \"Preview\"\n        {\n"
+                   "            uniform token info:id = \"UsdPreviewSurface\"\n"
+                   "            color3f inputs:diffuseColor.connect = </Materials/Mat/Reader.outputs:result>\n"
+                   "            int inputs:useSpecularWorkflow = 1\n"
+                   "            color3f inputs:specularColor = (0, 0, 0)\n"
+                   "            float inputs:roughness = 1\n"
+                   "            token outputs:surface\n        }\n"
+                   "        def Shader \"Reader\"\n        {\n"
+                   "            uniform token info:id = \"UsdPrimvarReader_float3\"\n"
+                   "            string inputs:varname = \"tint\"\n"
+                   "            float3 outputs:result\n        }\n    }\n}\n";
+        }
+        auto renderer = usd::StageRenderer::open(path);
+        if (!renderer) FAIL(renderer.error().toString());
+        auto image = (*renderer)->render("/Camera", 0.0, 160, 120);
+        if (!image) FAIL(image.error().toString());
+        const float* centre = image->rgba.data() + (60 * 160 + 80) * 4;
+        std::printf("  a colour primvar through a float3 reader: centre %.4f %.4f %.4f (primvar 0.7 0.3 0.5)\n",
+                    double(centre[0]), double(centre[1]), double(centre[2]));
+        CHECK(centre[0] == Catch::Approx(0.7F).margin(0.07F));
+        CHECK(centre[1] == Catch::Approx(0.3F).margin(0.03F));
+        CHECK(centre[2] == Catch::Approx(0.5F).margin(0.05F));
+    }
+    SECTION("a primvar authored on the material reaches the mesh bound to it") {
+        // The blend shape test stage's material carries primvars:displayColor
+        // itself and reads it back: the mesh has none of its own. Transferred
+        // by hdsi, the square is the material's colour; untransferred, the
+        // reader reads its default, black.
+        const fs::path path = scratch("material_primvar_transfer.usda");
+        {
+            std::string square = kSquareStage;
+            const std::string colour = "    color3f[] primvars:displayColor = [(0.1, 0.9, 0.1)] (\n"
+                                       "        interpolation = \"constant\"\n    )\n";
+            square.erase(square.find(colour), colour.size());
+            std::ofstream out(path);
+            out << square
+                << "def Scope \"Materials\"\n{\n"
+                   "    def Material \"Mat\"\n    {\n"
+                   "        color3f primvars:tint = (0.3, 0.6, 0.9)\n"
+                   "        token outputs:surface.connect = </Materials/Mat/Preview.outputs:surface>\n"
+                   "        def Shader \"Preview\"\n        {\n"
+                   "            uniform token info:id = \"UsdPreviewSurface\"\n"
+                   "            color3f inputs:diffuseColor.connect = </Materials/Mat/Reader.outputs:result>\n"
+                   "            int inputs:useSpecularWorkflow = 1\n"
+                   "            color3f inputs:specularColor = (0, 0, 0)\n"
+                   "            float inputs:roughness = 1\n"
+                   "            token outputs:surface\n        }\n"
+                   "        def Shader \"Reader\"\n        {\n"
+                   "            uniform token info:id = \"UsdPrimvarReader_float3\"\n"
+                   "            string inputs:varname = \"tint\"\n"
+                   "            float3 outputs:result\n        }\n    }\n}\n";
+        }
+        auto renderer = usd::StageRenderer::open(path);
+        if (!renderer) FAIL(renderer.error().toString());
+        auto image = (*renderer)->render("/Camera", 0.0, 160, 120);
+        if (!image) FAIL(image.error().toString());
+        const float* centre = image->rgba.data() + (60 * 160 + 80) * 4;
+        std::printf("  a material's own primvar: centre %.4f %.4f %.4f (primvar 0.3 0.6 0.9)\n", double(centre[0]),
+                    double(centre[1]), double(centre[2]));
+        CHECK(centre[0] == Catch::Approx(0.3F).margin(0.03F));
+        CHECK(centre[1] == Catch::Approx(0.6F).margin(0.06F));
+        CHECK(centre[2] == Catch::Approx(0.9F).margin(0.09F));
+    }
+    SECTION("a normal map authored as USD writes it: float4 scale and bias, a colour into a vector normal") {
+        // UsdUVTexture's scale and bias are float4 in USD and color4 in
+        // MaterialX; UsdPreviewSurface's normal is a vector fed from the
+        // texture's rgb, a colour. As authored (McUsd writes every material
+        // so) the whole material failed and fell back to displayColor.
+        const fs::path flat = scratch("flat_normal.png");
+        {
+            fs::remove(flat);
+            std::vector<uint32_t> texels(16 * 16, 0xFFFF8080u);   // ABGR: (128, 128, 255), the unperturbed normal
+            HioImageSharedPtr image = HioImage::OpenForWriting(flat.string());
+            REQUIRE(image);
+            HioImage::StorageSpec spec;
+            spec.width = 16;
+            spec.height = 16;
+            spec.depth = 1;
+            spec.format = HioFormatUNorm8Vec4;
+            spec.data = texels.data();
+            REQUIRE(image->Write(spec));
+        }
+        const fs::path path = scratch("material_preview_normalmap.usda");
+        {
+            std::ofstream out(path);
+            out << kSquareStage
+                << "def Scope \"Materials\"\n{\n"
+                   "    def Material \"Mat\"\n    {\n"
+                   "        token outputs:surface.connect = </Materials/Mat/Preview.outputs:surface>\n"
+                   "        def Shader \"Preview\"\n        {\n"
+                   "            uniform token info:id = \"UsdPreviewSurface\"\n"
+                   "            color3f inputs:diffuseColor = (0.8, 0.4, 0.2)\n"
+                   "            float3 inputs:normal.connect = </Materials/Mat/Normal.outputs:rgb>\n"
+                   "            int inputs:useSpecularWorkflow = 1\n"
+                   "            color3f inputs:specularColor = (0, 0, 0)\n"
+                   "            float inputs:roughness = 1\n"
+                   "            token outputs:surface\n        }\n"
+                   "        def Shader \"Normal\"\n        {\n"
+                   "            uniform token info:id = \"UsdUVTexture\"\n"
+                   "            asset inputs:file = @" << flat.string() << "@\n"
+                   "            float4 inputs:bias = (-1, -1, -1, -1)\n"
+                   "            float4 inputs:scale = (2, 2, 2, 2)\n"
+                   "            token inputs:sourceColorSpace = \"raw\"\n"
+                   "            float2 inputs:st.connect = </Materials/Mat/Reader.outputs:result>\n"
+                   "            float3 outputs:rgb\n        }\n"
+                   "        def Shader \"Reader\"\n        {\n"
+                   "            uniform token info:id = \"UsdPrimvarReader_float2\"\n"
+                   "            string inputs:varname = \"st\"\n"
+                   "            float2 outputs:result\n        }\n    }\n}\n";
+        }
+        auto renderer = usd::StageRenderer::open(path);
+        if (!renderer) FAIL(renderer.error().toString());
+        auto image = (*renderer)->render("/Camera", 0.0, 160, 120);
+        if (!image) FAIL(image.error().toString());
+        const float* centre = image->rgba.data() + (60 * 160 + 80) * 4;
+        std::printf("  USD-typed normal map: centre %.4f %.4f %.4f (diffuse 0.8 0.4 0.2; the fallback is 0.1 0.9 0.1)\n",
+                    double(centre[0]), double(centre[1]), double(centre[2]));
+        CHECK(centre[0] == Catch::Approx(0.8F).margin(0.08F));
+        CHECK(centre[1] == Catch::Approx(0.4F).margin(0.04F));
+        CHECK(centre[2] == Catch::Approx(0.2F).margin(0.02F));
+    }
     SECTION("UsdPreviewSurface, rough, specular workflow without specular") {
         const fs::path path = scratch("material_preview.usda");
         {
@@ -1859,6 +2043,54 @@ TEST_CASE("a UsdLux light's collection reaches only what it includes",
     CHECK(n[1] == n[0]);   // the light reaches what its collection includes
     CHECK(n[2] > 1000);
     CHECK(n[3] == 0);      // and nothing else
+}
+
+// A stage without lights: the raster lights it with the headlight, and the
+// path tracer drew it black. Both now light it alike -- the headlight at the
+// first vertex, nothing after -- so an unlit asset looks the same whichever
+// technique opens it, bounces or not.
+TEST_CASE("a stage without lights draws the same under rt as under the raster's headlight",
+          "[usd][gpu][mesh][path][headlight]") {
+    LRT_REQUIRE_GPU(gpu);
+    const gpu::Caps& caps = gpu->device->caps();
+    if (!caps.rasterization || !caps.rayQuery || !caps.accelerationStructure) {
+        SKIP("needs rasterisation and ray queries");
+    }
+    const fs::path path = scratch("unlit.usda");
+    {
+        std::ofstream out(path);
+        out << kSquareStage;
+    }
+    const uint32_t w = 160, h = 120;
+    auto renderer = usd::StageRenderer::open(path);
+    if (!renderer) FAIL(renderer.error().toString());
+    auto raster = (*renderer)->render("/Camera", 0.0, w, h, "raster");
+    (*renderer)->setPathSamples(4);
+    (*renderer)->setPathBounces(3);
+    auto traced = (*renderer)->render("/Camera", 0.0, w, h, "rt");
+    if (!raster) FAIL(raster.error().toString());
+    if (!traced) FAIL(traced.error().toString());
+    gpu::BufferDesc desc;
+    desc.bytes = raster->rgba.size() * sizeof(float);
+    desc.elementBytes = 16;
+    auto a = gpu::Buffer::create(*gpu->device, desc, raster->rgba.data());
+    auto b = gpu::Buffer::create(*gpu->device, desc, traced->rgba.data());
+    REQUIRE(a);
+    REQUIRE(b);
+    auto diff = render::compareImages(*gpu->library, *a, *b, w, h);
+    REQUIRE(diff);
+    const uint64_t lit = [&] {
+        gpu::BufferDesc zeros = desc;
+        auto empty = gpu::Buffer::create(*gpu->device, zeros);
+        REQUIRE(empty);
+        auto words = render::countDifferent(*gpu->library, *b, *empty, w * h * 4);
+        REQUIRE(words);
+        return *words;
+    }();
+    std::printf("  unlit stage, rt against raster: p99 %u, max %u, %llu pixels beyond 2; rt words lit %llu\n",
+                diff->p99, diff->max, static_cast<unsigned long long>(diff->over2), static_cast<unsigned long long>(lit));
+    CHECK(lit > 8000);
+    CHECK(diff->max <= 1);
 }
 
 // The traced technique over a mesh, through Hydra: what used to trace splats
@@ -3735,6 +3967,85 @@ TEST_CASE("a render settings prim's products come out as the AOVs rendered one a
     auto first = (*renderer)->renderSettings("/Render/Settings");
     REQUIRE(first);
     CHECK(first->active);   // asking makes it active again
+}
+
+// Material binding purposes: a square bound three ways -- all-purpose to
+// red, `material:binding:full` to blue, `material:binding:preview` to green.
+// The delegate resolved Hydra's default purpose, "preview", so a
+// production binding was never seen (the shader ball's walls are bound
+// `full` alone and drew their fallback). It now resolves "full" unless a
+// settings prim's `materialBindingPurposes` names another, with the
+// all-purpose binding behind either.
+TEST_CASE("a mesh takes the material bound for the purpose render settings name, full by default",
+          "[usd][gpu][mesh][materials][purposes]") {
+    LRT_REQUIRE_GPU(gpu);
+    if (!gpu->device->caps().rasterization) {
+        SKIP("no rasterisation on this device");
+    }
+    const fs::path path = scratch("binding_purposes.usda");
+    {
+        std::ofstream out(path);
+        std::string square = kSquareStage;
+        const std::string binding = "    rel material:binding = </Materials/Mat>\n";
+        square.replace(square.find(binding), binding.size(),
+                       "    rel material:binding = </Materials/Red>\n"
+                       "    rel material:binding:full = </Materials/Blue>\n"
+                       "    rel material:binding:preview = </Materials/Green>\n");
+        out << square << "def Scope \"Materials\"\n{\n";
+        const auto material = [&](const char* name, const char* colour) {
+            out << "    def Material \"" << name << "\"\n    {\n"
+                << "        token outputs:surface.connect = </Materials/" << name << "/Preview.outputs:surface>\n"
+                << "        def Shader \"Preview\"\n        {\n"
+                   "            uniform token info:id = \"UsdPreviewSurface\"\n"
+                << "            color3f inputs:diffuseColor = " << colour << "\n"
+                << "            int inputs:useSpecularWorkflow = 1\n"
+                   "            color3f inputs:specularColor = (0, 0, 0)\n"
+                   "            float inputs:roughness = 1\n"
+                   "            token outputs:surface\n        }\n    }\n";
+        };
+        material("Red", "(0.8, 0.1, 0.1)");
+        material("Green", "(0.1, 0.8, 0.1)");
+        material("Blue", "(0.1, 0.1, 0.8)");
+        out << "}\n"
+               "def Scope \"Render\"\n{\n"
+               "    def RenderSettings \"Preview\"\n    {\n"
+               "        rel camera = </Camera>\n"
+               "        uniform token[] materialBindingPurposes = [\"preview\", \"\"]\n"
+               "        rel products = </Render/Product>\n"
+               "        int2 resolution = (64, 48)\n"
+               "    }\n"
+               "    def RenderProduct \"Product\"\n    {\n"
+               "        token productName = \"purposes.exr\"\n"
+               "        rel orderedVars = [</Render/Vars/beauty>]\n"
+               "        int2 resolution = (64, 48)\n"
+               "    }\n"
+               "    def Scope \"Vars\"\n    {\n"
+               "        def RenderVar \"beauty\"\n        {\n            string sourceName = \"Ci\"\n"
+               "            token dataType = \"color3f\"\n        }\n"
+               "    }\n}\n";
+    }
+    auto renderer = usd::StageRenderer::open(path);
+    if (!renderer) FAIL(renderer.error().toString());
+    const auto centre = [&](const char* label) {
+        auto image = (*renderer)->render("/Camera", 0.0, 160, 120);
+        if (!image) FAIL(image.error().toString());
+        const float* c = image->rgba.data() + (60 * 160 + 80) * 4;
+        std::printf("  %-34s: centre %.3f %.3f %.3f\n", label, double(c[0]), double(c[1]), double(c[2]));
+        // Which of the three: the channel that is high.
+        return c[0] > 0.5F ? 'r' : c[1] > 0.5F ? 'g' : c[2] > 0.5F ? 'b' : '?';
+    };
+    CHECK(centre("default (full)") == 'b');
+    (*renderer)->setMaterialBindingPurposes({"preview", ""});
+    CHECK(centre("preview, then all-purpose") == 'g');
+    (*renderer)->setMaterialBindingPurposes({""});
+    CHECK(centre("all-purpose alone") == 'r');
+    (*renderer)->setMaterialBindingPurposes({});
+    CHECK(centre("back to the default") == 'b');
+    // From a settings prim: its products are drawn with its purposes, and
+    // the renders after keep them.
+    auto written = (*renderer)->renderProducts("/Render/Preview", 0.0, path.parent_path());
+    if (!written) FAIL(written.error().toString());
+    CHECK(centre("after /Render/Preview's products") == 'g');
 }
 
 // Light groups (M10): a light's `lrt:lightGroup` puts its direct light,

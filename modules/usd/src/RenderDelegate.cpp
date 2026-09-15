@@ -9,6 +9,7 @@
 #include <pxr/imaging/hdsi/pinnedCurveExpandingSceneIndex.h>
 #include <pxr/imaging/hdsi/tetMeshConversionSceneIndex.h>
 #include <pxr/imaging/hdsi/lightLinkingSceneIndex.h>
+#include <pxr/imaging/hdsi/materialPrimvarTransferSceneIndex.h>
 #include <pxr/imaging/hdsi/renderSettingsFilteringSceneIndex.h>
 #include <pxr/imaging/hdsi/velocityMotionResolvingSceneIndex.h>
 
@@ -143,6 +144,16 @@ void HdLrtRegisterSceneIndices() {
                 return HdsiLightLinkingSceneIndex::New(inputScene, inputArgs);
             },
             _lightLinkingArgs(), 3, HdSceneIndexPluginRegistry::InsertionOrderAtEnd);
+        // Primvars authored on a material reach the geometry bound to it
+        // (a mesh's own win), in the phase Storm transfers them: a material
+        // reading "displayColor" from its own prim otherwise read nothing.
+        HdSceneIndexPluginRegistry::GetInstance().RegisterSceneIndexForRenderer(
+            "lucabRTrender",
+            [](const std::string&, const HdSceneIndexBaseRefPtr& inputScene,
+               const HdContainerDataSourceHandle&) -> HdSceneIndexBaseRefPtr {
+                return HdsiMaterialPrimvarTransferSceneIndex::New(inputScene);
+            },
+            nullptr, 3, HdSceneIndexPluginRegistry::InsertionOrderAtStart);
         // Render settings prims keep the `lrt:` namespaced settings and
         // their products reach the bprim; the other renderers' are dropped.
         HdSceneIndexPluginRegistry::GetInstance().RegisterSceneIndexForRenderer(

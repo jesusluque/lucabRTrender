@@ -45,6 +45,9 @@ struct PathSettings {
     bool     adaptive = false;
     float    errorTarget = 0.02F;
     uint32_t minSamples = 16;
+    /// With no lights, light the first hit from the eye as the raster's
+    /// shading does (what a host asks of a stage without lights).
+    bool     headlight = false;
 };
 
 /// How much of a frame has converged, for the adaptive gate: pixels the

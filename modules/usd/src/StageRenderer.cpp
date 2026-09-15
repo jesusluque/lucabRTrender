@@ -18,6 +18,7 @@
 #include <pxr/usd/usd/primRange.h>
 #include <pxr/usd/usd/stage.h>
 #include <pxr/imaging/hd/primOriginSchema.h>
+#include <pxr/imaging/hd/materialBindingsSchema.h>
 #include <pxr/imaging/hd/sceneIndex.h>
 #include <pxr/usd/usdGeom/camera.h>
 #include <pxr/usd/usdGeom/metrics.h>
@@ -34,6 +35,7 @@
 #include "lrt/io/Exr.h"
 #include <pxr/usdImaging/usdImaging/stageSceneIndex.h>
 
+#include "BindingPurposes.h"
 #include "RenderDelegate.h"
 #include "RenderParam.h"
 #include "RenderSettings.h"
@@ -47,6 +49,7 @@ struct StageRenderer::Impl {
     std::unique_ptr<HdLrtRenderDelegate>   delegate;
     HdsiLegacyDisplayStyleOverrideSceneIndexRefPtr displayStyle;
     HdsiSceneGlobalsSceneIndexRefPtr       globals;   ///< the active render settings prim, the frame
+    HdLrtBindingPurposesSceneIndexRefPtr   bindingPurposes;   ///< render settings' materialBindingPurposes
     HdRenderIndex*                         index = nullptr;
     UsdImagingSceneIndices                 sceneIndices;
     std::unique_ptr<HdxTaskController>     controller;
@@ -100,8 +103,12 @@ Result<std::unique_ptr<StageRenderer>> StageRenderer::open(const std::filesystem
     // The dependencies the scene indices declare (a settings prim's
     // `active` on the globals) become dirty notices only through a
     // forwarding scene index at the end of the chain.
+    // Material bindings resolved by the purposes render settings name,
+    // UsdRender's default until one does: "full", then the all-purpose one.
+    impl.bindingPurposes = HdLrtBindingPurposesSceneIndex::New(
+        impl.globals, {HdTokens->full, HdMaterialBindingsSchemaTokens->allPurpose});
     const HdSceneIndexBaseRefPtr scene = HdDependencyForwardingSceneIndex::New(
-        HdSceneIndexPluginRegistry::GetInstance().AppendSceneIndicesForRenderer("lucabRTrender", impl.globals));
+        HdSceneIndexPluginRegistry::GetInstance().AppendSceneIndicesForRenderer("lucabRTrender", impl.bindingPurposes));
     impl.index->InsertSceneIndex(scene, SdfPath::AbsoluteRootPath());
     impl.sceneIndices.stageSceneIndex->SetStage(impl.stage);
     impl.sceneIndices.stageSceneIndex->ApplyPendingUpdates();
@@ -182,6 +189,18 @@ void StageRenderer::setIncludedPurposes(const std::vector<std::string>& purposes
         }
     }
     impl_->controller->SetRenderTags(tags);
+}
+
+void StageRenderer::setMaterialBindingPurposes(const std::vector<std::string>& purposes) {
+    TfTokenVector tokens;
+    for (const std::string& purpose : purposes) {
+        tokens.emplace_back(purpose);   // "" is the all-purpose binding's name
+    }
+    if (tokens.empty()) {
+        tokens = {HdTokens->full, HdMaterialBindingsSchemaTokens->allPurpose};
+    }
+    impl_->bindingPurposes->SetPurposes(tokens);
+    impl_->sceneIndices.stageSceneIndex->ApplyPendingUpdates();
 }
 
 Result<RenderSettingsInfo> StageRenderer::renderSettings(const std::string& path) {
@@ -265,6 +284,7 @@ Result<std::vector<std::filesystem::path>> StageRenderer::renderProducts(const s
         }
     }
     setIncludedPurposes(info->includedPurposes);
+    setMaterialBindingPurposes(info->materialBindingPurposes);
     std::vector<std::filesystem::path> written;
     for (const RenderProductInfo& product : info->products) {
         if (product.width == 0 || product.height == 0) {

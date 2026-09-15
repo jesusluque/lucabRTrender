@@ -605,6 +605,18 @@ Result<CompiledMaterial> MaterialCompiler::compileDocument(const std::shared_ptr
         if (!renderable) {
             return Error::make(ErrorCode::NotFound, "materials: no renderable element '{}'", element);
         }
+        // The generator names the surface's variables after the renderable
+        // element, which hdMtlx names after the material prim: every material
+        // on a stage is a different name, so materials identical but for
+        // their values hashed apart and were compiled one module each (the
+        // standard shader ball's seventeen were thirteen modules of five
+        // sources). Nothing refers to the renderable by name: one name for
+        // all of them.
+        static const std::string kRenderableName = "lrt_surface";
+        if (renderable->getParent() == doc && renderable->getName() != kRenderableName &&
+            !doc->getChild(kRenderableName)) {
+            renderable->setName(kRenderableName);
+        }
         mx::GenContext context(generator);
         context.registerSourceCodeSearchPath(impl.sourcePaths);
         mx::GenOptions& options = context.getOptions();

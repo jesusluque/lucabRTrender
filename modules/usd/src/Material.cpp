@@ -6,6 +6,7 @@
 
 #include <MaterialXCore/Document.h>
 #include <pxr/imaging/hd/sceneDelegate.h>
+#include <pxr/usd/sdf/assetPath.h>
 #include <pxr/imaging/hdMtlx/hdMtlx.h>
 
 #include "RenderDelegate.h"
@@ -43,6 +44,52 @@ const std::map<TfToken, TfToken>& primvarReaders() {
     return kNames;
 }
 
+/// Input types as their nodedefs declare them, where an authored value or
+/// connection has the same number of floats under another name: USD authors
+/// UsdUVTexture's scale and bias as float4, which MaterialX declares color4,
+/// and connects a texture's colour output to UsdPreviewSurface's vector
+/// normal. hdMtlx types each input by what it was given, the nodedef no
+/// longer matches, and the whole material fails ("could not find a nodedef
+/// for node 'Surface'"). A float4 and a color4 are one Slang float4, so the
+/// input takes the declared name and nothing else changes.
+void matchDeclaredTypes(const MaterialX::DocumentPtr& document) {
+    const auto shape = [](const std::string& type) -> int {
+        if (type == "vector3" || type == "color3") return 3;
+        if (type == "vector4" || type == "color4") return 4;
+        return 0;
+    };
+    for (MaterialX::ElementPtr element : document->traverseTree()) {
+        const MaterialX::NodePtr node = element->asA<MaterialX::Node>();
+        if (!node) {
+            continue;
+        }
+        MaterialX::NodeDefPtr nodeDef = document->getNodeDef(node->getNodeDefString());
+        if (!nodeDef) {
+            // The one nodedef of the node's category that outputs its type;
+            // with more than one, the node is left as it is.
+            MaterialX::NodeDefPtr only;
+            size_t count = 0;
+            for (const MaterialX::NodeDefPtr& candidate : document->getMatchingNodeDefs(node->getCategory())) {
+                if (candidate->getType() == node->getType()) {
+                    only = candidate;
+                    ++count;
+                }
+            }
+            nodeDef = count == 1 ? only : nullptr;
+        }
+        if (!nodeDef) {
+            continue;
+        }
+        for (const MaterialX::InputPtr& input : node->getInputs()) {
+            const MaterialX::InputPtr declared = nodeDef->getActiveInput(input->getName());
+            if (declared && declared->getType() != input->getType() && shape(declared->getType()) != 0 &&
+                shape(declared->getType()) == shape(input->getType())) {
+                input->setType(declared->getType());
+            }
+        }
+    }
+}
+
 }   // namespace
 
 void HdLrtMaterial::Sync(HdSceneDelegate* sceneDelegate, HdRenderParam* renderParam, HdDirtyBits* dirtyBits) {
@@ -63,6 +110,23 @@ void HdLrtMaterial::Sync(HdSceneDelegate* sceneDelegate, HdRenderParam* renderPa
         for (auto& [path, node] : network.nodes) {
             if (const auto renamed = usdNodeDefs().find(node.nodeTypeId); renamed != usdNodeDefs().end()) {
                 node.nodeTypeId = renamed->second;
+                // UsdUVTexture's wrap modes as USD spells them, in MaterialX's
+                // enum: "repeat" is "periodic" there, and "useMetadata" (the
+                // file's own, which no reader here keeps) its default.
+                for (const TfToken& wrap : {TfToken("wrapS"), TfToken("wrapT")}) {
+                    const auto found = node.parameters.find(wrap);
+                    if (found == node.parameters.end()) {
+                        continue;
+                    }
+                    const std::string mode = found->second.IsHolding<TfToken>()
+                                                 ? found->second.UncheckedGet<TfToken>().GetString()
+                                                 : found->second.IsHolding<std::string>()
+                                                       ? found->second.UncheckedGet<std::string>()
+                                                       : std::string();
+                    if (mode == "repeat" || mode == "useMetadata") {
+                        found->second = VtValue(TfToken("periodic"));
+                    }
+                }
             } else if (const auto reader = primvarReaders().find(node.nodeTypeId); reader != primvarReaders().end()) {
                 node.nodeTypeId = reader->second;
                 readers.insert(path);
@@ -81,11 +145,46 @@ void HdLrtMaterial::Sync(HdSceneDelegate* sceneDelegate, HdRenderParam* renderPa
                 rename(kFallback, TfToken("default"));
             }
         }
+        // A reader of three or four floats is a vector to MaterialX, and a
+        // colour input it feeds (UsdPreviewSurface's diffuseColor from
+        // displayColor, the common case) would fail its declaration: the
+        // reader takes the colour nodedef where what it feeds is a colour.
+        const MaterialX::DocumentPtr& libraries = HdMtlxStdLibraries();
         for (auto& [path, node] : network.nodes) {
+            const MaterialX::NodeDefPtr nodeDef = libraries->getNodeDef(node.nodeTypeId.GetString());
             for (auto& [input, connections] : node.inputConnections) {
                 for (HdMaterialConnection2& connection : connections) {
-                    if (readers.count(connection.upstreamNode) != 0 && connection.upstreamOutputName == kResult) {
+                    if (readers.count(connection.upstreamNode) == 0) {
+                        continue;
+                    }
+                    if (connection.upstreamOutputName == kResult) {
                         connection.upstreamOutputName = TfToken("out");
+                    }
+                    const MaterialX::InputPtr declared = nodeDef ? nodeDef->getActiveInput(input.GetString()) : nullptr;
+                    if (!declared) {
+                        continue;
+                    }
+                    HdMaterialNode2& reader = network.nodes[connection.upstreamNode];
+                    if (declared->getType() == "color3" && reader.nodeTypeId == TfToken("ND_geompropvalue_vector3")) {
+                        reader.nodeTypeId = TfToken("ND_geompropvalue_color3");
+                    } else if (declared->getType() == "color4" &&
+                               reader.nodeTypeId == TfToken("ND_geompropvalue_vector4")) {
+                        reader.nodeTypeId = TfToken("ND_geompropvalue_color4");
+                    }
+                }
+            }
+        }
+        // HdMtlx writes a file input as its authored path, which a relative
+        // path ("./textures/wood.jpg") makes relative to the process's
+        // directory rather than the layer that wrote it. The value arrives
+        // resolved; the resolved path goes in where there is one. A UDIM
+        // pattern does not resolve, and keeps its authored path.
+        for (auto& [path, node] : network.nodes) {
+            for (auto& [name, value] : node.parameters) {
+                if (value.IsHolding<SdfAssetPath>()) {
+                    const SdfAssetPath& asset = value.UncheckedGet<SdfAssetPath>();
+                    if (!asset.GetResolvedPath().empty()) {
+                        value = VtValue(SdfAssetPath(asset.GetResolvedPath(), asset.GetResolvedPath()));
                     }
                 }
             }
@@ -99,6 +198,7 @@ void HdLrtMaterial::Sync(HdSceneDelegate* sceneDelegate, HdRenderParam* renderPa
                     HdMtlxTexturePrimvarData data;
                     MaterialX::DocumentPtr mtlx = HdMtlxCreateMtlxDocumentFromHdNetwork(
                         network, surface->second, surfacePath, id, HdMtlxStdLibraries(), &data);
+                    matchDeclaredTypes(mtlx);
                     document = mtlx;
                 } catch (const std::exception& e) {
                     lrt::log::warn("hdLrt: material {}: {}", id.GetString(), e.what());

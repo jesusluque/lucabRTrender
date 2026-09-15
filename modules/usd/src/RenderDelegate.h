@@ -47,6 +47,10 @@ public:
     /// `lrt:technique`: "raster" (default) or "rt".
     HdRenderSettingDescriptorList GetRenderSettingDescriptors() const override;
     TfTokenVector GetMaterialRenderContexts() const override;
+    /// The binding purpose a mesh's material is resolved with, falling back
+    /// to the all-purpose binding: a renderer's "full", not Storm's "preview".
+    /// (StageRenderer resolves render settings' purposes before this is asked.)
+    TfToken GetMaterialBindingPurpose() const override { return HdTokens->full; }
     [[nodiscard]] lrt::usd::Technique GetTechnique() const;
     /// `lrt:settleStreams`: false (default) for a viewport, which lets streamed
     /// assets fill in over frames; true for an image that must be complete.

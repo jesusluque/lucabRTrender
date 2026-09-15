@@ -24,7 +24,7 @@ struct PathParams {
     uint seed;         // which samples these are
     uint accumulated;  // paths a pixel already in `sum`
     uint chooseLights;
-    uint pad0;
+    uint headlight;    // 1: with no lights, the first vertex is lit from the eye, as the raster lights it
     uint writeAux;     // 1: write the first hit's albedo and normal
     uint adaptive;     // 1: a converged pixel takes no more paths
     float errorTarget; // relative standard error of the mean a pixel stops at
@@ -335,31 +335,58 @@ Shaded shadeSurface(uint2 pixel, Surface s) {
     return out;
 }
 
+/// A surface a ray found, before its material is evaluated. Finding and
+/// shading are apart so the kernel evaluates materials at one place only:
+/// every call site of the material dispatch is a copy of every material once
+/// the Metal compiler inlines it, and with the camera's hit, a lens sample's,
+/// a bounce's and a medium bounce's each shading, a stage of fifteen
+/// materials (the chess set) ran the compiler service out after four minutes
+/// where one site builds the pipeline in six seconds.
+struct Found {
+    Surface s;
+    bool    valid;
+    float3  positionWorld;
+    float3  eye;           // where the ray came from: the camera's position, or the bounce's
+    float3  rayOrigin;     // where the ray that found it started, and how far it went: a medium's segment
+    float   rayT;
+    float   depth;
+};
+
+Found foundNothing() {
+    Found f;
+    f.valid = false;
+    f.depth = 0.0;
+    f.rayT = 0.0;
+    return f;
+}
+
 /// The camera's hit, rebuilt from the visibility pair as the raster shading
 /// does, so the two shade the same point.
-Shaded shadeAt(uint2 pixel, uint4 seen) {
-    Shaded out;
-    out.valid = false;
-    out.depth = 0.0;
+Found foundAt(uint2 pixel, uint4 seen) {
     if (seen.x == 0) {
-        return out;
+        return foundNothing();
     }
-    return shadeSurface(pixel, surfaceAt(camera, pixel.x, pixel.y, seen));
+    Found f;
+    f.s = surfaceAt(camera, pixel.x, pixel.y, seen);
+    f.valid = true;
+    f.positionWorld = applyRows(toWorld, f.s.viewPosition, 1.0);
+    f.eye = applyRows(toWorld, float3(0.0), 1.0);
+    f.rayOrigin = f.eye;
+    f.rayT = length(f.positionWorld - f.eye);
+    f.depth = f.s.depth;
+    return f;
 }
 
 /// A surface away from the camera: the same reconstruction, but the eye is
 /// wherever the ray came from.
 /// A bounce's hit, rebuilt from where the ray met the triangle -- not from
-/// the pixel. It used to call shadeAt, which re-intersects the *camera's* ray
-/// with the triangle the bounce found: a point that is not on the bounce ray
-/// at all, with barycentrics and a normal to match. The closed box read 5 pi
-/// times its geometric series while that stood.
-Shaded shadeHit(uint2 pixel, PathHit hit, float3 from, float3 direction) {
-    Shaded out;
-    out.valid = false;
-    out.depth = 0.0;
+/// the pixel. It used to re-intersect the *camera's* ray with the triangle
+/// the bounce found: a point that is not on the bounce ray at all, with
+/// barycentrics and a normal to match. The closed box read 5 pi times its
+/// geometric series while that stood.
+Found foundHit(PathHit hit, float3 from, float3 direction) {
     if (hit.seen.x == 0) {
-        return out;
+        return foundNothing();
     }
     // The bounce's direction in view space, for which side of the surface it
     // arrives at: toWorld's rows are view-to-world, their transpose takes a
@@ -371,10 +398,29 @@ Shaded shadeHit(uint2 pixel, PathHit hit, float3 from, float3 direction) {
                                         toWorld.row0.z * d.x + toWorld.row1.z * d.y + toWorld.row2.z * d.z);
     const float3 weights = float3(1.0 - hit.barycentrics.x - hit.barycentrics.y, hit.barycentrics.x,
                                   hit.barycentrics.y);
-    out = shadeSurface(pixel, surfaceFromWeights(hit.seen, weights, viewDirection));
-    out.toEye = normalize(from - out.inputs.positionWorld);
-    out.rayOrigin = from;
-    out.rayT = hit.t;
+    Found f;
+    f.s = surfaceFromWeights(hit.seen, weights, viewDirection);
+    f.valid = true;
+    f.positionWorld = applyRows(toWorld, f.s.viewPosition, 1.0);
+    f.eye = from;
+    f.rayOrigin = from;
+    f.rayT = hit.t;
+    f.depth = f.s.depth;
+    return f;
+}
+
+/// What was found, its material evaluated: the kernel's one call of it.
+Shaded shadeFound(uint2 pixel, Found f) {
+    Shaded out;
+    out.valid = false;
+    out.depth = 0.0;
+    if (!f.valid) {
+        return out;
+    }
+    out = shadeSurface(pixel, f.s);
+    out.toEye = normalize(f.eye - out.inputs.positionWorld);
+    out.rayOrigin = f.rayOrigin;
+    out.rayT = f.rayT;
     return out;
 }
 
@@ -394,10 +440,7 @@ uint sampleMask(uint2 pixel, uint sample) {
     return 1u << min(uint(t * float(path.buckets)), path.buckets - 1);
 }
 
-Shaded shadeLensSample(uint2 pixel, uint sample, uint mask) {
-    Shaded out;
-    out.valid = false;
-    out.depth = 0.0;
+Found foundLensSample(uint2 pixel, uint sample, uint mask) {
     float3 origin;
     float3 direction;
     viewRay(camera, float2(pixel) + 0.5, origin, direction);
@@ -424,10 +467,7 @@ Shaded shadeLensSample(uint2 pixel, uint sample, uint mask) {
                                                    dot(toWorld.row1.xyz, direction),
                                                    dot(toWorld.row2.xyz, direction)));
     const PathHit hit = traceNearestFrom(originWorld, directionWorld, camera.nearZ, mask);
-    if (hit.seen.x == 0) {
-        return out;
-    }
-    return shadeHit(pixel, hit, originWorld, directionWorld);
+    return foundHit(hit, originWorld, directionWorld);
 }
 
 /// One light, sampled and weighed: next event estimation, with the density of
@@ -469,7 +509,13 @@ void primaryRay(uint2 pixel, uint sample, out float3 originWorld, out float3 dir
 float3 gatherLight(Shaded sh, uint2 pixel, uint sample, uint bounce, uint mask, out uint group) {
     group = 0;
     if (lightCount == 0) {
-        return float3(0.0);
+        // A stage without lights is lit as the raster lights it, when the
+        // engine asks: the headlight, unit radiance from the eye, at the
+        // first vertex alone. Paths go on and find nothing more, so both
+        // techniques draw one image of an unlit stage rather than rt drawing
+        // it black. Not otherwise: a scene lit by its emission alone is lit
+        // by that.
+        return bounce == 0 && path.headlight != 0 ? kPi * stackEval(sh.stack, sh.toEye, sh.toEye) : float3(0.0);
     }
     const float pick = random(pixel, sample, bounce, 11u);
     const LightChoice choice = path.chooseLights == 2
@@ -593,16 +639,22 @@ void tracePaths(uint3 group: SV_GroupID, uint index: SV_GroupIndex) {
         return;   // converged: its mean stands
     }
     const uint samples = max(path.samples, 1u);
-    // The camera's hit does not depend on the sample: rebuilt and its material
-    // evaluated once, not once a path. What the denoiser wants of it is written
-    // here too, since it is the same for every sample. With a lens it does
-    // depend on the sample, and each path casts its own; the aux then carry
-    // the first sample's hit.
+    // The camera's hit does not depend on the sample: rebuilt once, and its
+    // material evaluated the first time a path reaches it, then kept, not
+    // evaluated once a path. What the denoiser wants of it is written then,
+    // since it is the same for every sample. With a lens it does depend on
+    // the sample, and each path casts its own; the aux then carry the first
+    // hit a path shaded.
     const bool ownRays = kTraces && path.ownRays != 0;
-    const Shaded first = ownRays ? shadeLensSample(tid, 0u, sampleMask(tid, 0u)) : shadeAt(tid, seen);
+    const Found firstFound = ownRays ? foundLensSample(tid, 0u, sampleMask(tid, 0u)) : foundAt(tid, seen);
+    Shaded first;
+    first.valid = false;
+    first.depth = 0.0;
+    bool firstShaded = false;
+    bool auxWritten = false;
     if (path.writeAux != 0) {
-        aux[at] = first.valid ? float4(stackAlbedo(first.stack, first.toEye), 1.0) : float4(0.0);
-        aux[pixels + at] = first.valid ? float4(first.inputs.normalWorld, 1.0) : float4(0.0);
+        aux[at] = float4(0.0);
+        aux[pixels + at] = float4(0.0);
     }
     float3 total = float3(0.0);
     float  alpha = 0.0;
@@ -610,18 +662,18 @@ void tracePaths(uint3 group: SV_GroupID, uint index: SV_GroupIndex) {
     float  squares = 0.0;   // sum of each sample's luminance squared
     uint group = 0;
     Groups groups = groupsZero();
-    for (uint sample = 0; sample < samples && (first.valid || ownRays || kVolumes); ++sample) {
+    for (uint sample = 0; sample < samples && (firstFound.valid || ownRays || kVolumes); ++sample) {
         const uint mask = sampleMask(tid, sample);
-        Shaded cur = ownRays && sample > 0 ? shadeLensSample(tid, sample, mask) : first;
+        Found found = ownRays && sample > 0 ? foundLensSample(tid, sample, mask) : firstFound;
         // The ray to the first vertex: from the surface it found, or the
         // pixel's ray to nothing -- along which a volume may still lie.
         float3 o;
         float3 d;
         float tHit;
-        if (cur.valid) {
-            o = cur.rayOrigin;
-            d = normalize(cur.inputs.positionWorld - cur.rayOrigin);
-            tHit = cur.rayT;
+        if (found.valid) {
+            o = found.rayOrigin;
+            d = normalize(found.positionWorld - found.rayOrigin);
+            tHit = found.rayT;
         } else if (kVolumes) {
             primaryRay(tid, sample, o, d);
             tHit = 1.0e30;
@@ -643,13 +695,13 @@ void tracePaths(uint3 group: SV_GroupID, uint index: SV_GroupIndex) {
             float tS;
             float3 albedo;
             float g;
-            const float tMin = bounce == 0 && cur.valid && !ownRays ? camera.nearZ : 0.0;
+            const float tMin = bounce == 0 && found.valid && !ownRays ? camera.nearZ : 0.0;
             if (kVolumes && mediumScatterAny(o, d, tMin, tHit, rng, tS, albedo, g)) {
                 const float3 p = o + d * tS;
                 if (!vertexSeen) {
                     vertexSeen = true;
                     opacity = 1.0;
-                    depthHere = cur.valid ? cur.depth : tS;
+                    depthHere = found.valid ? found.depth : tS;
                 }
                 throughput *= albedo;
                 const float3 direct = gatherLightMedium(p, -d, g, tid, sample, bounce, mask, group);
@@ -663,17 +715,29 @@ void tracePaths(uint3 group: SV_GroupID, uint index: SV_GroupIndex) {
                 d = hgSample(-d, g, float2(mediumRandom(rng), mediumRandom(rng)));
                 o = p;
                 const PathHit hit = traceNearestFrom(o, d, 1.0e-4 * max(1.0, length(o)), mask);
-                if (hit.seen.x == 0) {
-                    cur.valid = false;
-                    tHit = 1.0e30;
-                } else {
-                    cur = shadeHit(tid, hit, o, d);
-                    tHit = hit.t;
-                }
+                found = foundHit(hit, o, d);
+                tHit = hit.seen.x == 0 ? 1.0e30 : hit.t;
                 continue;
             }
-            if (!cur.valid) {
+            if (!found.valid) {
                 break;   // the ray escaped
+            }
+            // The one place materials are evaluated (Found says why); the
+            // camera's hit once a pixel.
+            Shaded cur;
+            if (bounce == 0 && !ownRays && firstShaded) {
+                cur = first;
+            } else {
+                cur = shadeFound(tid, found);
+                if (bounce == 0 && !ownRays) {
+                    first = cur;
+                    firstShaded = true;
+                }
+            }
+            if (bounce == 0 && path.writeAux != 0 && !auxWritten) {
+                aux[at] = float4(stackAlbedo(cur.stack, cur.toEye), 1.0);
+                aux[pixels + at] = float4(cur.inputs.normalWorld, 1.0);
+                auxWritten = true;
             }
             if (!vertexSeen) {
                 vertexSeen = true;
@@ -707,15 +771,10 @@ void tracePaths(uint3 group: SV_GroupID, uint index: SV_GroupIndex) {
             o = p + (away + ms.wi) * (1.0e-3 * scale);
             d = ms.wi;
             const PathHit hit = traceNearestFrom(o, d, 1.0e-3 * scale, mask);
-            if (hit.seen.x == 0) {
-                cur.valid = false;
-                tHit = 1.0e30;
-            } else {
-                // Rebuilt from where the ray met the triangle, its eye where
-                // the bounce left from.
-                cur = shadeHit(tid, hit, p, d);
-                tHit = hit.t;
-            }
+            // Rebuilt from where the ray met the triangle, its eye where the
+            // bounce left from; shaded when the next vertex comes to it.
+            found = foundHit(hit, p, d);
+            tHit = hit.seen.x == 0 ? 1.0e30 : hit.t;
         }
         if (!vertexSeen) {
             continue;   // nothing along the ray at all: transparent, and counted
@@ -968,6 +1027,7 @@ Result<void> PathTracer::trace(gpu::CommandBatch& batch, const VisibilityTargets
             cursor["volumeWords"].setBinding(frame.volumes->rhi());
         }
         cursor["path"]["adaptive"].setData(uint32_t{settings.adaptive ? 1u : 0u});
+        cursor["path"]["headlight"].setData(uint32_t{settings.headlight ? 1u : 0u});
         cursor["path"]["errorTarget"].setData(settings.errorTarget);
         cursor["path"]["minSamples"].setData(settings.minSamples);
         const uint32_t buckets = frame.scene != nullptr ? frame.scene->buckets() : 1u;

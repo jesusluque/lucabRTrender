@@ -1540,6 +1540,7 @@ Result<void> Engine::render(const render::Projection& projection, const render::
             paths.bounces = pathBounces_.load();
             paths.adaptive = pathAdaptive_.load();
             paths.errorTarget = pathError_.load();
+            paths.headlight = frame.lights == nullptr || frame.lights->count() == 0;
             PathState now;
             now.worldToView = projection.worldToView;
             now.focalX = projection.focalX;
