@@ -24,6 +24,7 @@
 #include <vector>
 
 #include "lrt/io/Exr.h"
+#include "lrt/gpu/RayTracingKernel.h"
 #include "lrt/render/GaussianRayTracer.h"
 #include "lrt/render/ReferenceRenderer.h"
 #include "lrt/render/TileRasterizer.h"
@@ -131,6 +132,49 @@ Comparison compare(Harness& h, const render::Camera& camera,
                 static_cast<unsigned long long>(toPeaks->pixels), toRaster->p99, toRaster->max,
                 static_cast<unsigned long long>(toRaster->over2));
     return {*toPeaks, *toRaster};
+}
+
+
+/// The shadow query, whichever way this device can trace it: a compute kernel
+/// where rays are inline, a ray tracing pipeline (OptiX) where they are not.
+/// The bindings are the same names either way, which is the point.
+struct ShadowRoute {
+    std::optional<gpu::ComputeKernel>    inlineKernel;
+    std::optional<gpu::RayTracingKernel> pipeline;
+
+    void dispatch(gpu::CommandBatch& batch, uint32_t rays, const gpu::ComputeKernel::Bind& bind) const {
+        if (pipeline.has_value()) {
+            pipeline->dispatch(batch, rays, 1, 1, bind);
+        } else {
+            inlineKernel->dispatch(batch, {rays, 1, 1}, bind);
+        }
+    }
+    [[nodiscard]] const char* name() const { return pipeline.has_value() ? "a ray tracing pipeline" : "inline"; }
+};
+
+ShadowRoute shadowRoute(test::Gpu& gpu) {
+    ShadowRoute route;
+    if (gpu.device->caps().rayQuery) {
+        auto kernel = gpu::ComputeKernel::create(*gpu.library, "lrt/rt/rt_shadow_kernel", "rtShadowRays");
+        if (!kernel) FAIL(kernel.error().toString());
+        route.inlineKernel.emplace(std::move(*kernel));
+        return route;
+    }
+    gpu::RayTracingDesc desc;
+    desc.module = "lrt/rt/rt_shadow_rays";
+    desc.rayGen = "rtShadowRaysGen";
+    desc.misses = {"rtShadowMiss"};
+    desc.hitGroups = {{"shadow", "", "rtShadowAnyHit", ""}};
+    desc.maxRecursion = 1;
+    // 21 words: transmittance, tMax, three counts and the ring of eight
+    // (id and instance each). OptiX configures the payload from this, and
+    // it refuses a trace that uses more than it was told (measured: "32
+    // payload values specified in optixTrace, but only 24 configured").
+    desc.payloadBytes = 128;
+    auto kernel = gpu::RayTracingKernel::create(*gpu.library, desc);
+    if (!kernel) FAIL(kernel.error().toString());
+    route.pipeline.emplace(std::move(*kernel));
+    return route;
 }
 
 std::vector<float> readFloats(test::Gpu& gpu, const gpu::Buffer& buffer) {
@@ -408,12 +452,13 @@ TEST_CASE("a SplatEdit traces as the ray tracer's reference renders it", "[rende
 TEST_CASE("a shadow ray through splats is the product of what each lets through",
           "[render][rt][gpu][shadow]") {
     LRT_REQUIRE_GPU(gpu);
-    if (!render::GaussianRayTracer::hardwareSupported(*gpu->device)) {
-        SKIP("the device has no RayQuery or acceleration structures");
+    if (!gpu->device->caps().accelerationStructure ||
+        !(gpu->device->caps().rayQuery || gpu->device->caps().rayTracing)) {
+        SKIP("no acceleration structures, inline or in a pipeline");
     }
     auto h = harness(gpu, on(render::RayTracingRoute::Hardware));
-    auto kernel = gpu::ComputeKernel::create(*gpu->library, "lrt/rt/rt_shadow_kernel", "rtShadowRays");
-    if (!kernel) FAIL(kernel.error().toString());
+    const ShadowRoute route = shadowRoute(*gpu);
+    std::printf("  shadow route: %s\n", route.name());
 
     // Particles on the z axis, every one isotropic, so a ray down -z through
     // the axis peaks at each centre with power 0.
@@ -427,13 +472,11 @@ TEST_CASE("a shadow ray through splats is the product of what each lets through"
     REQUIRE(cloud);
     const std::vector<render::SplatInstance> instances{{&*cloud, render::Mat4::identity()}};
 
-    // One render builds the structures the shadow rays trace against.
-    render::RenderSettings settings;
-    settings.width = 32;
-    settings.height = 32;
-    render::RenderTargets targets;
-    render::Camera camera = render::Camera::lookingAt({0.0, 0.0, 6.0}, {0.0, 0.0, -3.0});
-    auto stats = h->rt.render(camera, instances, settings, targets);
+    // The structures alone -- proxies, their BLAS and the TLAS -- since a
+    // shadow query wants what the tracer builds and not what it draws. A
+    // device that traces only in a pipeline cannot draw this route at all.
+    const render::Camera camera = render::Camera::lookingAt({0.0, 0.0, 6.0}, {0.0, 0.0, -3.0});
+    auto stats = h->rt.prepare(render::projectionFor(camera, 32, 32), instances);
     if (!stats) FAIL(stats.error().toString());
     const render::ShadowScene scene = h->rt.shadowScene();
     REQUIRE(scene.tlas != nullptr);
@@ -476,7 +519,7 @@ TEST_CASE("a shadow ray through splats is the product of what each lets through"
     const auto trace = [&](float cut, uint32_t cull = 0) {
         {
             gpu::CommandBatch batch(*gpu->device);
-            kernel->dispatch(batch, {static_cast<uint32_t>(cases.size()), 1, 1}, [&](rhi::ShaderCursor cursor) {
+            route.dispatch(batch, static_cast<uint32_t>(cases.size()), [&](rhi::ShaderCursor cursor) {
                 cursor["scene"].setBinding(scene.tlas);
                 cursor["frames"].setBinding(scene.frames->rhi());
                 cursor["colours"].setBinding(scene.colours->rhi());
@@ -535,12 +578,13 @@ TEST_CASE("a shadow ray through splats is the product of what each lets through"
 // so the particle is taken once, at its peak, if the peak is ahead.
 TEST_CASE("a shadow ray born inside a proxy still takes that particle", "[render][rt][gpu][shadow]") {
     LRT_REQUIRE_GPU(gpu);
-    if (!render::GaussianRayTracer::hardwareSupported(*gpu->device)) {
-        SKIP("the device has no RayQuery or acceleration structures");
+    if (!gpu->device->caps().accelerationStructure ||
+        !(gpu->device->caps().rayQuery || gpu->device->caps().rayTracing)) {
+        SKIP("no acceleration structures, inline or in a pipeline");
     }
     auto h = harness(gpu, on(render::RayTracingRoute::Hardware));
-    auto kernel = gpu::ComputeKernel::create(*gpu->library, "lrt/rt/rt_shadow_kernel", "rtShadowRays");
-    if (!kernel) FAIL(kernel.error().toString());
+    const ShadowRoute route = shadowRoute(*gpu);
+    std::printf("  shadow route: %s\n", route.name());
 
     // One large particle at the origin: its proxy reaches about 4.4 units, so
     // a ray starting at z = 1 starts inside it.
@@ -550,12 +594,8 @@ TEST_CASE("a shadow ray born inside a proxy still takes that particle", "[render
     auto cloud = h->loader.upload(built.raw, 3);
     REQUIRE(cloud);
     const std::vector<render::SplatInstance> instances{{&*cloud, render::Mat4::identity()}};
-    render::RenderSettings settings;
-    settings.width = 32;
-    settings.height = 32;
-    render::RenderTargets targets;
-    auto stats = h->rt.render(render::Camera::lookingAt({0.0, 0.0, 12.0}, {0.0, 0.0, 0.0}), instances, settings,
-                              targets);
+    auto stats = h->rt.prepare(
+        render::projectionFor(render::Camera::lookingAt({0.0, 0.0, 12.0}, {0.0, 0.0, 0.0}), 32, 32), instances);
     if (!stats) FAIL(stats.error().toString());
     const render::ShadowScene scene = h->rt.shadowScene();
     REQUIRE(scene.tlas != nullptr);
@@ -583,7 +623,7 @@ TEST_CASE("a shadow ray born inside a proxy still takes that particle", "[render
         gpu::Buffer counters = test::uintBuffer(*gpu->device, 4, "shadow.inside.counters");
         {
             gpu::CommandBatch batch(*gpu->device);
-            kernel->dispatch(batch, {2, 1, 1}, [&](rhi::ShaderCursor cursor) {
+            route.dispatch(batch, 2, [&](rhi::ShaderCursor cursor) {
                 cursor["scene"].setBinding(scene.tlas);
                 cursor["frames"].setBinding(scene.frames->rhi());
                 cursor["colours"].setBinding(scene.colours->rhi());

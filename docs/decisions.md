@@ -3727,10 +3727,28 @@ a WebGPU build would take the engine's records, not Hydra's prims.
     device: the ray route's ids against the compute BVH's, over three turned
     squares at three depths. 0 of 43621 pixels differ on Metal, on Vulkan and
     on CUDA, where it reports "ray route: a ray tracing pipeline".
+  - **The shadow query is ported too** (`rt_shadow_rays.slang`): the
+    candidate loop becomes an **any hit** program that evaluates the
+    particle, multiplies `1 - alpha` into the payload and ignores the hit so
+    the traversal carries on, and ends the ray with
+    `AcceptHitAndEndSearch` once what is left is under the cut -- which is
+    what `query.Abort()` is inline. The ring that collapses a proxy offered
+    twice lives in the payload, eight entries rather than sixteen, since a
+    payload is registers. The closed forms come out identical to the inline
+    route on the L4: 0.06250 through four particles of opacity 0.5, 0.50000
+    through one, 5 particles taken and 5 duplicates caught, the cut stopping
+    the ray after three, and the control (back faces culled) missing the
+    particle a ray is born inside. Two things OptiX taught while porting: a
+    payload is declared and **checked** (it refused a trace using 32 values
+    where 24 were configured -- `payloadBytes` is not advisory), and
+    `TraceRay` needs its culling flags passed explicitly, since a template
+    parameter is not where they live.
+    - The tracer builds its proxies and structures there without being able
+      to draw with them: `GaussianRayTracer::prepare` and `shadowScene` work
+      where `render` refuses, which is the split a shadow query needs.
   - **What is still inline only**: the path tracer, the cutout pass (a
-    generated kernel), the splat integrator and the shadow kernels. Each is
-    a `TraceRay` port of its own, and the splat one needs its k-buffer in
-    global memory since a payload cannot hold 256 entries.
+    generated kernel) and the splat integrator. The last one needs its
+    k-buffer in global memory, since a payload cannot hold 256 entries.
 - **What the engine's inline rays mean for CUDA.**
   The box has OptiX after all -- `lrt info` on the L4 reports `optix 90000`,
   the driver's `libnvoptix.so.1` and the headers slang-rhi fetches itself

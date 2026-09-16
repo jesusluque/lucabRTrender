@@ -108,11 +108,16 @@ Result<GaussianRayTracer> GaussianRayTracer::create(gpu::ShaderLibrary& library,
                                                     RayTracerSettings settings) {
     const gpu::Caps& caps = library.device().caps();
     const bool hardware = hardwareSupported(library.device());
-    if (settings.route == RayTracingRoute::Hardware && !hardware) {
+    // The proxies and their structures are one thing, drawing with them
+    // another: a device that traces only in a pipeline (CUDA, through OptiX)
+    // can build them for somebody else's rays -- a shadow query's -- and
+    // cannot run this route's inline kernel. `render` says so where it is
+    // asked to draw; `prepare` and `shadowScene` work either way.
+    const bool structuresOnly = !hardware && caps.accelerationStructure && caps.rayTracing;
+    if (settings.route == RayTracingRoute::Hardware && !hardware && !structuresOnly) {
         return Error::make(ErrorCode::Unsupported,
-                           "the Hardware ray tracing route needs RayQuery and acceleration structures; "
-                           "{} on '{}' has {}", caps.apiName, caps.adapterName,
-                           caps.accelerationStructure ? "no RayQuery" : "neither");
+                           "the Hardware ray tracing route needs acceleration structures; "
+                           "{} on '{}' has none", caps.apiName, caps.adapterName);
     }
     GaussianRayTracer r;
     r.device_ = &library.device();
@@ -137,8 +142,10 @@ Result<GaussianRayTracer> GaussianRayTracer::create(gpu::ShaderLibrary& library,
     LRT_TRY(make(r.shade_, "lrt/rt/rt_shade", "rtShade"));
     if (r.settings_.route == RayTracingRoute::Hardware) {
         LRT_TRY(make(r.proxy_, "lrt/rt/rt_proxy", "rtProxy"));
-        LRT_TRY(make(r.renderSplit_, "lrt/rt/rt_render", "rtRenderSplit"));
-        LRT_TRY(make(r.render_, "lrt/rt/rt_render", "rtRender"));
+        if (!structuresOnly) {
+            LRT_TRY(make(r.renderSplit_, "lrt/rt/rt_render", "rtRenderSplit"));
+            LRT_TRY(make(r.render_, "lrt/rt/rt_render", "rtRender"));
+        }
     } else {
         auto sort = gpu::RadixSort::create(library);
         if (!sort) return std::move(sort).error();
@@ -628,6 +635,11 @@ Result<RayTracerStats> GaussianRayTracer::render(const Projection& projection,
         p["splitAt"].setData(settings_.splitAt);
     };
     if (settings_.route == RayTracingRoute::Hardware) {
+        if (!device_->caps().rayQuery) {
+            return Error(ErrorCode::Unsupported,
+                         "the Hardware route draws with an inline ray, which this device has not: its "
+                         "structures are still built, for a query that traces them in a pipeline");
+        }
         const gpu::ComputeKernel& kernel = settings_.splitAt > 0.0F ? renderSplit_ : render_;
         kernel.dispatch(batch, {settings.width, settings.height, 1}, [&](rhi::ShaderCursor cursor) {
             common(cursor);
