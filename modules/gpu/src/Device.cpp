@@ -1,7 +1,9 @@
 // Copyright (c) 2026 lucabRTrender contributors.
 #include "lrt/gpu/Device.h"
 
+#include <string>
 #include <utility>
+#include <vector>
 
 #include "lrt/core/Log.h"
 #include "lrt/core/Platform.h"
@@ -48,6 +50,48 @@ public:
 };
 
 DebugLog gDebugLog;
+
+/// A Slang global session whose CUDA prelude does not read through the
+/// read-only data cache.
+///
+/// Slang emits every load of a constant buffer or a read-only buffer on CUDA
+/// as `__ldg`, the load that goes through that cache. Inside a ray tracing
+/// launch the cache is served lines that no launch invalidated:
+/// `tests/gpu/test_uniforms.cpp` measures a ray generation entry reading the
+/// value of the launch before it 31 times in 64, while a writable buffer over
+/// the same address is right every time and a compute launch is right on all
+/// three routes. That is a frame drawn with the parameters of the frame
+/// before, and no image says so.
+///
+/// The prelude is where this can be said once: the macro is appended after
+/// Slang's own declaration of `__ldg`, so the declaration still parses and
+/// every call site that follows is an ordinary load. It costs that cache and
+/// nothing else. nvrtc cannot be told this instead -- Slang keeps one
+/// `DownstreamArgs` entry per downstream compiler, and that one is already
+/// the OptiX include path.
+slang::IGlobalSession* cudaGlobalSession() {
+    static Slang::ComPtr<slang::IGlobalSession> session = [] {
+        Slang::ComPtr<slang::IGlobalSession> made;
+        if (SLANG_FAILED(slang::createGlobalSession(made.writeRef())) || made == nullptr) {
+            log::warn("CUDA: no Slang session of our own; a ray tracing launch may read the launch before it");
+            return Slang::ComPtr<slang::IGlobalSession>();
+        }
+        Slang::ComPtr<ISlangBlob> prelude;
+        made->getLanguagePrelude(SLANG_SOURCE_LANGUAGE_CUDA, prelude.writeRef());
+        std::string text;
+        if (prelude != nullptr && prelude->getBufferPointer() != nullptr) {
+            text.assign(static_cast<const char*>(prelude->getBufferPointer()), prelude->getBufferSize());
+        }
+        // LRT_CUDA_LDG=1 leaves the cache in place, which is how the defect
+        // is reproduced and how the cost of giving it up is measured.
+        if (platform::env("LRT_CUDA_LDG") != "1") {
+            text += "\n#undef __ldg\n#define __ldg(p) (*(p))\n";
+        }
+        made->setLanguagePrelude(SLANG_SOURCE_LANGUAGE_CUDA, text.c_str());
+        return made;
+    }();
+    return session.get();
+}
 
 }   // namespace
 
@@ -140,8 +184,8 @@ Result<std::shared_ptr<Device>> Device::create(const DeviceDesc& desc) {
         // fetched at build time (LRT_OPTIX_INCLUDE_DIR), or whatever
         // LRT_OPTIX_INCLUDE says. Without it every ray tracing pipeline on
         // CUDA fails with "Failed to locate OptiX headers".
-        std::string optixArgs;
-        slang::CompilerOptionEntry optixEntry{};
+        std::vector<std::string> cudaArgs;
+        std::vector<slang::CompilerOptionEntry> cudaEntries;
         if (backend == Backend::CUDA) {
             std::string include = platform::env("LRT_OPTIX_INCLUDE");
 #if defined(LRT_OPTIX_INCLUDE_DIR)
@@ -150,14 +194,19 @@ Result<std::shared_ptr<Device>> Device::create(const DeviceDesc& desc) {
             }
 #endif
             if (!include.empty()) {
-                optixArgs = "-I" + include;
-                optixEntry.name = slang::CompilerOptionName::DownstreamArgs;
-                optixEntry.value.kind = slang::CompilerOptionValueKind::String;
-                optixEntry.value.stringValue0 = "nvrtc";
-                optixEntry.value.stringValue1 = optixArgs.c_str();
-                rhiDesc.slang.compilerOptionEntries = &optixEntry;
-                rhiDesc.slang.compilerOptionEntryCount = 1;
+                cudaArgs.push_back("-I" + include);
             }
+            for (const std::string& arg : cudaArgs) {
+                slang::CompilerOptionEntry entry{};
+                entry.name = slang::CompilerOptionName::DownstreamArgs;
+                entry.value.kind = slang::CompilerOptionValueKind::String;
+                entry.value.stringValue0 = "nvrtc";
+                entry.value.stringValue1 = arg.c_str();
+                cudaEntries.push_back(entry);
+            }
+            rhiDesc.slang.compilerOptionEntries = cudaEntries.data();
+            rhiDesc.slang.compilerOptionEntryCount = static_cast<uint32_t>(cudaEntries.size());
+            rhiDesc.slang.slangGlobalSession = cudaGlobalSession();
         }
         rhiDesc.persistentShaderCache = device->shaderCache_.get();
 

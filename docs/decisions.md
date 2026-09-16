@@ -3844,12 +3844,33 @@ parameter and every scene resource, so an animation, an accumulating frame or
 a sweep of settings can silently render the frame before. Nothing in an image
 says so; only a closed form does, which is how this was found.
 
-**Not fixed here, and the shape of the fix.** A writable buffer is reliable in
-the same launch, so the mitigation is to route what changes per launch through
-one. That is a change to how the ray modules take their parameters, not a
-tolerance, and it does not make a changing *scene* sound on CUDA -- the vertex,
-instance, material and light pools are read-only buffers by their nature. The
-honest statement is that CUDA ray tracing here is trustworthy for one launch
-and is not yet trustworthy for a sequence. The furnace test fails on CUDA and
-is left failing: it is the truth, and `tests/gpu/test_uniforms.cpp` says why
-in one line instead of leaving it to be rediscovered from an image.
+**The fix: the CUDA prelude does not read through that cache.** Slang's CUDA
+target emits every load of a constant buffer or a read-only buffer as
+`__ldg`, the load that goes through the read-only data cache -- visible by
+compiling anything with `slangc -target cuda`:
+
+```
+uint _S1 = __ldg(&globalParams_0->echo_0->count_0);
+uint _S9 = __ldg((&(globalParams_0->echoWords_0)[int(0)]));
+```
+
+A writable buffer is not read that way, which is exactly why it was the one
+route that stayed current. So `gpu::Device` now creates the Slang global
+session itself for CUDA and appends to that target's prelude
+
+```
+#undef __ldg
+#define __ldg(p) (*(p))
+```
+
+after Slang's own declaration of `__ldg`, so the declaration still parses and
+every call site that follows it is an ordinary load. It gives up that cache
+and nothing else. nvrtc could not be told this instead: Slang keeps **one**
+`DownstreamArgs` entry per downstream compiler -- a second is silently dropped,
+measured by handing it a define that would have changed every answer and
+seeing none change -- and that one entry is already the OptiX include path.
+
+**After it**, on the same box: the echo test reads 0 of 64 wrong on all three
+routes in a ray generation entry, and the furnace reads its series to
+`0.00e+00` relative at every bounce count, run after run. The suite's numbers
+are below.

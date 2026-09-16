@@ -48,12 +48,11 @@ struct Echo {
 
 }   // namespace
 
-TEST_CASE("a launch reads the uniform it was given, not the one before it", "[gpu][uniforms]") {
+TEST_CASE("a compute launch reads the uniform it was given, not the one before it", "[gpu][uniforms]") {
     LRT_REQUIRE_GPU(gpu);
     gpu::Buffer answers = test::uintBuffer(*gpu->device, 2 * kThreads + 8, "echo.answers");
     gpu::Buffer words = test::uintBuffer(*gpu->device, 4, "echo.words");
-
-    SECTION("in a compute kernel") {
+    {
         auto made = gpu::ComputeKernel::create(*gpu->library, "lrt/test/uniform_echo", "echoCompute");
         if (!made) FAIL(made.error().toString());
         gpu::ComputeKernel echo = std::move(*made);
@@ -102,7 +101,14 @@ TEST_CASE("a launch reads the uniform it was given, not the one before it", "[gp
         CHECK(ran == kLaunches);
     }
 
-    SECTION("in a ray generation entry") {
+}
+
+TEST_CASE("a ray generation launch reads the uniform it was given, not the one before it",
+          "[gpu][uniforms][rays]") {
+    LRT_REQUIRE_GPU(gpu);
+    gpu::Buffer answers = test::uintBuffer(*gpu->device, 2 * kThreads + 8, "echo.answers");
+    gpu::Buffer words = test::uintBuffer(*gpu->device, 4, "echo.words");
+    {
         const gpu::Caps& caps = gpu->device->caps();
         if (!caps.rayTracing) {
             SKIP("no ray tracing pipelines: there is no ray generation entry to launch");
