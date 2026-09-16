@@ -89,6 +89,7 @@ the ones above it.
 | lod | `LodBuilder`, `CutSelector`; `Lrtc.h` for the `.lrtc` reader/writer and `StreamingPool` |
 | usd | `Engine`, `StageRenderer`, `Export`; the `hdLrt` plugin; codeless schemas in `modules/usd/schemas` |
 | aofx | openFXplayer's plugin SDK (ABI 23) and host |
+| mcp | the engine as an MCP server: JSON-RPC 2.0 (`Server`), the tools over a warm stage (`Tools.cpp`); `apps/lrt-mcp` is the stdio transport |
 | view | `lrt view`: GLFW `Window`, `ImGuiRenderer` (Dear ImGui on the engine's device), `runViewer` |
 
 How the pieces fit:

@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "lrt": {
+      "command": "${LRT_BUILD:-./build/macos-arm64-debug}/bin/lrt-mcp",
+      "args": [],
+      "env": {}
+    }
+  }
+}

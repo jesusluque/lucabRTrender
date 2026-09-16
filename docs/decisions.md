@@ -3629,7 +3629,44 @@ backends, fixed where it lives rather than excused.
   `lrt:denoise` render setting changes 8748 of 27648 words at the total and
   none before it.
 
-### A note on WebGPU
+### The engine as an MCP server
+
+`lrt-mcp` speaks JSON-RPC 2.0 over stdin and stdout, and `modules/mcp` holds
+the protocol and the tools. The shape follows openFXplayer's server, which
+this project's aofx host already speaks to: the protocol is the only thing
+`Server` knows about I/O -- one message in, one reply out -- so the transport
+is the app's, and every tool lives in a table whose entries carry their own
+schema, which is what keeps the listing and the dispatch from disagreeing
+about what exists.
+
+**Why a server rather than a shell.** The device and the stage stay open
+between calls. A CLI shelled out to once a frame opens the GPU, compiles the
+kernels the frame needs and throws the lot away; here the second render of a
+stage costs what a second render should cost. That is the whole reason to
+drive the engine from outside.
+
+**A render answers with the image.** The display transform runs on the device
+as it does for `lrt view`, the eight-bit result is read back and packed into a
+PNG (`io::writePng`, zlib's deflate and a CRC -- a container, not a codec: the
+pixels were decided by a kernel), and the PNG goes back as an MCP image block
+beside the timing. A model that cannot see what it rendered is guessing.
+
+The tools: `open_stage`, `stage_tree`, `device_info`, `render` (camera of its
+own or the stage's, any AOV, either technique, every path tracing and
+lighting setting, an EXR beside the image), `pick`, `bounds`,
+`render_products`, `convert`. `.mcp.json` registers it as `lrt`.
+
+**Checked** at the protocol's level (`lrt_mcp_tests`): the handshake answers
+in the client's version and in ours where the client asks for one nobody
+implements; a notification is answered with silence, since the first message
+a client sends is one and answering it is a violation; the listing carries a
+schema for every tool; an unknown tool is a result with `isError` while an
+unknown *method* is a JSON-RPC error; a message that is not JSON is -32700.
+With a GPU: a stage written by the test opens, renders at 96x64, and the
+answer carries a PNG (checked by its signature through the base64) and a pick
+that names `/Square`.
+
+## A note on WebGPU
 
 Everything a frame does is Slang, and Slang emits WGSL, so the shading,
 the materials, the lights and the compute BVH route would port. What would

@@ -109,6 +109,14 @@ target_compile_options(lrt_storm_oracle_tests PRIVATE -Wno-old-style-cast -Wno-s
 set_target_properties(lrt_storm_oracle_tests PROPERTIES CXX_VISIBILITY_PRESET default VISIBILITY_INLINES_HIDDEN OFF
                       BUILD_RPATH "${SLANG_ROOT}/lib;${LRT_USD_ROOT}/lib")
 
+lrt_test(lrt_mcp_tests
+    SOURCES mcp/test_mcp.cpp
+    LIBS lrt::mcp nlohmann_json::nlohmann_json)
+target_compile_options(lrt_mcp_tests PRIVATE -Wno-old-style-cast -Wno-shadow -Wno-deprecated-declarations
+                       -Wno-double-promotion -Wno-cast-align)
+set_target_properties(lrt_mcp_tests PROPERTIES CXX_VISIBILITY_PRESET default VISIBILITY_INLINES_HIDDEN OFF
+                      BUILD_RPATH "${SLANG_ROOT}/lib;${LRT_USD_ROOT}/lib")
+
 # The plugin as a host loads it: UsdImagingGLEngine and HdLrtRendererPlugin
 # by name, in an executable that does not link lrt::usd -- with the delegate's
 # classes in the executable too, a template instantiated in both (make_shared

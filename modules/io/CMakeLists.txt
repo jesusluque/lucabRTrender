@@ -5,6 +5,7 @@ lrt_add_module(io
         src/SplatReaders.cpp
         src/PointReaders.cpp
         src/Exr.cpp
+        src/Png.cpp
         src/Sog.cpp
         src/Ies.cpp
     PUBLIC_LIBS
