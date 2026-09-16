@@ -3879,7 +3879,9 @@ its series to `0.00e+00` relative at every bounce count, run after run; and
 `open_pbr_surface`, which had been the one material of twelve that disagreed
 with genglsl on CUDA and nowhere else, agrees to 9.39e-06. **The whole CUDA
 suite is 197 of 197**, where it had been 97 passed, 2 failed, 94 skipped
-before the ray tracing pipelines and 2 failed after them.
+before the ray tracing pipelines and 2 failed after them. Metal is 197 of 197
+and Vulkan on the same box is 197 of 197, so for the first time the three
+backends are green together.
 
 **What it costs**, medians of `lrt stage --frames` on the L4, Kitchen_set,
 twice each way so the pairs can be read against their own spread:
