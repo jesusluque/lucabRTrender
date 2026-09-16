@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <span>
+#include <vector>
 
 #include "lrt/core/Result.h"
 
