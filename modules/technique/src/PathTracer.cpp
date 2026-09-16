@@ -181,6 +181,106 @@ bool pathOccluded(float3 p, float3 n, float3 wi, float distance, uint shadowCate
 static const bool kTraces = true;
 )";
 
+/// The same two questions where the device traces only in a pipeline: CUDA
+/// has OptiX and Slang offers no inline `RayQuery` for that target, so the
+/// nearest hit comes back in a payload from a closest hit program and the
+/// shadow ray is an any hit that ends the ray at the first occluder its
+/// light is linked to. The linking loop the inline route walks -- trace,
+/// test, move TMin past the hit, trace again -- is one traversal here, which
+/// is what an any hit is for.
+const char* kRaysPipeline = R"(
+uniform RaytracingAccelerationStructure scene;
+
+struct PathHit {
+    uint4  seen;          // (instance + 1, triangle, 0, 0); 0 for nothing
+    float  t;
+    float2 barycentrics;  // of the committed triangle: where the ray met it
+};
+
+struct NearestPayload {
+    uint4  seen;
+    float  t;
+    float2 barycentrics;
+};
+
+struct ShadowPayload {
+    uint occluded;
+    uint shadowCategory;
+};
+
+[shader("miss")]
+void pathNearestMiss(inout NearestPayload payload) {
+    payload.seen = uint4(0);
+    payload.t = 0.0;
+    payload.barycentrics = float2(0.0);
+}
+
+[shader("closesthit")]
+void pathNearestHit(inout NearestPayload payload, in BuiltInTriangleIntersectionAttributes attributes) {
+    payload.seen = uint4(InstanceID() + 1, PrimitiveIndex(), 0, 0);
+    payload.t = RayTCurrent();
+    payload.barycentrics = attributes.barycentrics;
+}
+
+[shader("miss")]
+void pathShadowMiss(inout ShadowPayload payload) {
+    payload.occluded = 0;
+}
+
+[shader("anyhit")]
+void pathShadowAnyHit(inout ShadowPayload payload, in BuiltInTriangleIntersectionAttributes attributes) {
+    // A light reaches only what its collection says: an occluder outside it
+    // casts nothing, so the ray carries on past it.
+    if (payload.shadowCategory != kLightUnlinked &&
+        !lightLinked(payload.shadowCategory, instances[InstanceID()].categoriesLo,
+                     instances[InstanceID()].categoriesHi)) {
+        IgnoreHit();
+        return;
+    }
+    payload.occluded = 1;
+    AcceptHitAndEndSearch();
+}
+
+PathHit traceNearestFrom(float3 origin, float3 direction, float tMin, uint mask) {
+    RayDesc ray;
+    ray.Origin = origin;
+    ray.Direction = direction;
+    ray.TMin = tMin;
+    ray.TMax = 3.0e38;
+    NearestPayload payload;
+    payload.seen = uint4(0);
+    payload.t = 0.0;
+    payload.barycentrics = float2(0.0);
+    TraceRay(scene, RAY_FLAG_FORCE_OPAQUE | RAY_FLAG_CULL_BACK_FACING_TRIANGLES, mask, 0, 2, 0, ray, payload);
+    PathHit hit;
+    hit.seen = payload.seen;
+    hit.t = payload.t;
+    hit.barycentrics = payload.barycentrics;
+    return hit;
+}
+
+bool pathOccluded(float3 p, float3 n, float3 wi, float distance, uint shadowCategory, uint mask) {
+    const float scale = max(1.0, length(p));
+    const float3 away = dot(n, wi) < 0.0 ? -n : n;
+    RayDesc ray;
+    ray.Origin = p + (away + wi) * (1.0e-3 * scale);
+    ray.Direction = wi;
+    ray.TMin = 1.0e-3 * scale;
+    ray.TMax = max(distance - ray.TMin, 0.0);
+    if (ray.TMax <= ray.TMin) {
+        return false;
+    }
+    ShadowPayload payload;
+    payload.occluded = 0;
+    payload.shadowCategory = shadowCategory;
+    // Not FORCE_OPAQUE: the any hit is where linking is decided.
+    TraceRay(scene, RAY_FLAG_CULL_BACK_FACING_TRIANGLES, mask, 1, 2, 1, ray, payload);
+    return payload.occluded != 0;
+}
+
+static const bool kTraces = true;
+)";
+
 const char* kNoRays = R"(
 struct PathHit {
     uint4  seen;
@@ -891,10 +991,8 @@ float3 gatherLightMedium(float3 p, float3 wo, float g, uint2 pixel, uint sample,
     return f * ls.radiance * transmittance / (ls.pdf * choice.probability);
 }
 
-[shader("compute")]
-[numthreads(16, 16, 1)]
-void tracePaths(uint3 group: SV_GroupID, uint index: SV_GroupIndex) {
-    const uint2 tid = lrtQuadPixel(group.xy, index);
+void tracePathsAt(uint2 group, uint index) {
+    const uint2 tid = lrtQuadPixel(group, index);
     if (tid.x >= camera.width || tid.y >= camera.height) {
         return;
     }
@@ -1253,6 +1351,30 @@ void pathDecide(uint3 tid: SV_DispatchThreadID) {
 
 )";
 
+/// The pixel's own entry, where the device runs a compute kernel.
+const char* kEntryCompute = R"(
+[shader("compute")]
+[numthreads(16, 16, 1)]
+void tracePaths(uint3 group: SV_GroupID, uint index: SV_GroupIndex) {
+    tracePathsAt(group.xy, index);
+}
+)";
+
+/// And where it runs a ray generation program instead. A dispatch of rays has
+/// no thread groups, so the launch index is cut into the group and the index
+/// within it -- the same 16 x 16 block, walked in the same quad order, since
+/// the material's derivatives are read across the quad's lanes and those are
+/// consecutive launch indices here.
+const char* kEntryRays = R"(
+[shader("raygeneration")]
+void tracePathsGen() {
+    const uint flat = DispatchRaysIndex().x;
+    const uint groupsAcross = (camera.width + 15u) / 16u;
+    const uint group = flat / 256u;
+    tracePathsAt(uint2(group % groupsAcross, group / groupsAcross), flat % 256u);
+}
+)";
+
 }   // namespace
 
 Result<PathTracer> PathTracer::create(gpu::ShaderLibrary& library) {
@@ -1267,21 +1389,47 @@ Result<void> PathTracer::setPrograms(const MaterialPrograms& programs) {
 }
 
 Result<void> PathTracer::setPrograms(const MaterialPrograms& programs, bool groups, bool volumes) {
-    if (programs.module() == module_ && groups == groups_ && volumes == volumes_ && kernel_.has_value()) {
+    if (programs.module() == module_ && groups == groups_ && volumes == volumes_ &&
+        (kernel_.has_value() || rayKernel_.has_value())) {
         return ok();
     }
     const bool traces = device_->caps().rayQuery && device_->caps().accelerationStructure;
     const std::string name = programs.module() + (traces ? "_path_traced" : "_path_direct") +
                              (groups ? "_groups" : "") + (volumes ? "_volumes" : "");
+    // Three ways to trace, and the module carries exactly one: inline rays in
+    // a compute kernel, a ray tracing pipeline where there are no inline rays
+    // (CUDA, through OptiX), or no rays at all -- direct light alone, which
+    // the tracer says of itself.
+    const bool pipeline = !traces && device_->caps().rayTracing && device_->caps().accelerationStructure;
     const std::string source = "import " + programs.module() + ";\n" +
                                (volumes ? std::string("import lrt.volume.medium;\n") : std::string()) + kPrelude +
                                (groups ? kGroups : kNoGroups) + (volumes ? kVolumes : kNoVolumes) +
-                               (traces ? kRays : kNoRays) + kBody;
-    auto program = library_->loadSource(name, source, {"tracePaths", "pathDecide"});
+                               (traces ? kRays : pipeline ? kRaysPipeline : kNoRays) + kBody +
+                               (pipeline ? kEntryRays : kEntryCompute);
+    std::vector<std::string> entries{pipeline ? "tracePathsGen" : "tracePaths", "pathDecide"};
+    if (pipeline) {
+        entries.insert(entries.end(), {"pathNearestMiss", "pathNearestHit", "pathShadowMiss", "pathShadowAnyHit"});
+    }
+    auto program = library_->loadSource(name, source, entries);
     if (!program) return std::move(program).error();
-    auto kernel = gpu::ComputeKernel::create(*library_, name, "tracePaths");
-    if (!kernel) return std::move(kernel).error();
-    kernel_.emplace(std::move(*kernel));
+    if (pipeline) {
+        gpu::RayTracingDesc desc;
+        desc.module = name;
+        desc.rayGen = "tracePathsGen";
+        desc.misses = {"pathNearestMiss", "pathShadowMiss"};
+        desc.hitGroups = {{"nearest", "pathNearestHit", "", ""}, {"shadow", "", "pathShadowAnyHit", ""}};
+        desc.maxRecursion = 1;
+        desc.payloadBytes = 64;
+        auto rays = gpu::RayTracingKernel::create(*library_, desc);
+        if (!rays) return std::move(rays).error();
+        rayKernel_.emplace(std::move(*rays));
+        kernel_.reset();
+    } else {
+        auto kernel = gpu::ComputeKernel::create(*library_, name, "tracePaths");
+        if (!kernel) return std::move(kernel).error();
+        kernel_.emplace(std::move(*kernel));
+        rayKernel_.reset();
+    }
     auto progressKernel = gpu::ComputeKernel::create(*library_, name, "pathDecide");
     if (!progressKernel) return std::move(progressKernel).error();
     progressKernel_.emplace(std::move(*progressKernel));
@@ -1295,7 +1443,7 @@ Result<void> PathTracer::setPrograms(const MaterialPrograms& programs, bool grou
 Result<void> PathTracer::trace(gpu::CommandBatch& batch, const VisibilityTargets& targets,
                                const render::Projection& projection, const MaterialFrame& frame,
                                const PathSettings& settings, render::RenderTargets& out, PathAux* aux) {
-    if (!kernel_.has_value()) {
+    if (!kernel_.has_value() && !rayKernel_.has_value()) {
         return Error(ErrorCode::InvalidArgument, "path tracer: no materials set");
     }
     const bool groups = frame.groups.count > 0;
@@ -1374,7 +1522,7 @@ Result<void> PathTracer::trace(gpu::CommandBatch& batch, const VisibilityTargets
     if (!ids) return std::move(ids).error();
     const uint32_t samples = std::max(settings.samples, 1u);
     const uint32_t already = accumulated_;
-    kernel_->dispatch(batch, {targets.width, targets.height, 1}, [&](rhi::ShaderCursor cursor) {
+    const auto bindPath = [&](rhi::ShaderCursor cursor) {
         bindMaterialFrame(cursor, frame, projection);
         if (frame.lights != nullptr) {
             frame.lights->bind(cursor);
@@ -1443,7 +1591,16 @@ Result<void> PathTracer::trace(gpu::CommandBatch& batch, const VisibilityTargets
         cursor["path"]["accumulated"].setData(already);
         const bool tree = frame.chooseLights && frame.lightBvh && frame.lights != nullptr && frame.lights->hasBvh();
         cursor["path"]["chooseLights"].setData(uint32_t{tree ? 2u : frame.chooseLights ? 1u : 0u});
-    });
+    };
+    if (rayKernel_.has_value()) {
+        // A dispatch of rays has no groups: the launch is one ray a pixel of
+        // the 16 x 16 blocks the body still walks in quad order.
+        const uint32_t groupsAcross = (targets.width + 15) / 16;
+        const uint32_t groupsDown = (targets.height + 15) / 16;
+        rayKernel_->dispatch(batch, groupsAcross * groupsDown * 256, 1, 1, bindPath);
+    } else {
+        kernel_->dispatch(batch, {targets.width, targets.height, 1}, bindPath);
+    }
     accumulated_ = already + samples;
     lastErrorTarget_ = settings.errorTarget;
     lastMinSamples_ = settings.minSamples;

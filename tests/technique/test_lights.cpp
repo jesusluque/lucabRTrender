@@ -1166,7 +1166,7 @@ TEST_CASE("the bounce carries light from a second surface", "[technique][path]")
     if (!caps.rasterization) {
         SKIP("no rasterisation on this device");
     }
-    if (!caps.rayQuery || !caps.accelerationStructure) {
+    if (!caps.accelerationStructure || !(caps.rayQuery || caps.rayTracing)) {
         SKIP("no ray queries on this device: the kernel is generated without a bounce");
     }
     std::vector<std::filesystem::path> shaderPaths;
@@ -1187,7 +1187,6 @@ TEST_CASE("the bounce carries light from a second surface", "[technique][path]")
     if (!builder) FAIL(builder.error().toString());
     if (!scene) FAIL(scene.error().toString());
     if (!accel) FAIL(accel.error().toString());
-    if (!raster) FAIL(raster.error().toString());
     if (!programs) FAIL(programs.error().toString());
     if (!tracer) FAIL(tracer.error().toString());
     if (!table) FAIL(table.error().toString());
@@ -1309,7 +1308,7 @@ TEST_CASE("the path traced error against a converged reference falls as one over
     if (!caps.rasterization) {
         SKIP("no rasterisation on this device");
     }
-    if (!caps.rayQuery || !caps.accelerationStructure) {
+    if (!caps.accelerationStructure || !(caps.rayQuery || caps.rayTracing)) {
         SKIP("no ray queries on this device: there would be no bounce to converge");
     }
     std::vector<std::filesystem::path> shaderPaths;
@@ -1655,7 +1654,7 @@ TEST_CASE("the same paths gathered in one pass and in many give the same frame",
     if (!caps.rasterization) {
         SKIP("no rasterisation on this device");
     }
-    if (!caps.rayQuery || !caps.accelerationStructure) {
+    if (!caps.accelerationStructure || !(caps.rayQuery || caps.rayTracing)) {
         SKIP("no ray queries on this device: the kernel is generated without a bounce");
     }
     std::vector<std::filesystem::path> shaderPaths;
@@ -1900,7 +1899,7 @@ TEST_CASE("neighbouring pixels' path traced errors average away as independent e
     if (!caps.rasterization) {
         SKIP("no rasterisation on this device");
     }
-    if (!caps.rayQuery || !caps.accelerationStructure) {
+    if (!caps.accelerationStructure || !(caps.rayQuery || caps.rayTracing)) {
         SKIP("no ray queries on this device");
     }
     std::vector<std::filesystem::path> shaderPaths;
@@ -2051,12 +2050,14 @@ TEST_CASE("a closed emissive shell reads the geometric series of its bounces",
           "[technique][path][furnace]") {
     LRT_REQUIRE_GPU(gpu);
     const gpu::Caps& caps = gpu->device->caps();
-    if (!caps.rasterization) {
-        SKIP("no rasterisation on this device");
+    if (!caps.accelerationStructure || !(caps.rayQuery || caps.rayTracing)) {
+        SKIP("no acceleration structures, inline or in a pipeline: no bounce to check");
     }
-    if (!caps.rayQuery || !caps.accelerationStructure) {
-        SKIP("no ray queries on this device: no bounce to check");
-    }
+    // The rasteriser only fills the visibility buffer here -- what is checked
+    // is a closed form, not the rasteriser -- so a device without one finds
+    // the same surfaces with rays. That is what lets this hold the path
+    // tracer to its series on CUDA, where the rays are OptiX's.
+    const bool byRays = !caps.rasterization;
     std::vector<std::filesystem::path> shaderPaths;
     for (const std::string& path : gpu->device->shaderSearchPaths()) {
         shaderPaths.emplace_back(path);
@@ -2066,7 +2067,17 @@ TEST_CASE("a closed emissive shell reads the geometric series of its bounces",
     auto builder = geom::MeshBuilder::create(*gpu->library);
     auto scene = world::GpuScene::create(*gpu->library);
     auto accel = world::RayTracingScene::create(*gpu->library);
-    auto raster = technique::VisibilityRaster::create(*gpu->library);
+    std::optional<technique::VisibilityRaster> raster;
+    std::optional<technique::VisibilityTrace> traceVisibility;
+    if (byRays) {
+        auto made = technique::VisibilityTrace::create(*gpu->library);
+        if (!made) FAIL(made.error().toString());
+        traceVisibility.emplace(std::move(*made));
+    } else {
+        auto made = technique::VisibilityRaster::create(*gpu->library);
+        if (!made) FAIL(made.error().toString());
+        raster.emplace(std::move(*made));
+    }
     auto programs = technique::MaterialPrograms::create(*gpu->library);
     auto tracer = technique::PathTracer::create(*gpu->library);
     auto table = light::LightTable::create(*gpu->library);
@@ -2075,7 +2086,6 @@ TEST_CASE("a closed emissive shell reads the geometric series of its bounces",
     if (!builder) FAIL(builder.error().toString());
     if (!scene) FAIL(scene.error().toString());
     if (!accel) FAIL(accel.error().toString());
-    if (!raster) FAIL(raster.error().toString());
     if (!programs) FAIL(programs.error().toString());
     if (!tracer) FAIL(tracer.error().toString());
     if (!table) FAIL(table.error().toString());
@@ -2144,9 +2154,14 @@ TEST_CASE("a closed emissive shell reads the geometric series of its bounces",
     frame.samples = 1;
     {
         gpu::CommandBatch batch(*gpu->device);
-        REQUIRE(raster->render(batch, *scene, projection, w, h, visibility));
+        if (byRays) {
+            REQUIRE(traceVisibility->render(batch, *accel, projection, w, h, visibility));
+        } else {
+            REQUIRE(raster->render(batch, *scene, projection, w, h, visibility));
+        }
         REQUIRE(batch.submit(true));
     }
+    std::printf("  visibility: %s\n", byRays ? "rays" : "the rasteriser");
     auto made = gpu::ComputeKernel::create(*gpu->library, "lrt/test/furnace_check", "furnaceCheck");
     if (!made) FAIL(made.error().toString());
     gpu::ComputeKernel check = std::move(*made);
@@ -2321,7 +2336,7 @@ TEST_CASE("the denoiser lowers a path traced frame's error against a deep refere
     if (!caps.rasterization) {
         SKIP("no rasterisation on this device");
     }
-    if (!caps.rayQuery || !caps.accelerationStructure) {
+    if (!caps.accelerationStructure || !(caps.rayQuery || caps.rayTracing)) {
         SKIP("no ray queries on this device");
     }
     if (!technique::denoiserBuilt()) {
@@ -2473,7 +2488,7 @@ TEST_CASE("adaptive sampling stops a pixel where its error estimate says, and th
     if (!caps.rasterization) {
         SKIP("no rasterisation on this device");
     }
-    if (!caps.rayQuery || !caps.accelerationStructure) {
+    if (!caps.accelerationStructure || !(caps.rayQuery || caps.rayTracing)) {
         SKIP("no ray queries on this device");
     }
     std::vector<std::filesystem::path> shaderPaths;

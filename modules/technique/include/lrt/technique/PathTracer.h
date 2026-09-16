@@ -21,6 +21,7 @@
 #include "lrt/core/Result.h"
 #include "lrt/gpu/Buffer.h"
 #include "lrt/gpu/ComputeKernel.h"
+#include "lrt/gpu/RayTracingKernel.h"
 #include "lrt/render/Camera.h"
 #include "lrt/render/TileRasterizer.h"
 #include "lrt/technique/MaterialPrograms.h"
@@ -126,6 +127,9 @@ private:
     gpu::ShaderLibrary*               library_ = nullptr;
     gpu::Device*                      device_ = nullptr;
     std::optional<gpu::ComputeKernel> kernel_;
+    /// The same kernel as a ray generation program, where the device traces
+    /// only in a pipeline (CUDA: OptiX, and no inline RayQuery).
+    std::optional<gpu::RayTracingKernel> rayKernel_;
     std::string                       module_;
     bool                              groups_ = false;
     bool                              volumes_ = false;

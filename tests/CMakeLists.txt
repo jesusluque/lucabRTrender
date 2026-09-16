@@ -34,7 +34,7 @@ function(lrt_test name)
 endfunction()
 
 lrt_test(lrt_gpu_tests
-    SOURCES gpu/test_algo.cpp gpu/test_textures.cpp
+    SOURCES gpu/test_algo.cpp gpu/test_textures.cpp gpu/test_uniforms.cpp
     LIBS lrt::gpu lrt::render)
 
 lrt_test(lrt_scene_tests

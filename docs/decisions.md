@@ -3768,3 +3768,88 @@ a WebGPU build would take the engine's records, not Hydra's prims.
   was absent; that was wrong, and the skips were right for the wrong reason.
   Giving CUDA the rays back means a second route through ray tracing
   pipelines, which is a piece of work nobody has started.
+
+## A ray tracing launch on CUDA reads memory that is no longer current
+
+The path tracer's OptiX route was ported and its shadow and visibility routes
+measured exact, and then the closed form of a furnace stopped holding: a
+sphere seen from inside, every face emitting `E` and reflecting `rho`, must
+read `E (1 + rho + ... + rho^N)` to float precision, because cosine sampling
+of a Lambert lobe has no variance at all. On Metal it does. On CUDA the same
+frame read the series of a **different** `N` -- and not always the same one,
+and not always all of it.
+
+**What it turned out to be, measured.** The test that says it is
+`tests/gpu/test_uniforms.cpp`, "a launch reads the uniform it was given, not
+the one before it". A kernel of one line writes a number back; the number is
+changed before every launch and read three ways -- out of a `ConstantBuffer`
+(how every per-frame parameter is bound), out of a `StructuredBuffer` (how
+every scene resource is bound), and out of an `RWStructuredBuffer` over the
+**same memory** as the read-only one. An atomic tallies the launches that ran.
+Sixty-four launches, the value alternating so that reading the one before is
+never off by one:
+
+| route | compute, CUDA | ray generation, CUDA |
+|---|---|---|
+| `ConstantBuffer` | 0 of 64 wrong | **31 of 64 wrong**, all of them the launch before |
+| `StructuredBuffer` | 0 of 64 wrong | **32 of 64 wrong** |
+| `RWStructuredBuffer`, same memory | 0 of 64 wrong | 0 of 64 wrong |
+| launches that ran | 64 | 64 |
+
+The pattern of the failures is `..X.X.X.X...`, every other launch, and the
+value a failing launch reads is frozen rather than lagging. Every launch runs.
+So: **inside one OptiX launch, a read-only load and a writable load of the
+same address return different values**, and the read-only one is serving a
+line no launch invalidated. It does not matter who wrote the memory -- the
+host through `Buffer::write`, or a compute kernel dispatched immediately
+before, both measured, both stale. On Metal every route is exact, and the ray
+generation section skips there for want of ray tracing pipelines.
+
+**What was ruled out, each by measurement, not by reading:**
+
+- *Our shader.* The same body is exact on Metal inline and reaches the same
+  closed forms. A counter inside the kernel (a bitmask of every `path.bounces`
+  a thread saw across its sixteen samples) came back with two bits set: one
+  thread, one launch, two different values of one uniform.
+- *Ordering of the upload.* `CUDA_LAUNCH_BLOCKING=1`; a `cuStreamSynchronize`
+  after the constant pool's `cuMemcpyHtoDAsync`; another immediately before
+  `optixLaunch`. A probe printing the writes, the upload and the launch in
+  order shows them in the right order, to the right device address, every
+  time. None of the three changed the count.
+- *The address.* Forcing the parameter block to land somewhere new on every
+  launch changed nothing.
+- *The pipeline's stack.* `OPTIX_EXCEPTION_FLAG_STACK_OVERFLOW` and
+  `OPTIX_EXCEPTION_FLAG_TRACE_DEPTH` with validation on report nothing, and an
+  explicit `optixPipelineSetStackSize` made it worse (OptiX's own default is
+  documented correct for a call tree of depth one, which is ours).
+- *The payload and the binding table.* `maxRayPayloadSize` 64 and 128,
+  `maxRecursion` 1 and 2, and a geometry contribution multiplier of 0 instead
+  of 2 all behave the same.
+- *The optimiser.* `OPTIX_COMPILE_OPTIMIZATION_LEVEL_0` cannot be measured:
+  compiling the path tracer's ray generation entry that way is killed for
+  memory on a 16 GB box.
+- *Memory errors.* `compute-sanitizer --tool memcheck` reports 0 errors -- and
+  passes the furnace, which is itself a datum: it serialises the launches.
+
+Driver 580.173.02, OptiX 9.0 (`optix 90000`), NVIDIA L4, slang-rhi pinned at
+`e17f6d7`.
+
+**What this means for the CUDA route.** A single launch is sound -- which is
+why the mesh visibility comparison (0 of 43621 pixels differing against the
+compute BVH) and the shadow query's closed forms were exact, and why
+`Kitchen_set` path traced to a plausible image. A *sequence* of launches is
+not: whatever a ray generation entry reads through a constant or read-only
+buffer may be what the launch before it read. That is every per-frame
+parameter and every scene resource, so an animation, an accumulating frame or
+a sweep of settings can silently render the frame before. Nothing in an image
+says so; only a closed form does, which is how this was found.
+
+**Not fixed here, and the shape of the fix.** A writable buffer is reliable in
+the same launch, so the mitigation is to route what changes per launch through
+one. That is a change to how the ray modules take their parameters, not a
+tolerance, and it does not make a changing *scene* sound on CUDA -- the vertex,
+instance, material and light pools are read-only buffers by their nature. The
+honest statement is that CUDA ray tracing here is trustworthy for one launch
+and is not yet trustworthy for a sequence. The furnace test fails on CUDA and
+is left failing: it is the truth, and `tests/gpu/test_uniforms.cpp` says why
+in one line instead of leaving it to be rediscovered from an image.
