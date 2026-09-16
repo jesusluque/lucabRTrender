@@ -79,6 +79,24 @@ FetchContent_Declare(slang_rhi
     SYSTEM)
 FetchContent_MakeAvailable(slang_rhi)
 
+# Where slang-rhi put the OptiX headers it fetches itself. Slang's CUDA path
+# compiles through nvrtc at run time and includes <optix.h> for any kernel that
+# traces, and it looks for an installed SDK -- which there is none of here, so
+# the build tells the engine where the fetched headers are and the device hands
+# nvrtc the include path (modules/gpu/src/Device.cpp).
+# slang-rhi fetches them into its own scope, so the directory is what says
+# where they landed rather than a variable of ours.
+foreach(version 9_0 8_1 8_0)
+    set(candidate "${CMAKE_BINARY_DIR}/_deps/optix_${version}-src/include")
+    if(EXISTS "${candidate}/optix.h")
+        set(LRT_OPTIX_INCLUDE_DIR "${candidate}" CACHE PATH "OptiX headers for nvrtc" FORCE)
+        break()
+    endif()
+endforeach()
+if(LRT_OPTIX_INCLUDE_DIR)
+    message(STATUS "gpu: OptiX headers for nvrtc at ${LRT_OPTIX_INCLUDE_DIR}")
+endif()
+
 # --- small libraries ------------------------------------------------------------
 
 FetchContent_Declare(cli11

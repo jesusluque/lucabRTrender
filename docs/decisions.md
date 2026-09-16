@@ -3653,7 +3653,36 @@ a WebGPU build would take the engine's records, not Hydra's prims.
 - A release build and any timing beyond the sort's own.
 - gpe on Vulkan: gpe has no Vulkan backend, so its tests and aofx's host
   run on CUDA and Metal only.
-- **Ray tracing on CUDA is a pipeline's, and this engine traces inline.**
+- **Ray tracing on CUDA works now, as a pipeline.** Three things were in the
+  way, and none of them was the SDK.
+  - **Slang has no `RayQuery` for the CUDA target at all**, not even inside a
+    ray generation program ("uses features that are not available in
+    '_raygen' stage for 'cuda'"). A ray there is the classic kind:
+    `TraceRay` with a payload, a miss and a closest hit. `visibility_trace`
+    keeps the inline traversal and the compute entry, `visibility_trace_rays`
+    holds the pipeline's three programs, and `visibility_trace_common` what
+    both use -- three modules because **a module compiles every entry point
+    it holds**: with the closest hit beside the compute kernel, Metal could
+    no longer load the module at all and the whole visibility pass went with
+    it.
+  - **nvrtc wants `<optix.h>` at run time.** Slang's CUDA path compiles
+    kernels as the frame asks for them, and a kernel that traces includes the
+    OptiX header; Slang looks for an installed SDK (`NVIDIA-OptiX-SDK-*`) and
+    the box has none -- only the headers slang-rhi fetches for itself. The
+    build now tells the device where those are (`LRT_OPTIX_INCLUDE_DIR`, and
+    `LRT_OPTIX_INCLUDE` overrides it) and the device hands nvrtc the include
+    path through Slang's downstream arguments.
+  - **`RayTracingScene` asked for inline rays** before it would build
+    anything. The structure is the same either way.
+  - **Checked** by a test that needs no rasteriser, so it runs on every
+    device: the ray route's ids against the compute BVH's, over three turned
+    squares at three depths. 0 of 43621 pixels differ on Metal, on Vulkan and
+    on CUDA, where it reports "ray route: a ray tracing pipeline".
+  - **What is still inline only**: the path tracer, the cutout pass (a
+    generated kernel), the splat integrator and the shadow kernels. Each is
+    a `TraceRay` port of its own, and the splat one needs its k-buffer in
+    global memory since a payload cannot hold 256 entries.
+- **What the engine's inline rays mean for CUDA.**
   The box has OptiX after all -- `lrt info` on the L4 reports `optix 90000`,
   the driver's `libnvoptix.so.1` and the headers slang-rhi fetches itself
   (`_deps/optix_8_0-src`, `8_1`, `9_0`) -- and its caps read `ray tracing

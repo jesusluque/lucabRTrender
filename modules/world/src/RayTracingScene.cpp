@@ -55,7 +55,11 @@ Result<rhi::ComPtr<rhi::IAccelerationStructure>> buildStructure(gpu::Device& dev
 }   // namespace
 
 Result<RayTracingScene> RayTracingScene::create(gpu::ShaderLibrary& library) {
-    if (!library.device().caps().accelerationStructure || !library.device().caps().rayQuery) {
+    // Inline rays or a pipeline: the structure is the same either way, and a
+    // device that traces only in a pipeline (CUDA, through OptiX) builds and
+    // walks it as any other does.
+    const gpu::Caps& caps = library.device().caps();
+    if (!caps.accelerationStructure || !(caps.rayQuery || caps.rayTracing)) {
         return Error(ErrorCode::Unsupported, "no hardware acceleration structures on this device");
     }
     auto descs = gpu::ComputeKernel::create(library, "lrt/world/instance_descs", "instanceDescs");

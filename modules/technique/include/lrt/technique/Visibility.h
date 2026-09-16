@@ -14,6 +14,7 @@
 
 #include "lrt/core/Result.h"
 #include "lrt/gpu/ComputeKernel.h"
+#include "lrt/gpu/RayTracingKernel.h"
 #include "lrt/gpu/RasterKernel.h"
 #include "lrt/gpu/Texture.h"
 #include "lrt/technique/MaterialPrograms.h"
@@ -81,6 +82,10 @@ private:
     gpu::ShaderLibrary* library_ = nullptr;
     gpu::Device*       device_ = nullptr;
     gpu::ComputeKernel trace_;
+    /// Where the device traces only in a pipeline (CUDA: OptiX, and Slang has
+    /// no RayQuery for that target at all), the same kernel as a ray
+    /// generation program with a miss and a closest hit beside it.
+    std::optional<gpu::RayTracingKernel> traceRays_;
     std::optional<gpu::ComputeKernel> cutout_;
     std::string        cutoutModule_;
 };

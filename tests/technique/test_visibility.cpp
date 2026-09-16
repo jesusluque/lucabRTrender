@@ -707,3 +707,100 @@ TEST_CASE("a deformed mesh refits its acceleration structures and the routes sti
     CHECK(rays == 0);
     CHECK(walked == 0);
 }
+
+// Rays against the compute BVH, with no rasteriser in between: the one
+// comparison of the ray route that a device without rasterisation can make,
+// and the only one that exercises the *pipeline* route at all -- CUDA has
+// OptiX and no inline ray query, so there `VisibilityTrace` is a ray
+// generation program with a miss and a closest hit (visibility_trace_rays.slang)
+// while every other device traces inline. Both routes see the same triangles
+// or one of them is wrong; the ids say which, counted by a kernel.
+TEST_CASE("the ray route and the compute BVH see the same triangles", "[technique][visibility][raytracing]") {
+    LRT_REQUIRE_GPU(gpu);
+    const gpu::Caps& caps = gpu->device->caps();
+    if (!caps.accelerationStructure || !(caps.rayQuery || caps.rayTracing)) {
+        SKIP("no acceleration structures, inline or in a pipeline");
+    }
+    // No rasteriser here on purpose: this is the comparison a device without
+    // one can still make, and the harness above builds a VisibilityRaster.
+    auto builder = geom::MeshBuilder::create(*gpu->library);
+    auto scene = world::GpuScene::create(*gpu->library);
+    if (!builder) FAIL(builder.error().toString());
+    if (!scene) FAIL(scene.error().toString());
+    auto rt = world::RayTracingScene::create(*gpu->library);
+    auto trace = technique::VisibilityTrace::create(*gpu->library);
+    auto bvh = world::BvhScene::create(*gpu->library);
+    auto walk = technique::VisibilityBvh::create(*gpu->library);
+    auto compare = gpu::ComputeKernel::create(*gpu->library, "lrt/test/ids_compare", "idsCompare");
+    if (!rt) FAIL(rt.error().toString());
+    if (!trace) FAIL(trace.error().toString());
+    if (!bvh) FAIL(bvh.error().toString());
+    if (!walk) FAIL(walk.error().toString());
+    if (!compare) FAIL(compare.error().toString());
+    std::printf("  ray route: %s\n", caps.rayQuery ? "inline" : "a ray tracing pipeline");
+
+    // Three squares at three depths, turned, so a ray meets them in an order
+    // a single plane could not tell apart.
+    const uint32_t w = 241;
+    const uint32_t h = 181;
+    const render::Projection projection =
+        render::projectionFor(render::Camera::lookingAt({1.5, 1.0, 6.0}, {0.0, 0.0, 0.0}), w, h);
+    std::vector<float> points{-1, -1, 0, 1, -1, 0, 1, 1, 0, -1, 1, 0};
+    const std::vector<int32_t> counts{4};
+    const std::vector<int32_t> indices{0, 1, 2, 3};
+    geom::MeshInput in;
+    in.source = "square";
+    in.points = {std::as_bytes(std::span<const float>(points)), false};
+    in.faceVertexCounts = counts;
+    in.faceVertexIndices = indices;
+    in.smoothNormals = false;
+    auto built = builder->build(in);
+    if (!built) FAIL(built.error().toString());
+    std::shared_ptr<const geom::GpuMesh> mesh = std::make_shared<const geom::GpuMesh>(std::move(*built));
+    std::vector<world::MeshInstance> instances;
+    for (int k = 0; k < 3; ++k) {
+        world::MeshInstance instance;
+        instance.mesh = mesh;
+        instance.objectToWorld = aofx::xform::translation({-0.7 + 0.7 * k, 0.2 * k, -1.5 * k}) *
+                                 aofx::xform::rotationY(12.0 * k);
+        instance.primId = static_cast<uint32_t>(k);
+        instances.push_back(instance);
+    }
+    REQUIRE(scene->update(instances, projection, {}));
+    REQUIRE(rt->build(*scene, false));
+    REQUIRE(bvh->build(*scene, false));
+
+    technique::VisibilityTargets traced;
+    technique::VisibilityTargets walked;
+    {
+        gpu::CommandBatch batch(*gpu->device);
+        REQUIRE(trace->render(batch, *rt, projection, w, h, traced));
+        REQUIRE(batch.submit(true));
+    }
+    {
+        gpu::CommandBatch batch(*gpu->device);
+        REQUIRE(walk->render(batch, *scene, *bvh, projection, w, h, walked));
+        REQUIRE(batch.submit(true));
+    }
+    gpu::Buffer out = test::uintBuffer(*gpu->device, 4, "ids.counts");
+    auto viewA = traced.ids.view(0);
+    auto viewB = walked.ids.view(0);
+    REQUIRE(viewA);
+    REQUIRE(viewB);
+    {
+        gpu::CommandBatch batch(*gpu->device);
+        compare->dispatch(batch, {1, 1, 1}, [&](rhi::ShaderCursor cursor) {
+            cursor["a"].setBinding((*viewA).get());
+            cursor["b"].setBinding((*viewB).get());
+            cursor["counts"].setBinding(out.rhi());
+            cursor["params"]["width"].setData(w);
+            cursor["params"]["height"].setData(h);
+        });
+        REQUIRE(batch.submit(true));
+    }
+    uint32_t c[4] = {0, 0, 0, 0};
+    REQUIRE(out.read(*gpu->device, 0, sizeof(c), c));
+    std::printf("  %u of %u pixels differ; %u covered\n", c[0], w * h, c[1]);
+    CHECK(c[1] > 1000);   // the squares are there
+    CHECK(c[0] == 0);     // and both routes found the same triangle at every pixel
+}

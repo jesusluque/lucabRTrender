@@ -134,6 +134,31 @@ Result<std::shared_ptr<Device>> Device::create(const DeviceDesc& desc) {
         rhiDesc.slang.searchPaths = searchPaths.data();
         rhiDesc.slang.searchPathCount = static_cast<uint32_t>(searchPaths.size());
         rhiDesc.slang.optimizationLevel = SLANG_OPTIMIZATION_LEVEL_HIGH;
+        // CUDA compiles through nvrtc at run time, and a kernel that traces
+        // includes <optix.h>. Slang looks for an installed OptiX SDK and
+        // there is none here, so nvrtc is handed the headers slang-rhi
+        // fetched at build time (LRT_OPTIX_INCLUDE_DIR), or whatever
+        // LRT_OPTIX_INCLUDE says. Without it every ray tracing pipeline on
+        // CUDA fails with "Failed to locate OptiX headers".
+        std::string optixArgs;
+        slang::CompilerOptionEntry optixEntry{};
+        if (backend == Backend::CUDA) {
+            std::string include = platform::env("LRT_OPTIX_INCLUDE");
+#if defined(LRT_OPTIX_INCLUDE_DIR)
+            if (include.empty()) {
+                include = LRT_OPTIX_INCLUDE_DIR;
+            }
+#endif
+            if (!include.empty()) {
+                optixArgs = "-I" + include;
+                optixEntry.name = slang::CompilerOptionName::DownstreamArgs;
+                optixEntry.value.kind = slang::CompilerOptionValueKind::String;
+                optixEntry.value.stringValue0 = "nvrtc";
+                optixEntry.value.stringValue1 = optixArgs.c_str();
+                rhiDesc.slang.compilerOptionEntries = &optixEntry;
+                rhiDesc.slang.compilerOptionEntryCount = 1;
+            }
+        }
         rhiDesc.persistentShaderCache = device->shaderCache_.get();
 
         rhi::ComPtr<rhi::IDevice> made;

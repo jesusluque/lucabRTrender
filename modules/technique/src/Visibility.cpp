@@ -204,15 +204,32 @@ Result<void> VisibilityRaster::render(gpu::CommandBatch& batch, const world::Gpu
 }
 
 Result<VisibilityTrace> VisibilityTrace::create(gpu::ShaderLibrary& library) {
-    if (!library.device().caps().rayQuery) {
-        return Error(ErrorCode::Unsupported, "no ray queries on this device");
+    const gpu::Caps& caps = library.device().caps();
+    if (!caps.rayQuery && !(caps.rayTracing && caps.accelerationStructure)) {
+        return Error(ErrorCode::Unsupported, "no ray queries and no ray tracing pipeline on this device");
     }
-    auto kernel = gpu::ComputeKernel::create(library, "lrt/technique/visibility_trace", "visibilityTrace");
-    if (!kernel) return std::move(kernel).error();
     VisibilityTrace trace;
     trace.library_ = &library;
     trace.device_ = &library.device();
-    trace.trace_ = std::move(*kernel);
+    if (caps.rayQuery) {
+        auto kernel = gpu::ComputeKernel::create(library, "lrt/technique/visibility_trace", "visibilityTrace");
+        if (!kernel) return std::move(kernel).error();
+        trace.trace_ = std::move(*kernel);
+    } else {
+        // The pipeline route: one ray generation program, one miss, one
+        // closest hit, no cutouts yet (those are generated kernels and their
+        // ray is inline too).
+        gpu::RayTracingDesc desc;
+        desc.module = "lrt/technique/visibility_trace_rays";
+        desc.rayGen = "visibilityTraceGen";
+        desc.misses = {"visibilityMiss"};
+        desc.hitGroups = {{"visibility", "visibilityHit", "", ""}};
+        desc.maxRecursion = 1;
+        desc.payloadBytes = 32;
+        auto kernel = gpu::RayTracingKernel::create(library, desc);
+        if (!kernel) return std::move(kernel).error();
+        trace.traceRays_.emplace(std::move(*kernel));
+    }
     return trace;
 }
 
@@ -258,8 +275,11 @@ Result<void> VisibilityTrace::render(gpu::CommandBatch& batch, const world::RayT
     auto view = targets.ids.view(0);
     if (!view) return std::move(view).error();
     const std::array<float, 12> toWorld = aofx::xform::inverseAffine(projection.worldToView).rows3x4();
-    const gpu::ComputeKernel& kernel = cutouts != nullptr ? *cutout_ : trace_;
-    kernel.dispatch(batch, {width, height, 1}, [&](rhi::ShaderCursor cursor) {
+    if (traceRays_.has_value() && cutouts != nullptr) {
+        return Error(ErrorCode::Unsupported,
+                     "visibility rays: a cutout pass needs an inline ray, which this device has not");
+    }
+    const auto bind = [&](rhi::ShaderCursor cursor) {
         if (cutouts != nullptr) {
             bindMaterialFrame(cursor, *cutouts, projection);
         }
@@ -271,7 +291,12 @@ Result<void> VisibilityTrace::render(gpu::CommandBatch& batch, const world::RayT
         for (size_t k = 0; k < 12; ++k) {
             cursor["trace"][kNames[k]].setData(toWorld[k]);
         }
-    });
+    };
+    if (traceRays_.has_value()) {
+        traceRays_->dispatch(batch, width, height, 1, bind);
+    } else {
+        (cutouts != nullptr ? *cutout_ : trace_).dispatch(batch, {width, height, 1}, bind);
+    }
     return ok();
 }
 

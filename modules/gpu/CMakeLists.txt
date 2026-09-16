@@ -17,3 +17,6 @@ lrt_add_module(gpu
         slang-rhi)
 target_compile_definitions(lrt_gpu PRIVATE
     LRT_BUILD_SHADER_DIR="${LRT_SHADER_OUTPUT_DIR}")
+if(LRT_OPTIX_INCLUDE_DIR)
+    target_compile_definitions(lrt_gpu PRIVATE LRT_OPTIX_INCLUDE_DIR="${LRT_OPTIX_INCLUDE_DIR}")
+endif()
