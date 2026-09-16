@@ -45,6 +45,11 @@ struct RayTracerSettings {
     uint32_t maxSegments = 16;
     /// Splats per bottom-level structure. Bounds a single build's memory.
     uint32_t chunkSplats = uint32_t{1} << 20;
+    /// Draw the frame as two queries composed at this distance instead of
+    /// one (Hardware route). 0: one query, which is what a frame draws.
+    /// It is the segment query's own check: a ray cut in two and put back
+    /// together must be the ray.
+    float    splitAt = 0.0F;
 };
 
 struct RayTracerStats {
@@ -56,6 +61,19 @@ struct RayTracerStats {
     double   buildMs = 0;       ///< structures (and BLAS when rebuilt) and colours
     double   renderMs = 0;      ///< the traced pass
     double   totalMs = 0;
+};
+
+/// What a secondary ray traces a cloud against: the structures the last
+/// `render` left behind, and the buffers that say what each particle is.
+/// `tlas` is null before the first render and on the ComputeBvh route, whose
+/// traversal is the kernel's own (shaders/lrt/rt/rt_shadow.slang).
+struct ShadowScene {
+    rhi::IAccelerationStructure* tlas = nullptr;
+    const gpu::Buffer*           frames = nullptr;
+    const gpu::Buffer*           colours = nullptr;
+    const gpu::Buffer*           instanceData = nullptr;
+    const gpu::Buffer*           instanceIndices = nullptr;
+    uint32_t                     instances = 0;
 };
 
 class GaussianRayTracer {
@@ -74,6 +92,10 @@ public:
                                                 std::span<const SplatInstance> instances,
                                                 const RenderSettings& settings,
                                                 RenderTargets& targets);
+
+    /// The structures the last render built, for a ray that only needs
+    /// transmittance (rt_shadow.slang). Valid until the next render.
+    [[nodiscard]] ShadowScene shadowScene() const noexcept;
 
 private:
     struct CloudKey {
@@ -106,6 +128,7 @@ private:
     gpu::ComputeKernel frames_kernel_;
     gpu::ComputeKernel shade_;
     gpu::ComputeKernel render_;
+    gpu::ComputeKernel renderSplit_;   ///< settings_.splitAt != 0
     // ComputeBvh
     gpu::RadixSort     sort_;
     gpu::ComputeKernel bvhLeaves_;

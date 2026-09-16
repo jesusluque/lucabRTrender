@@ -1852,6 +1852,42 @@ radian sun reads 0 of 8281 pixels beyond 2%, worst 0.01%.
   owns its pixel and assumes a primary ray, and a splat's contribution along
   a secondary ray is an integral through its Gaussian that no route here
   evaluates yet.
+- **A ray that only needs transmittance** has its own kernel now,
+  `shaders/lrt/rt/rt_shadow.slang`: no k-buffer, no segments, no order.
+  Transmittance is a product of `1 - alpha` and a product does not care in
+  what order its terms arrive, so every proxy the traversal offers is taken
+  as it comes and the ray stops once the product falls under its cut. Three
+  closed forms hold it: a ray through a particle's centre peaks at power 0,
+  so it lets exactly `1 - opacity` through (0.50000 measured against 0.5);
+  four such particles give `(1 - opacity)^4` (0.06250); and with the cut
+  raised to 0.3 the ray stops after three of the four, which the counter
+  says (1 ray cut, 3 particles taken).
+  - **Back faces are not culled here.** A shadow ray is born on a surface,
+    and a surface inside a cloud is surrounded by proxies: with culling on,
+    a ray starting inside a proxy sees only the exit face and misses the
+    particle it stands in -- exactly the particles whose shadow touches the
+    geometry. Measured both ways in the same binary: born inside with the
+    peak ahead, 0.50000 against the closed form; with culling on (the
+    control), 1.00000 and 0 particles taken.
+  - **Both faces then arrive**, so a ring of the last 16 particles taken
+    collapses them: 5 particles taken and 5 duplicates caught in the stack
+    test, where `rt_integrate` does it by comparing with the last particle
+    blended after sorting.
+- **The integrator answers a query, not a pixel.** `rtTraceSegment(ray,
+  windowMin, windowMax)` returns a `SegmentResult` -- radiance premultiplied
+  by what it covered, the transmittance left, the depth -- and `writeSegment`
+  turns one into a pixel, so the camera's kernel and a secondary ray ask the
+  same thing. `segmentOver(near, far)` composes two. The windows are half
+  open, `[a, b)`, so a peak exactly on a cut is taken once.
+  - **What the check found.** Drawing a frame as `[near, s)` over `[s, far)`
+    and comparing it with the one query: the far query first traversed from
+    `s`, and a proxy entered before the cut that peaks after it was lost
+    entirely -- max 199 of 255 on 445 pixels of a sparse cloud. The traversal
+    and the window are two different things: a query walks from where the ray
+    starts and takes the peaks in its window. After that, a sparse cloud is
+    **bit for bit** (max 0) and a dense one differs by 1 code at worst with 0
+    pixels over 2 -- the carry (`kCarry`), which the header already names as
+    the one place order can be approximate.
 - **Points as spheres**, spiked and not built. slang-rhi's Metal backend
   does build acceleration structures over AABBs
   (`AccelerationStructureBuildInputType::ProceduralPrimitives`, a
@@ -3490,7 +3526,7 @@ measured above.
 Parity here means the same GPU-computed metric on each machine and each
 backend, computed there; no pixels travel between them.
 
-| | Metal (Apple M5 Pro) | Vulkan (NVIDIA L4) | CUDA (NVIDIA L4, no OptiX) |
+| | Metal (Apple M5 Pro) | Vulkan (NVIDIA L4) | CUDA (NVIDIA L4, OptiX 9, no inline rays) |
 |---|---|---|---|
 | Cases | 188 | 188 | 188 |
 | Passed | 188 | 180 | 96 |
@@ -3594,5 +3630,16 @@ a WebGPU build would take the engine's records, not Hydra's prims.
 - A release build and any timing beyond the sort's own.
 - gpe on Vulkan: gpe has no Vulkan backend, so its tests and aofx's host
   run on CUDA and Metal only.
-- OptiX: absent on this box, so slang-rhi warns and falls back to CUDA
-  compute.
+- **Ray tracing on CUDA is a pipeline's, and this engine traces inline.**
+  The box has OptiX after all -- `lrt info` on the L4 reports `optix 90000`,
+  the driver's `libnvoptix.so.1` and the headers slang-rhi fetches itself
+  (`_deps/optix_8_0-src`, `8_1`, `9_0`) -- and its caps read `ray tracing
+  yes (pipeline), no (ray query), yes (AS)`. What is missing is inline
+  `RayQuery` in a compute kernel, which OptiX does not offer: its traversal
+  lives in ray generation and hit programs, reached through a shader binding
+  table. Every ray this engine traces is inline (`visibility_trace.slang`,
+  the path tracer, `rt_render.slang`, `rt_shadow.slang`), so on CUDA those
+  kernels have no route and their tests skip. Earlier notes here said OptiX
+  was absent; that was wrong, and the skips were right for the wrong reason.
+  Giving CUDA the rays back means a second route through ray tracing
+  pipelines, which is a piece of work nobody has started.

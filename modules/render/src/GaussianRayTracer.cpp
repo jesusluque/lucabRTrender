@@ -137,6 +137,7 @@ Result<GaussianRayTracer> GaussianRayTracer::create(gpu::ShaderLibrary& library,
     LRT_TRY(make(r.shade_, "lrt/rt/rt_shade", "rtShade"));
     if (r.settings_.route == RayTracingRoute::Hardware) {
         LRT_TRY(make(r.proxy_, "lrt/rt/rt_proxy", "rtProxy"));
+        LRT_TRY(make(r.renderSplit_, "lrt/rt/rt_render", "rtRenderSplit"));
         LRT_TRY(make(r.render_, "lrt/rt/rt_render", "rtRender"));
     } else {
         auto sort = gpu::RadixSort::create(library);
@@ -518,6 +519,17 @@ Result<RayTracerStats> GaussianRayTracer::render(const Camera& camera,
     return render(projectionFor(camera, settings.width, settings.height), instances, settings, targets);
 }
 
+ShadowScene GaussianRayTracer::shadowScene() const noexcept {
+    ShadowScene scene;
+    scene.tlas = tlas_.get();
+    scene.frames = &frames_;
+    scene.colours = &colours_;
+    scene.instanceData = &instanceData_;
+    scene.instanceIndices = &instanceIndices_;
+    scene.instances = instanceCount_;
+    return scene;
+}
+
 Result<RayTracerStats> GaussianRayTracer::render(const Projection& projection,
                                                  std::span<const SplatInstance> instances,
                                                  const RenderSettings& settings,
@@ -577,9 +589,11 @@ Result<RayTracerStats> GaussianRayTracer::render(const Projection& projection,
         setProjection(p, projection, settings);
         p["maxSegments"].setData(settings_.maxSegments);
         p["instances"].setData(instanceCount_);
+        p["splitAt"].setData(settings_.splitAt);
     };
     if (settings_.route == RayTracingRoute::Hardware) {
-        render_.dispatch(batch, {settings.width, settings.height, 1}, [&](rhi::ShaderCursor cursor) {
+        const gpu::ComputeKernel& kernel = settings_.splitAt > 0.0F ? renderSplit_ : render_;
+        kernel.dispatch(batch, {settings.width, settings.height, 1}, [&](rhi::ShaderCursor cursor) {
             common(cursor);
             cursor["scene"].setBinding(tlas_.get());
         });

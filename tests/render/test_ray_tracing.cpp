@@ -394,3 +394,288 @@ TEST_CASE("a SplatEdit traces as the ray tracer's reference renders it", "[rende
     CHECK(c.toPeaks.p99 <= kToPeaksP99);
     CHECK(fewOver2(c.toPeaks));
 }
+
+// A shadow ray asks one thing of a cloud -- how much light gets through --
+// and rt_shadow.slang answers it with a product of (1 - alpha), no k-buffer,
+// no segments and no order. Three closed forms hold it to that, each one
+// exact rather than a tolerance on an image:
+//   - a ray through a particle's centre peaks at power 0, so its alpha is the
+//     particle's opacity and the transmittance is exactly 1 - opacity;
+//   - N such particles in a line give (1 - opacity)^N, whatever order the
+//     traversal offers them in -- which is the point of not ordering;
+//   - deep enough, the product falls under the cut and the ray stops, which
+//     the kernel counts.
+TEST_CASE("a shadow ray through splats is the product of what each lets through",
+          "[render][rt][gpu][shadow]") {
+    LRT_REQUIRE_GPU(gpu);
+    if (!render::GaussianRayTracer::hardwareSupported(*gpu->device)) {
+        SKIP("the device has no RayQuery or acceleration structures");
+    }
+    auto h = harness(gpu, on(render::RayTracingRoute::Hardware));
+    auto kernel = gpu::ComputeKernel::create(*gpu->library, "lrt/rt/rt_shadow", "rtShadowRays");
+    if (!kernel) FAIL(kernel.error().toString());
+
+    // Particles on the z axis, every one isotropic, so a ray down -z through
+    // the axis peaks at each centre with power 0.
+    const float opacity = 0.5F;
+    const uint32_t stacked = 4;
+    CloudBuilder built;
+    for (uint32_t k = 0; k < stacked; ++k) {
+        built.add(0.0F, 0.0F, -2.0F * float(k), opacity, 0.2F, 0.2F, 0.2F, {1, 0, 0, 0}, {0.8F, 0.8F, 0.8F});
+    }
+    auto cloud = h->loader.upload(built.raw, 3);
+    REQUIRE(cloud);
+    const std::vector<render::SplatInstance> instances{{&*cloud, render::Mat4::identity()}};
+
+    // One render builds the structures the shadow rays trace against.
+    render::RenderSettings settings;
+    settings.width = 32;
+    settings.height = 32;
+    render::RenderTargets targets;
+    render::Camera camera = render::Camera::lookingAt({0.0, 0.0, 6.0}, {0.0, 0.0, -3.0});
+    auto stats = h->rt.render(camera, instances, settings, targets);
+    if (!stats) FAIL(stats.error().toString());
+    const render::ShadowScene scene = h->rt.shadowScene();
+    REQUIRE(scene.tlas != nullptr);
+
+    // Four rays: through every particle, through the nearest one alone,
+    // past the cloud entirely, and away from it (its particles behind).
+    struct Ray {
+        std::array<float, 4> origin;      // xyz, tMin
+        std::array<float, 4> direction;   // xyz, tMax
+        float                want;
+        const char*          name;
+    };
+    const float one = 1.0F - opacity;
+    const std::vector<Ray> cases = {
+        {{0.0F, 0.0F, 5.0F, 1e-3F}, {0.0F, 0.0F, -1.0F, 100.0F}, std::pow(one, float(stacked)),
+         "through all four"},
+        {{0.0F, 0.0F, 5.0F, 1e-3F}, {0.0F, 0.0F, -1.0F, 6.0F}, one, "through the nearest, tMax before the rest"},
+        {{3.0F, 0.0F, 5.0F, 1e-3F}, {0.0F, 0.0F, -1.0F, 100.0F}, 1.0F, "past the cloud"},
+        {{0.0F, 0.0F, 5.0F, 1e-3F}, {0.0F, 0.0F, 1.0F, 100.0F}, 1.0F, "away from it"},
+    };
+    std::vector<float> rayData;
+    for (const Ray& r : cases) {
+        rayData.insert(rayData.end(), r.origin.begin(), r.origin.end());
+        rayData.insert(rayData.end(), r.direction.begin(), r.direction.end());
+    }
+    gpu::BufferDesc desc;
+    desc.bytes = rayData.size() * sizeof(float);
+    desc.elementBytes = 16;
+    desc.label = "shadow.rays";
+    auto rays = gpu::Buffer::create(*gpu->device, desc, rayData.data());
+    REQUIRE(rays);
+    gpu::BufferDesc out;
+    out.bytes = cases.size() * sizeof(float);
+    out.elementBytes = 4;
+    out.label = "shadow.transmittance";
+    auto shadow = gpu::Buffer::create(*gpu->device, out);
+    REQUIRE(shadow);
+    gpu::Buffer counters = test::uintBuffer(*gpu->device, 4, "shadow.counters");
+
+    const auto trace = [&](float cut, uint32_t cull = 0) {
+        {
+            gpu::CommandBatch batch(*gpu->device);
+            kernel->dispatch(batch, {static_cast<uint32_t>(cases.size()), 1, 1}, [&](rhi::ShaderCursor cursor) {
+                cursor["scene"].setBinding(scene.tlas);
+                cursor["frames"].setBinding(scene.frames->rhi());
+                cursor["colours"].setBinding(scene.colours->rhi());
+                cursor["instanceData"].setBinding(scene.instanceData->rhi());
+                cursor["instanceIndices"].setBinding(scene.instanceIndices->rhi());
+                cursor["rays"].setBinding(rays->rhi());
+                cursor["shadow"].setBinding(shadow->rhi());
+                cursor["counters"].setBinding(counters.rhi());
+                rhi::ShaderCursor p = cursor["shadowParams"];
+                p["rays"].setData(static_cast<uint32_t>(cases.size()));
+                p["cut"].setData(cut);
+                p["nearZ"].setData(0.0F);
+                p["farZ"].setData(1.0e9F);
+                p["cull"].setData(cull);
+            });
+            REQUIRE(batch.submit(true));
+        }
+        std::vector<float> through(cases.size(), 0.0F);
+        REQUIRE(shadow->read(*gpu->device, 0, through.size() * sizeof(float), through.data()));
+        std::array<uint32_t, 4> n{};
+        REQUIRE(counters.read(*gpu->device, 0, sizeof(n), n.data()));
+        return std::make_pair(through, n);
+    };
+
+    const auto [through, n] = trace(1e-3F);
+    for (size_t k = 0; k < cases.size(); ++k) {
+        std::printf("  %-38s transmittance %.5f, closed form %.5f\n", cases[k].name, double(through[k]),
+                    double(cases[k].want));
+        CHECK(std::abs(through[k] - cases[k].want) < 2e-3F);
+    }
+    std::printf("  %u particles taken, %u duplicates caught, %u rays cut\n", n[0], n[1], n[2]);
+    // Every particle counted once, though each proxy was offered twice --
+    // entry face and exit face, since a shadow ray culls neither. The ring
+    // is what turns those five second offers into five duplicates and one
+    // factor each in the product.
+    CHECK(n[0] == stacked + 1);
+    CHECK(n[2] == 0);
+
+    // The cut: with the four particles at 0.5 the product is 0.0625, so a cut
+    // above it stops the ray -- and stops it having taken fewer particles
+    // than the ray that ran to the end. That is what the counter says.
+    const auto [cutThrough, cutN] = trace(0.3F, 0u);
+    std::printf("  cut at 0.3: transmittance %.5f through all four, %u particles taken, %u rays cut\n",
+                double(cutThrough[0]), cutN[0] - n[0], cutN[2] - n[2]);
+    CHECK(cutThrough[0] <= 0.3F);
+    CHECK(cutN[2] - n[2] == 1);          // only the ray through all four is cut
+    CHECK(cutN[0] - n[0] < stacked + 1); // and it stopped early
+}
+
+// A shadow ray is born on a surface, and a surface inside a cloud is
+// surrounded by proxies. The primary ray culls back faces because it starts
+// at the camera, outside everything; a ray that starts inside a proxy sees
+// only that proxy's exit face, so with culling on it misses the particle it
+// is standing in -- exactly the particles whose shadow touches the geometry.
+// With culling off the proxy offers both faces and the ring collapses them,
+// so the particle is taken once, at its peak, if the peak is ahead.
+TEST_CASE("a shadow ray born inside a proxy still takes that particle", "[render][rt][gpu][shadow]") {
+    LRT_REQUIRE_GPU(gpu);
+    if (!render::GaussianRayTracer::hardwareSupported(*gpu->device)) {
+        SKIP("the device has no RayQuery or acceleration structures");
+    }
+    auto h = harness(gpu, on(render::RayTracingRoute::Hardware));
+    auto kernel = gpu::ComputeKernel::create(*gpu->library, "lrt/rt/rt_shadow", "rtShadowRays");
+    if (!kernel) FAIL(kernel.error().toString());
+
+    // One large particle at the origin: its proxy reaches about 4.4 units, so
+    // a ray starting at z = 1 starts inside it.
+    const float opacity = 0.5F;
+    CloudBuilder built;
+    built.add(0.0F, 0.0F, 0.0F, opacity, 2.0F, 2.0F, 2.0F, {1, 0, 0, 0}, {0.8F, 0.8F, 0.8F});
+    auto cloud = h->loader.upload(built.raw, 3);
+    REQUIRE(cloud);
+    const std::vector<render::SplatInstance> instances{{&*cloud, render::Mat4::identity()}};
+    render::RenderSettings settings;
+    settings.width = 32;
+    settings.height = 32;
+    render::RenderTargets targets;
+    auto stats = h->rt.render(render::Camera::lookingAt({0.0, 0.0, 12.0}, {0.0, 0.0, 0.0}), instances, settings,
+                              targets);
+    if (!stats) FAIL(stats.error().toString());
+    const render::ShadowScene scene = h->rt.shadowScene();
+    REQUIRE(scene.tlas != nullptr);
+
+    // Both rays start inside the proxy. The first has the particle's centre
+    // ahead of it (the peak at t = 1), the second behind.
+    const std::vector<float> rayData = {
+        0.0F, 0.0F, 1.0F, 1e-3F,   0.0F, 0.0F, -1.0F, 100.0F,
+        0.0F, 0.0F, 1.0F, 1e-3F,   0.0F, 0.0F, 1.0F, 100.0F,
+    };
+    gpu::BufferDesc desc;
+    desc.bytes = rayData.size() * sizeof(float);
+    desc.elementBytes = 16;
+    desc.label = "shadow.inside.rays";
+    auto rays = gpu::Buffer::create(*gpu->device, desc, rayData.data());
+    REQUIRE(rays);
+    gpu::BufferDesc out;
+    out.bytes = 2 * sizeof(float);
+    out.elementBytes = 4;
+    out.label = "shadow.inside.transmittance";
+    auto shadow = gpu::Buffer::create(*gpu->device, out);
+    REQUIRE(shadow);
+
+    const auto trace = [&](uint32_t cull) {
+        gpu::Buffer counters = test::uintBuffer(*gpu->device, 4, "shadow.inside.counters");
+        {
+            gpu::CommandBatch batch(*gpu->device);
+            kernel->dispatch(batch, {2, 1, 1}, [&](rhi::ShaderCursor cursor) {
+                cursor["scene"].setBinding(scene.tlas);
+                cursor["frames"].setBinding(scene.frames->rhi());
+                cursor["colours"].setBinding(scene.colours->rhi());
+                cursor["instanceData"].setBinding(scene.instanceData->rhi());
+                cursor["instanceIndices"].setBinding(scene.instanceIndices->rhi());
+                cursor["rays"].setBinding(rays->rhi());
+                cursor["shadow"].setBinding(shadow->rhi());
+                cursor["counters"].setBinding(counters.rhi());
+                rhi::ShaderCursor p = cursor["shadowParams"];
+                p["rays"].setData(uint32_t{2});
+                p["cut"].setData(1e-3F);
+                p["nearZ"].setData(0.0F);
+                p["farZ"].setData(1.0e9F);
+                p["cull"].setData(cull);
+            });
+            REQUIRE(batch.submit(true));
+        }
+        std::array<float, 2> through{};
+        std::array<uint32_t, 4> n{};
+        REQUIRE(shadow->read(*gpu->device, 0, sizeof(through), through.data()));
+        REQUIRE(counters.read(*gpu->device, 0, sizeof(n), n.data()));
+        return std::make_pair(through, n);
+    };
+
+    const auto [inside, insideN] = trace(0u);
+    const auto [culled, culledN] = trace(1u);
+    std::printf("  born inside, peak ahead: %.5f (closed form %.5f); peak behind: %.5f\n"
+                "  the control, back faces culled: %.5f and %.5f, %u particles taken against %u\n",
+                double(inside[0]), double(1.0F - opacity), double(inside[1]), double(culled[0]),
+                double(culled[1]), culledN[0], insideN[0]);
+    CHECK(std::abs(inside[0] - (1.0F - opacity)) < 2e-3F);   // taken, once, at its peak
+    CHECK(inside[1] == 1.0F);                                // the peak behind is not taken
+    CHECK(insideN[0] == 1);
+    // Born inside, only the exit face is ahead of the origin, so the ring has
+    // nothing to collapse here -- unlike a ray that crosses a proxy whole,
+    // which is offered both faces (the case above catches five of those).
+    CHECK(insideN[1] == 0);
+    CHECK(culled[0] == 1.0F);                                // the control: missed entirely
+    CHECK(culledN[0] == 0);
+}
+
+// The segment query, held to the only thing that makes it a query: a ray cut
+// in two and put back together is the ray. The same frame is drawn once as
+// [nearZ, farZ] and once as [nearZ, s] composed over [s, farZ] -- the near
+// query's transmittance in front of the far one's radiance -- with the cut
+// falling through the middle of the cloud, so most rays are split where they
+// have particles on both sides.
+TEST_CASE("a query cut in two and composed again is the query", "[render][rt][gpu][segment]") {
+    LRT_REQUIRE_GPU(gpu);
+    if (!render::GaussianRayTracer::hardwareSupported(*gpu->device)) {
+        SKIP("the device has no RayQuery or acceleration structures");
+    }
+    // Two clouds: one sparse enough that no ray carries more than the
+    // integrator holds, one dense enough that many do.
+    const bool dense = GENERATE(false, true);
+    CloudBuilder built = dense ? randomCloud(2000, 11, 0.04F, 0.5F) : randomCloud(600, 11, 0.02F, 0.08F);
+    std::printf("  %s cloud\n", dense ? "dense" : "sparse");
+    render::RenderSettings settings;
+    settings.width = 250;
+    settings.height = 190;
+    const render::Camera camera = render::Camera::lookingAt({1.5, 1.0, 7.0}, {0.0, 0.0, 0.0});
+
+    const auto draw = [&](float splitAt, render::RenderTargets& targets) {
+        render::RayTracerSettings rtSettings;
+        rtSettings.route = render::RayTracingRoute::Hardware;
+        rtSettings.splitAt = splitAt;
+        auto h = harness(gpu, rtSettings);
+        auto cloud = h->loader.upload(built.raw, 3);
+        REQUIRE(cloud);
+        const std::vector<render::SplatInstance> instances{{&*cloud, render::Mat4::identity()}};
+        auto stats = h->rt.render(camera, instances, settings, targets);
+        if (!stats) FAIL(stats.error().toString());
+        return stats->renderMs;
+    };
+    render::RenderTargets whole, composed;
+    const double wholeMs = draw(0.0F, whole);
+    const double splitMs = draw(7.0F, composed);   // the camera is 7.3 from the centre
+
+    auto same = render::compareImages(*gpu->library, whole.colour, composed.colour, settings.width, settings.height);
+    REQUIRE(same);
+    std::printf("  one query %.1f ms, two composed %.1f ms; p99 %u, max %u, %llu of %llu pixels over 2\n",
+                wholeMs, splitMs, same->p99, same->max, static_cast<unsigned long long>(same->over2),
+                static_cast<unsigned long long>(same->pixels));
+    // The order is the same either way -- both queries blend by peak -- so a
+    // sparse cloud comes out bit for bit. Dense, the cut moves where the
+    // carry overflows (kCarry, "the only place order can be approximate"),
+    // and a handful of pixels differ: the bound is on how many, as it is
+    // against the reference renderer.
+    if (dense) {
+        CHECK(fewOver2(*same));
+        CHECK(same->max <= 1);   // measured: p99 1, max 1, 0 pixels over 2
+    } else {
+        CHECK(same->max == 0);   // bit for bit
+    }
+}

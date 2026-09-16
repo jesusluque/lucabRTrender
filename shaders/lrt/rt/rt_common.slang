@@ -10,6 +10,17 @@ module rt_common;
 import lrt.common.packing;
 __exported import lrt.common.edit;
 
+/// A ray, as both routes carry it. Not `RayDesc`: that type exists on a
+/// target only where ray tracing does, and the compute BVH route is meant to
+/// run where there is none (CUDA without OptiX -- measured, nvrtc: "identifier
+/// RayDesc is undefined"). The hardware route fills a RayDesc from this.
+public struct LrtRay {
+    public float3 Origin;
+    public float  TMin;
+    public float3 Direction;
+    public float  TMax;
+};
+
 public static const uint kIcoVertices = 12;
 public static const uint kIcoTriangles = 20;
 /// Inradius of the unit-circumradius icosahedron: vertices are scaled by
@@ -41,7 +52,10 @@ public struct RtParams {
     public uint  maxSegments;
     public uint  depthMode;      // 0 alpha-weighted mean, 1 first crossing
     public float depthThreshold;
-    public uint  pad0; public uint pad1; public uint pad2;
+    /// Where a query is cut in two and composed again (rtRenderSplit): what
+    /// proves the segment query composes. 0: one query, as a frame draws.
+    public float splitAt;
+    public uint  pad1; public uint pad2;
     public EditParams edit;      // shade: this instance's SplatEdit (common/edit.slang)
 };
 

@@ -62,6 +62,38 @@ public static const float kOpen = 3.4e38;
 /// 256 -> 342.
 public static const uint kBuckets = 128;
 
+/// What a query over [tMin, tMax] gathered: radiance already premultiplied by
+/// what it covered, the transmittance left through it, and its depth.
+public struct SegmentResult {
+    public float3 radiance;
+    public float  transmittance;
+    public float  depth;
+};
+
+/// A gathered (or composed) result as the pixel it makes: over the
+/// background, premultiplied, with the depth the query settled on.
+public void writeSegment(uint px, uint py, SegmentResult gathered) {
+    const float coverage = 1.0 - gathered.transmittance;
+    float3 linearRgb = gathered.radiance;
+    if (params.linearise != 0 && coverage > 1e-6) {
+        linearRgb = srgbToLinear(gathered.radiance / coverage) * coverage;
+    }
+    const uint at = py * params.width + px;
+    colour[at] = float4(linearRgb + gathered.transmittance * float3(params.bgR, params.bgG, params.bgB),
+                        coverage + gathered.transmittance * params.bgA);
+    depth[at] = gathered.depth;
+}
+
+/// Two queries over neighbouring windows into the one they cover together:
+/// what the far query gathered is seen through what the near one left.
+public SegmentResult segmentOver(SegmentResult near, SegmentResult far) {
+    SegmentResult both;
+    both.radiance = near.radiance + near.transmittance * far.radiance;
+    both.transmittance = near.transmittance * far.transmittance;
+    both.depth = near.transmittance < 1.0 ? near.depth : far.depth;
+    return both;
+}
+
 public StructuredBuffer<float4>   frames;          // per particle, four: rt_frames.slang
 public StructuredBuffer<float4>   colours;         // per instance particle: rt_shade.slang
 public StructuredBuffer<float4>   instanceData;    // per instance: world->cloud rows 0..2
@@ -69,17 +101,6 @@ public StructuredBuffer<uint>     instanceIndices; // per instance: id base, col
 public RWStructuredBuffer<float4> colour;
 public RWStructuredBuffer<float>  depth;
 public ConstantBuffer<RtParams>   params;
-
-/// A ray, as both routes carry it. Not `RayDesc`: that type exists on a
-/// target only where ray tracing does, and the compute BVH route is meant to
-/// run where there is none (CUDA without OptiX -- measured, nvrtc: "identifier
-/// RayDesc is undefined"). The hardware route fills a RayDesc from this.
-public struct LrtRay {
-    public float3 Origin;
-    public float  TMin;
-    public float3 Direction;
-    public float  TMax;
-};
 
 /// The ray through pixel (px, py) in world space. Its direction has view
 /// z = 1, so t is view depth for every ray.
@@ -165,13 +186,34 @@ public struct Integrator<P : IPrimitives> {
     public float transmittance;
     float depthSum;
     float depthAt;
+    // The window a peak must fall in for this query to take it, half open:
+    // [clipMin, clipMax). The camera's ray takes the whole frustum; a
+    // secondary query takes the slice it was asked for, and half open is
+    // what makes [a, b) and [b, c) compose into [a, c) with a peak exactly
+    // at b taken once. It is *not* the traversal's window: a proxy entered
+    // before b can peak after it, so a query over [b, c) still has to walk
+    // from where the ray starts -- which is the same reason a ray born
+    // inside a proxy must not cull back faces (rt_shadow.slang).
+    float clipMin;
+    float clipMax;
     uint lastId;
     uint lastInstance;
     float lastT;
 
     [mutating]
     [ForceInline]
+    public void beginRange(out Cursor cursor, float windowMin, float windowMax) {
+        begin(cursor);
+        clipMin = max(windowMin, params.nearZ);
+        clipMax = min(windowMax, params.farZ);
+    }
+
+    [mutating]
+    [ForceInline]
     public void begin(out Cursor cursor) {
+        clipMin = params.nearZ;
+        // Half open above, and the far plane is where nothing is drawn anyway.
+        clipMax = params.farZ * (1.0 + 1e-6) + 1e-6;
         cursor.count = 0;
         cursor.windowEnd = -1.0;
         cursor.closed = kOpen;
@@ -339,7 +381,7 @@ public struct Integrator<P : IPrimitives> {
             const float tPeak = -dot(o, d) / max(dot(d, d), 1e-30);
             const float3 closest = o + tPeak * d;
             const float power = dot(closest, closest);
-            if (power > rtCutoff(opacity) || tPeak < params.nearZ || tPeak > params.farZ) {
+            if (power > rtCutoff(opacity) || tPeak < clipMin || tPeak >= clipMax) {
                 continue;
             }
             const float alpha = min(0.99, opacity * exp(-0.5 * power));
@@ -410,19 +452,26 @@ public struct Integrator<P : IPrimitives> {
         return true;
     }
 
+    /// What the query gathered over its window: radiance premultiplied by
+    /// coverage, what is left through it, and where it sat. This is what a
+    /// secondary ray asks for -- a reflection, a ray through a cloud between
+    /// two surfaces -- and what `write` turns into a pixel.
+    [mutating]
+    [ForceInline]
+    public SegmentResult result() {
+        SegmentResult out;
+        out.radiance = rgb;
+        out.transmittance = transmittance;
+        const float coverage = 1.0 - transmittance;
+        out.depth = params.depthMode == 0 ? (coverage > 1e-6 ? depthSum / coverage : 0.0) : max(depthAt, 0.0);
+        return out;
+    }
+
     /// The finished pixel into the targets. Mutating only so that the call
     /// does not copy the integrator (a non-mutating method takes a copy).
     [mutating]
     [ForceInline]
     public void write(uint px, uint py) {
-        const float coverage = 1.0 - transmittance;
-        float3 linearRgb = rgb;
-        if (params.linearise != 0 && coverage > 1e-6) {
-            linearRgb = srgbToLinear(rgb / coverage) * coverage;
-        }
-        const uint at = py * params.width + px;
-        colour[at] = float4(linearRgb + transmittance * float3(params.bgR, params.bgG, params.bgB),
-                            coverage + transmittance * params.bgA);
-        depth[at] = params.depthMode == 0 ? (coverage > 1e-6 ? depthSum / coverage : 0.0) : max(depthAt, 0.0);
+        writeSegment(px, py, result());
     }
 };
