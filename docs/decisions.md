@@ -3746,6 +3746,12 @@ a WebGPU build would take the engine's records, not Hydra's prims.
     - The tracer builds its proxies and structures there without being able
       to draw with them: `GaussianRayTracer::prepare` and `shadowScene` work
       where `render` refuses, which is the split a shadow query needs.
+  - **A mesh frame renders on CUDA now**, which it never had: the engine
+    takes the pipeline route for `MeshVisibility::Rays` (it asked for inline
+    rays before), so Kitchen_set lit draws at 480x270 on the L4 through
+    OptiX with the lights and materials it has, on a device with no
+    rasteriser at all. Before this the only thing CUDA could draw was
+    splats, through the compute BVH.
   - **What is still inline only**: the path tracer, the cutout pass (a
     generated kernel) and the splat integrator. The last one needs its
     k-buffer in global memory, since a payload cannot hold 256 entries.

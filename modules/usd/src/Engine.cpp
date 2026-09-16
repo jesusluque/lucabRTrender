@@ -1375,8 +1375,11 @@ Result<void> Engine::render(const render::Projection& projection, const render::
     if (drawMeshes && visibility == MeshVisibility::Raster && !caps.rasterization) {
         return Error(ErrorCode::Unsupported, "mesh visibility by raster: the device does not rasterise");
     }
-    if (drawMeshes && visibility == MeshVisibility::Rays && !(caps.rayQuery && caps.accelerationStructure)) {
-        return Error(ErrorCode::Unsupported, "mesh visibility by rays: the device has no ray queries");
+    // Rays inline or rays in a pipeline: VisibilityTrace takes either, and on
+    // CUDA the second is the only one there is (OptiX, no RayQuery).
+    if (drawMeshes && visibility == MeshVisibility::Rays &&
+        !(caps.accelerationStructure && (caps.rayQuery || caps.rayTracing))) {
+        return Error(ErrorCode::Unsupported, "mesh visibility by rays: the device has no ray tracing");
     }
     const bool meshLayer = drawMeshes || volumesInFrame;
     // A cloud asked to be relit needs the frame's lights as much as a mesh
