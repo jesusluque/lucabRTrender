@@ -3654,7 +3654,19 @@ beside the timing. A model that cannot see what it rendered is guessing.
 The tools: `open_stage`, `stage_tree`, `device_info`, `render` (camera of its
 own or the stage's, any AOV, either technique, every path tracing and
 lighting setting, an EXR beside the image), `pick`, `bounds`,
-`render_products`, `convert`. `.mcp.json` registers it as `lrt`.
+`render_products`, `convert` (a capture into a stage, on the device the
+session already has), `timings` (the median of several frames, as the CLI
+measures), `settings`. `.mcp.json` registers it as `lrt`.
+
+**Driven over real stages**, not only the splat captures this engine started
+from: the OpenChessSet path traced at 640x360 (64 paths a pixel, one bounce,
+ACES 2.0, 25.7 s on the M5 Pro) with its MaterialX materials, its sun and its
+dome; Pixar's Kitchen_set path traced from a camera of the caller's own (32
+paths, 6.5 s) with its instancing and its textures, where `pick` answers
+`/Kitchen_set/Arch_grp/Kitchen_1/Geom/TileFloor/pPlane357` for a pixel of the
+floor and `bounds` gives the room's extent. The tools are the engine's, so
+what a stage holds -- meshes, materials, lights, curves, volumes, splats --
+is what they can show.
 
 **Checked** at the protocol's level (`lrt_mcp_tests`): the handshake answers
 in the client's version and in ours where the client asks for one nobody

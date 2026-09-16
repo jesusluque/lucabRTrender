@@ -11,7 +11,9 @@
 // what the viewer would show.
 #include "Tools.h"
 
+#include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstdio>
 #include <sstream>
 
@@ -21,6 +23,7 @@
 #include "lrt/gpu/Texture.h"
 #include "lrt/io/Exr.h"
 #include "lrt/io/Png.h"
+#include "lrt/io/Readers.h"
 #include "lrt/render/Camera.h"
 #include "lrt/technique/Denoiser.h"
 #include "lrt/technique/DisplayTransform.h"
@@ -312,15 +315,85 @@ json productsTool(Session& session, const json& args) {
 }
 
 json convertTool(Session& session, const json& args) {
-    (void)session;
     const std::string input = args.value("input", std::string{});
     const std::string output = args.value("output", std::string{});
     if (input.empty() || output.empty()) {
-        return textAnswer("convert wants 'input' (a .ply, .splat, .spz or .sog) and 'output' (a .usdc or .lrtc).",
+        return textAnswer("convert wants 'input' (a .ply, .splat, .spz or .sog) and 'output' (a .usda or .usdc).",
                           true);
     }
-    return textAnswer("convert is the CLI's for now: run `lrt convert " + input + " " + output +
-                      "`. The MCP server holds a stage, not a converter.");
+    // A capture becomes a stage on the device this session already opened,
+    // which is also why the answer can say how many splats survived the read.
+    if (!session.open()) {
+        return textAnswer("convert needs a device, which the server opens with a stage: open_stage first (any "
+                          "stage will do).", true);
+    }
+    auto raw = io::readSplats(input);
+    if (!raw) return textAnswer(errorText(raw.error()), true);
+    usd::ExportOptions options;
+    options.maxDegree = args.value("degree", 3u);
+    options.addCamera = args.value("camera", true);
+    options.rotateXDegrees = args.value("rotateX", 0.0);
+    if (auto written = usd::writeParticleFieldStage(session.renderer->library(), *raw, output, options); !written) {
+        return textAnswer(errorText(written.error()), true);
+    }
+    std::ostringstream out;
+    out << "wrote " << output << "\n" << raw->count << " splats from " << input;
+    return textAnswer(out.str());
+}
+
+/// What a frame costs, measured the way the CLI measures it: the median of
+/// several, since the first pays for every kernel the frame needs.
+json timingsTool(Session& session, const json& args) {
+    if (auto ready = ensureStage(session, args); !ready) return textAnswer(errorText(ready.error()), true);
+    applySettings(session, args);
+    usd::StageRenderer& renderer = *session.renderer;
+    const uint32_t width = args.value("width", 640u);
+    const uint32_t height = args.value("height", 360u);
+    const uint32_t frames = std::max(args.value("frames", 5u), 1u);
+    const std::string technique = args.value("technique", std::string("raster"));
+    const std::string camera = args.value("camera", std::string{});
+    // The same camera rules a render follows, so a timing is of the frame a
+    // caller would get: a stage without a camera is framed by one of ours.
+    std::optional<render::Camera> framing;
+    if (camera.empty() && renderer.cameras().empty()) {
+        auto framed = renderer.framingCamera(args.value("time", 0.0), args.value("focal", 35.0), technique);
+        if (!framed) return textAnswer(errorText(framed.error()), true);
+        framing = *framed;
+    }
+    std::vector<double> ms;
+    for (uint32_t k = 0; k < frames; ++k) {
+        const auto start = std::chrono::steady_clock::now();
+        auto image = framing.has_value()
+                         ? renderer.render(*framing, args.value("time", 0.0), width, height, technique)
+                         : renderer.render(camera, args.value("time", 0.0), width, height, technique);
+        if (!image) return textAnswer(errorText(image.error()), true);
+        ms.push_back(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count());
+    }
+    std::sort(ms.begin(), ms.end());
+    std::ostringstream out;
+    out << frames << " frames at " << width << "x" << height << ", " << technique << "\n";
+    out << "median " << ms[ms.size() / 2] << " ms, first " << ms.front() << ", last " << ms.back()
+        << " (sorted; the first frame pays for the kernels the frame needs)";
+    return textAnswer(out.str());
+}
+
+/// What the session holds, so a caller need not remember what it set.
+json settingsTool(Session& session, const json& args) {
+    if (session.open()) {
+        applySettings(session, args);
+    }
+    std::ostringstream out;
+    if (!session.open()) {
+        out << "no stage open\n";
+        return textAnswer(out.str());
+    }
+    out << "stage          " << session.stage.string() << "\n";
+    out << "last frame     " << session.lastWidth << "x" << session.lastHeight << " at time " << session.lastTime
+        << "\n";
+    out << "AOVs a render can show: color, depth, primId, instanceId, elementId, Neye, normal, albedo, "
+           "shadingNormal, primvars:<name>, lightGroup:<name>\n";
+    out << "view transforms for the image: agx, aces, standard";
+    return textAnswer(out.str());
 }
 
 }   // namespace
@@ -392,10 +465,28 @@ const std::vector<ToolEntry>& toolTable() {
                                  {"directory", field("string", "where the files go")}},
                                 {"settings"}),
                          productsTool});
-        tools.push_back({"convert", "How to turn a splat capture into a stage this server can open.",
+        tools.push_back({"convert",
+                         "Turn a splat capture into a USD stage this server can open. The values are computed on "
+                         "the device the session already has.",
                          object({{"input", field("string", "a .ply, .splat, .spz or .sog")},
-                                 {"output", field("string", "a .usdc or .lrtc")}}),
+                                 {"output", field("string", "a .usda or .usdc")},
+                                 {"degree", field("integer", "harmonic degree cap, 0..3")},
+                                 {"rotateX", field("number", "turn the cloud about x (COLMAP captures: 180)")},
+                                 {"camera", field("boolean", "add /World/Camera framing it")}},
+                                {"input", "output"}),
                          convertTool});
+        tools.push_back({"timings",
+                         "What a frame costs: several frames of the open stage, and the median of them.",
+                         object({{"frames", field("integer", "how many, 5 by default")},
+                                 {"width", field("integer", "pixels across")},
+                                 {"height", field("integer", "pixels down")},
+                                 {"technique", field("string", "raster | rt")},
+                                 {"camera", field("string", "a camera prim")},
+                                 {"time", field("number", "USD time code")}}),
+                         timingsTool});
+        tools.push_back({"settings",
+                         "What this session holds: the stage, the last frame, and what a render can be asked for.",
+                         object({}), settingsTool});
         return tools;
     }();
     return table;
