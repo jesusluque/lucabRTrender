@@ -24,10 +24,14 @@ public ConstantBuffer<ShadowParams> shadowParams;
 
 uniform RaytracingAccelerationStructure scene;
 
-/// One ray's transmittance. Two entry points call it: a compute kernel where
-/// the device traces inline, and a ray generation program where it does not --
-/// CUDA has OptiX and no inline RayQuery, and OptiX traverses inside its own
-/// programs. The body is the same either way, and so are the bindings.
+/// One ray's transmittance, for the compute entry below.
+///
+/// There is no ray generation entry beside it: Slang has no `RayQuery` for
+/// the CUDA target at all, so a ray generation program would not help -- a
+/// shadow ray there wants `TraceRay` with an any hit that accumulates and
+/// ignores, which is a port of its own (docs/decisions.md). And an entry a
+/// target cannot compile takes its whole module down: with a raygen here,
+/// Metal could no longer load the shadow kernel.
 void rtShadowRayAt(uint r) {
     if (r >= shadowParams.rays) {
         return;
@@ -90,9 +94,4 @@ void rtShadowRayAt(uint r) {
 [numthreads(64, 1, 1)]
 void rtShadowRays(uint3 tid: SV_DispatchThreadID) {
     rtShadowRayAt(tid.x);
-}
-
-[shader("raygeneration")]
-void rtShadowRaysGen() {
-    rtShadowRayAt(DispatchRaysIndex().x);
 }
