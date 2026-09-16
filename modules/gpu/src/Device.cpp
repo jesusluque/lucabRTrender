@@ -162,6 +162,13 @@ Result<std::shared_ptr<Device>> Device::create(const DeviceDesc& desc) {
             directory = !fromEnv.empty() ? std::filesystem::path(fromEnv)
                                          : platform::cacheDirectory() / "lucabRTrender" / "shaders";
         }
+        // The cache is keyed by slang-rhi, which knows nothing of the prelude
+        // this process hands Slang (cudaGlobalSession below). A cache written
+        // before that prelude existed holds CUDA code that reads through the
+        // read-only data cache, and serving it back would put the defect
+        // quietly under a fixed build. The generation is part of the path, so
+        // a changed prelude simply looks elsewhere.
+        directory /= platform::env("LRT_CUDA_LDG") == "1" ? "gen1-ldg" : "gen1";
         device->shaderCache_.attach(new DiskShaderCache(directory));
     }
 

@@ -3691,14 +3691,17 @@ a WebGPU build would take the engine's records, not Hydra's prims.
 
 ### Not done
 
-- **open_pbr_surface on CUDA.** Of the twelve materials the lobe library is
-  checked against MaterialX's genglsl closures with, eleven agree here to
-  2e-5 and `open_pbr_surface` (six lobes, coat and fuzz) does not: every
-  component differs, ours 1.339 where genglsl's is 0.054. The same source on
-  Metal and on Vulkan agrees, so it is what the CUDA target makes of one of
-  the two, and it is not the build stack's statics -- Slang puts a module's
-  `static` globals in the per-thread kernel context on CUDA as on Metal
-  (checked on the emitted code). Not found yet.
+- **open_pbr_surface on CUDA: found, and it was the read-only cache.** Of the
+  twelve materials the lobe library is checked against MaterialX's genglsl
+  closures with, eleven agreed here to 2e-5 and `open_pbr_surface` did not:
+  every component differed, ours 1.339 where genglsl's was 0.054, with the
+  same source agreeing on Metal and on Vulkan. It was the same defect as the
+  furnace's, written up below: the material read its own parameters through
+  `__ldg`. The tell was in the line the test prints -- **six lobes where
+  there are four** -- so a stale read had changed the lobe stack itself, not
+  just a value. With the prelude fixed it builds four lobes and agrees to
+  9.39e-06; with `LRT_CUDA_LDG=1` it builds six again and fails exactly as it
+  always did.
 - A release build and any timing beyond the sort's own.
 - gpe on Vulkan: gpe has no Vulkan backend, so its tests and aofx's host
   run on CUDA and Metal only.
@@ -3871,6 +3874,28 @@ measured by handing it a define that would have changed every answer and
 seeing none change -- and that one entry is already the OptiX include path.
 
 **After it**, on the same box: the echo test reads 0 of 64 wrong on all three
-routes in a ray generation entry, and the furnace reads its series to
-`0.00e+00` relative at every bounce count, run after run. The suite's numbers
-are below.
+routes in a ray generation entry, where it read 31 and 32; the furnace reads
+its series to `0.00e+00` relative at every bounce count, run after run; and
+`open_pbr_surface`, which had been the one material of twelve that disagreed
+with genglsl on CUDA and nowhere else, agrees to 9.39e-06. **The whole CUDA
+suite is 197 of 197**, where it had been 97 passed, 2 failed, 94 skipped
+before the ray tracing pipelines and 2 failed after them.
+
+**What it costs**, medians of `lrt stage --frames` on the L4, Kitchen_set,
+twice each way so the pairs can be read against their own spread:
+
+| | without the cache | with it (`LRT_CUDA_LDG=1`) |
+|---|---|---|
+| raster, 1280x720 | 20.39 ms, 21.44 ms | 22.81 ms, 21.35 ms |
+| rt, 640x360, 4 paths, 2 bounces | 55.79 ms, 56.12 ms | 56.51 ms, 56.14 ms |
+
+Nothing outside the spread of a repeat. The loads this gives up are of
+parameters and pools that every thread reads alike, which the ordinary caches
+hold as well.
+
+**One trap this leaves, and it is closed.** The shader cache is keyed by
+slang-rhi, which knows nothing of a prelude this process hands Slang -- so a
+cache written before the fix would have been served back into a fixed build,
+putting the defect quietly under it. The cache path now carries a generation
+(`shaders/gen1`, and `gen1-ldg` under the escape hatch), so a changed prelude
+looks elsewhere instead.
