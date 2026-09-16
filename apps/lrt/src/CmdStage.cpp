@@ -105,7 +105,8 @@ void addStage(CLI::App& app) {
         double focal = 35.0, nearZ = 0.1, farZ = 100000.0;
         uint32_t frames = 1;
         uint32_t pathSamples = 1, pathBounces = 1, pathTotal = 1, motionBuckets = 4, refine = 0;
-        bool denoise = false, frameAll = false;
+        uint32_t lightSamples = 1;
+        bool denoise = false, frameAll = false, splatShadows = false;
     };
     auto o = std::make_shared<Options>();
     auto* cmd = app.add_subcommand("stage", "render a USD stage through the engine's Hydra delegate");
@@ -122,6 +123,9 @@ void addStage(CLI::App& app) {
     cmd->add_option("--motion-buckets", o->motionBuckets,
                     "rt: shutter slices for motion blur, 1 to 8 (the shutter is the camera's)");
     cmd->add_option("--refine", o->refine, "subdivision surfaces refined this many levels (0: the control mesh)");
+    cmd->add_option("--light-samples", o->lightSamples, "samples per light per pixel");
+    cmd->add_flag("--splat-shadows", o->splatShadows,
+                  "a relit cloud shadows itself: one ray a splat against its own proxies");
     cmd->add_option("--eye", o->eye, "a camera of its own at x y z (with --target), not one on the stage")->expected(3);
     cmd->add_option("--target", o->target, "where that camera looks")->expected(3);
     cmd->add_option("--up", o->up, "its up vector")->expected(3);
@@ -157,6 +161,8 @@ void addStage(CLI::App& app) {
         (*renderer)->setDenoise(o->denoise);
         (*renderer)->setMotionBuckets(o->motionBuckets);
         (*renderer)->setRefineLevel(o->refine);
+        (*renderer)->setLightSamples(o->lightSamples);
+        (*renderer)->setSplatShadows(o->splatShadows);
         if (!o->renderSettings.empty()) {
             const std::filesystem::path directory =
                 o->output.empty() ? std::filesystem::path() : std::filesystem::path(o->output).parent_path();

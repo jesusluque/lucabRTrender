@@ -412,7 +412,7 @@ TEST_CASE("a shadow ray through splats is the product of what each lets through"
         SKIP("the device has no RayQuery or acceleration structures");
     }
     auto h = harness(gpu, on(render::RayTracingRoute::Hardware));
-    auto kernel = gpu::ComputeKernel::create(*gpu->library, "lrt/rt/rt_shadow", "rtShadowRays");
+    auto kernel = gpu::ComputeKernel::create(*gpu->library, "lrt/rt/rt_shadow_kernel", "rtShadowRays");
     if (!kernel) FAIL(kernel.error().toString());
 
     // Particles on the z axis, every one isotropic, so a ray down -z through
@@ -539,7 +539,7 @@ TEST_CASE("a shadow ray born inside a proxy still takes that particle", "[render
         SKIP("the device has no RayQuery or acceleration structures");
     }
     auto h = harness(gpu, on(render::RayTracingRoute::Hardware));
-    auto kernel = gpu::ComputeKernel::create(*gpu->library, "lrt/rt/rt_shadow", "rtShadowRays");
+    auto kernel = gpu::ComputeKernel::create(*gpu->library, "lrt/rt/rt_shadow_kernel", "rtShadowRays");
     if (!kernel) FAIL(kernel.error().toString());
 
     // One large particle at the origin: its proxy reaches about 4.4 units, so

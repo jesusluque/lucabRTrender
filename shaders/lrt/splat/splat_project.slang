@@ -10,6 +10,7 @@ import lrt.common.edit;
 // The core of the light module, which reads no texture: a dome is its colour
 // here, since this kernel lives below material and has no table to sample.
 import lrt.light.lights;
+// A shadow ray against the cloud's own proxies, where the caller built them.
 
 StructuredBuffer<float4>    positions;
 StructuredBuffer<uint>      shape;
@@ -21,6 +22,14 @@ RWStructuredBuffer<uint>    tileRects;    // 4 per splat
 RWStructuredBuffer<uint>    tilesTouched;
 RWStructuredBuffer<uint>    depthKeys;
 ConstantBuffer<FrameParams> params;
+
+// Relighting's shadow, as splat_shadow.slang measured it: one float per
+// (splat, light), the transmittance between that splat and that light's
+// centre. It is a separate kernel because an inline ray is a feature a device
+// may not have -- putting the RayQuery here made this kernel, and with it the
+// whole splat rasteriser, unavailable on CUDA (measured: "entrypoint
+// splatProject uses features that are not available").
+StructuredBuffer<float>     shadowFactors;
 
 void cull(uint slot) {
     // Every early return zeroes the record first: a slot keeps last frame's
@@ -181,7 +190,10 @@ void splatProject(uint3 tid: SV_DispatchThreadID) {
             if (!ls.valid) {
                 continue;
             }
-            lit += albedo * (1.0 / 3.14159265358979) * max(dot(normal, ls.wi), 0.0) * ls.radiance / ls.pdf;
+            const float through = params.shadowRays != 0 && k < params.shadowLights
+                                      ? shadowFactors[slot * params.shadowLights + k]
+                                      : 1.0;
+            lit += through * albedo * (1.0 / 3.14159265358979) * max(dot(normal, ls.wi), 0.0) * ls.radiance / ls.pdf;
         }
         colour = lit;
     }

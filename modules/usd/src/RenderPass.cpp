@@ -154,6 +154,7 @@ void HdLrtRenderPass::_Execute(HdRenderPassStateSharedPtr const& state, TfTokenV
     if (_delegate != nullptr) {
         _engine->setLightSamples(_delegate->GetLightSamples());
         _engine->setChooseLights(_delegate->GetChooseLights());
+        _engine->setSplatShadows(_delegate->GetSplatShadows());
         _engine->setPathSamples(_delegate->GetPathSamples());
         _engine->setPathBounces(_delegate->GetPathBounces());
         _engine->setPathTotal(_delegate->GetPathTotal());

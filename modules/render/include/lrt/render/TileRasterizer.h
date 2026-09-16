@@ -69,7 +69,25 @@ struct SplatLights {
     const gpu::Buffer* records = nullptr;
     uint32_t           count = 0;
 
+    /// Where a relit splat's shadow ray traces: the proxies the Gaussian ray
+    /// tracer built for this frame (`GaussianRayTracer::shadowScene`, the
+    /// Hardware route). Null: a relit splat takes the light whole, as it did
+    /// before there was a ray to ask with.
+    rhi::IAccelerationStructure* shadowTlas = nullptr;
+    const gpu::Buffer*           shadowFrames = nullptr;
+    const gpu::Buffer*           shadowColours = nullptr;
+    const gpu::Buffer*           shadowInstanceData = nullptr;
+    const gpu::Buffer*           shadowInstanceIndices = nullptr;
+    /// Where a shadow ray starts, in the splat's own sigmas (a captured
+    /// surface is a crowd of overlapping Gaussians), and where it gives up.
+    float                        shadowOffset = 3.0F;
+    float                        shadowCut = 1.0e-3F;
+
     [[nodiscard]] bool any() const noexcept { return records != nullptr && count > 0; }
+    [[nodiscard]] bool shadows() const noexcept {
+        return shadowTlas != nullptr && shadowFrames != nullptr && shadowColours != nullptr &&
+               shadowInstanceData != nullptr && shadowInstanceIndices != nullptr;
+    }
 };
 
 struct RenderSettings {
@@ -156,6 +174,10 @@ private:
     /// One record of nothing, for the frames that relight nothing: a name the
     /// shader declares has to be bound whether it is read or not.
     gpu::Buffer emptyLights_;
+    gpu::Buffer emptyShadow_;      ///< bound where a frame casts no splat shadow
+    gpu::Buffer shadowFactors_;    ///< one float a (splat, light), where a relit cloud shadows
+    gpu::ComputeKernel splatShadow_;
+    bool        shadowsSupported_ = false;
 };
 
 }   // namespace lrt::render

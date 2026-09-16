@@ -229,6 +229,10 @@ public:
     /// One light per sample, chosen by power, instead of every light at every
     /// pixel: exact either way, and which is cheaper is a measurement.
     void setChooseLights(bool choose);
+    /// Whether a relit splat casts a shadow ray against the cloud's own
+    /// proxies (`lrt:splatShadows`). Off: it takes each light whole, which
+    /// is what relighting did before there was a ray to ask with.
+    void setSplatShadows(bool shadows);
     /// Paths a pixel a path traced frame gathers, and how many bounces each
     /// one takes after its first hit. One of each is what an interactive
     /// frame affords.
@@ -390,6 +394,11 @@ private:
     std::optional<light::LightTable>          lightTable_;
     std::atomic<uint32_t>                     lightSamples_{1};
     std::atomic<bool>                         chooseLights_{false};
+    std::atomic<bool>                         splatShadows_{false};
+    /// Built only for relit splats to shadow against: the Hardware route, so
+    /// there is a structure an inline ray can trace (the frame's own tracer
+    /// may be on the compute route, which has none).
+    std::optional<render::GaussianRayTracer>  shadowTracer_;
     std::atomic<uint32_t>                     pathSamples_{1};
     std::atomic<uint32_t>                     pathBounces_{1};
     std::atomic<uint32_t>                     motionBuckets_{4};

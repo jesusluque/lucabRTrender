@@ -118,6 +118,8 @@ public:
     /// One light per sample, chosen by power, rather than every light at every
     /// pixel.
     void setChooseLights(bool choose);
+    /// `lrt:splatShadows`: a relit cloud shadows itself, one ray a splat.
+    void setSplatShadows(bool shadows);
 
     /// The path traced technique ("rt" over meshes): paths a pixel each pass
     /// gathers, bounces after the first hit, and the paths a pixel at which

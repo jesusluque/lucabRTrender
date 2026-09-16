@@ -1472,6 +1472,29 @@ enough that what is left is the light and not the noise.
     no number here: it wants a stage with both a cloud and lights, and there
     is no splat asset on this machine to build one from -- the clouds the tests
     use are synthesised in memory and never reach the command line.
+- **A relit splat casts a shadow ray now** (`lrt:splatShadows`, off by
+  default): one ray a splat against the cloud's own proxies, through
+  `rt_shadow.slang`'s product of `1 - alpha`. The rasteriser's projection
+  kernel traces it, and the proxies come from a tracer of the engine's own on
+  the hardware route (`GaussianRayTracer::prepare`), since the frame's tracer
+  may be on the compute route, which has no structure an inline ray can walk.
+  - **The ray starts past the splat's own neighbourhood**, `shadowOffset`
+    sigmas of the splat itself (3 by default). A captured surface is a crowd
+    of overlapping Gaussians and a ray that starts at one peaks inside its
+    neighbours within a fraction of their size: without the bias a relit
+    capture renders black, every splat shadowed by the splats it is made of.
+    Measured, and black is what it looked like.
+  - **A frame of splats alone had no lights at all.** The light table was
+    built only where there was a mesh layer, so a stage of a relit capture
+    under a light showed what it was baked with -- the feature had only ever
+    been exercised through the render API, never through USD. A frame with a
+    relit cloud and no mesh now builds the table (and takes the cloud's own
+    bounds as the scene's reach), and nothing else of what a mesh layer needs.
+  - **What it does not fix** is what relighting approximates: the normal is
+    still the splat's shortest axis and the albedo the harmonics' constant
+    term, so a photogrammetric capture relights streaky whatever the shadow
+    does. The train at 960x540 shows the key light's shadow across the whole
+    body, and the same streaks as before under it.
 - **Contact shadows** closer than the ray's offset are missed, and a cutout
   material still stops a shadow ray where its opacity would have let it
   through.

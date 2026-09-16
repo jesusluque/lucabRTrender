@@ -349,6 +349,12 @@ void Engine::setChooseLights(bool choose) {
     }
 }
 
+void Engine::setSplatShadows(bool shadows) {
+    if (splatShadows_.exchange(shadows) != shadows) {
+        revision_.fetch_add(1);
+    }
+}
+
 void Engine::setPathSamples(uint32_t samples) {
     if (pathSamples_.exchange(std::max(samples, 1u)) != std::max(samples, 1u)) {
         revision_.fetch_add(1);
@@ -1373,6 +1379,13 @@ Result<void> Engine::render(const render::Projection& projection, const render::
         return Error(ErrorCode::Unsupported, "mesh visibility by rays: the device has no ray queries");
     }
     const bool meshLayer = drawMeshes || volumesInFrame;
+    // A cloud asked to be relit needs the frame's lights as much as a mesh
+    // does, and a frame of splats alone has no mesh layer to build them for:
+    // before this, a stage of a relit capture under a light showed what it
+    // was baked with, because the table was never made.
+    const bool relitSplats = std::any_of(splats.begin(), splats.end(),
+                                         [](const render::SplatInstance& s) { return s.relight; });
+    const bool lightsWanted = meshLayer || relitSplats;
     const bool pathTracing = meshLayer && technique == Technique::RayTraced;
     if (!pathTracing) {
         pathState_.traced = false;
@@ -1380,12 +1393,15 @@ Result<void> Engine::render(const render::Projection& projection, const render::
     }
     if (meshLayer) {
         // A light that moves cuts the frame into shutter slices as geometry
-        // that moves does.
+        // that moves does. The mesh scene is the mesh layer's; a frame of
+        // relit splats wants the lights and has no geometry to update.
         const bool lightsMove = motionBuckets > 1 && std::any_of(lamps.begin(), lamps.end(), [](const light::Light& l) {
                                     return l.movesUnderShutter();
                                 });
-        LRT_TRY(scene_->update(meshInstances, projection, meshSets, motionBuckets, shutterOpen, shutterClose,
-                               lightsMove));
+        if (meshLayer) {
+            LRT_TRY(scene_->update(meshInstances, projection, meshSets, motionBuckets, shutterOpen, shutterClose,
+                                   lightsMove));
+        }
         // The frame's lights, and what a shadow ray traces against: rays
         // shadow whatever route found the visibility, so the structure is
         // built even where the rasteriser drew. All of this uploads and
@@ -1753,6 +1769,36 @@ Result<void> Engine::render(const render::Projection& projection, const render::
             }
         }
     }
+    // A frame of relit splats and no mesh layer: the lights, and nothing else
+    // of what the mesh layer needs. Before this the table was never built and
+    // a relit cloud showed what it was baked with.
+    if (!meshLayer && relitSplats && !lamps.empty()) {
+        if (!lightTable_.has_value()) {
+            auto made = light::LightTable::create(*library_);
+            if (!made) return std::move(made).error();
+            lightTable_.emplace(std::move(*made));
+        }
+        if (!splats.empty()) {
+            // A dome's or a sun's share of the power wants the scene's reach;
+            // a cloud's own bounds are what there is.
+            float radius = 0.0F;
+            for (const render::SplatInstance& instance : splats) {
+                if (instance.splats == nullptr) {
+                    continue;
+                }
+                if (!loader_.has_value()) {
+                    break;
+                }
+                auto bounds = loader_->boundsOf(instance.splats->positions, instance.splats->count);
+                if (!bounds) return std::move(bounds).error();
+                const scene::Bounds& b = *bounds;
+                const float dx = b.max[0] - b.min[0], dy = b.max[1] - b.min[1], dz = b.max[2] - b.min[2];
+                radius = std::max(radius, 0.5F * std::sqrt(dx * dx + dy * dy + dz * dz));
+            }
+            lightSceneRadius_ = std::max(radius, 1.0e-3F);
+        }
+        LRT_TRY(lightTable_->set(lamps, lightSceneRadius_));
+    }
     const bool pointLayer = !points.empty() && pointRasterizer_.has_value();
     if (pointLayer) {
         LRT_TRY(pointRasterizer_->render(projection, points, settings, pointLayer_));
@@ -1805,6 +1851,27 @@ Result<void> Engine::render(const render::Projection& projection, const render::
     if (lightTable_.has_value() && lightTable_->count() > 0) {
         splatLights.records = &lightTable_->records();
         splatLights.count = lightTable_->count();
+    }
+    // And what it casts its shadow against: the proxies of every cloud in the
+    // frame, built by a tracer of their own on the hardware route. Only where
+    // a cloud is relit, the device traces inline, and the setting asks.
+    const bool shadowedSplats = splatShadows_.load() && splatLights.any() && relitSplats;
+    if (shadowedSplats && device_->caps().rayQuery && device_->caps().accelerationStructure) {
+        if (!shadowTracer_.has_value()) {
+            render::RayTracerSettings rtSettings;
+            rtSettings.route = render::RayTracingRoute::Hardware;
+            auto made = render::GaussianRayTracer::create(*library_, rtSettings);
+            if (!made) return std::move(made).error();
+            shadowTracer_.emplace(std::move(*made));
+        }
+        auto prepared = shadowTracer_->prepare(projection, splats, settings.maxShDegree);
+        if (!prepared) return std::move(prepared).error();
+        const render::ShadowScene scene = shadowTracer_->shadowScene();
+        splatLights.shadowTlas = scene.tlas;
+        splatLights.shadowFrames = scene.frames;
+        splatLights.shadowColours = scene.colours;
+        splatLights.shadowInstanceData = scene.instanceData;
+        splatLights.shadowInstanceIndices = scene.instanceIndices;
     }
     if (under != nullptr) {
         LRT_TRY(rasterizer_->render(projection, splats, settings, targets, {}, under, &splatLights));

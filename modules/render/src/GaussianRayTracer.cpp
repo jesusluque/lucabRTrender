@@ -519,6 +519,42 @@ Result<RayTracerStats> GaussianRayTracer::render(const Camera& camera,
     return render(projectionFor(camera, settings.width, settings.height), instances, settings, targets);
 }
 
+Result<RayTracerStats> GaussianRayTracer::prepare(const Projection& projection,
+                                                  std::span<const SplatInstance> instances,
+                                                  uint32_t maxShDegree) {
+    const auto start = Clock::now();
+    RayTracerStats stats;
+    stats.route = settings_.route;
+    std::vector<CloudKey> wanted;
+    for (const SplatInstance& instance : instances) {
+        const scene::GpuSplats* cloud = instance.splats;
+        if (cloud == nullptr || cloud->count == 0) {
+            continue;
+        }
+        const CloudKey key{cloud, cloud->positions.rhi(), cloud->count, cloud->restPerColour};
+        if (std::find(wanted.begin(), wanted.end(), key) == wanted.end()) {
+            wanted.push_back(key);
+        }
+        stats.instances += 1;
+    }
+    bool same = wanted.size() == clouds_.size() && frames_.valid();
+    for (size_t k = 0; same && k < wanted.size(); ++k) {
+        same = wanted[k] == clouds_[k].key;
+    }
+    if (!same) {
+        LRT_TRY(rebuild(instances));
+        stats.rebuilt = true;
+    }
+    stats.splats = splats_;
+    for (const Cloud& cloud : clouds_) {
+        stats.chunks += cloud.chunks;
+    }
+    LRT_TRY(prepareFrame(instances, projection.eyeWorld, maxShDegree));
+    stats.buildMs = msSince(start);
+    stats.totalMs = stats.buildMs;
+    return stats;
+}
+
 ShadowScene GaussianRayTracer::shadowScene() const noexcept {
     ShadowScene scene;
     scene.tlas = tlas_.get();

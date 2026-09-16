@@ -85,6 +85,14 @@ Result<TileRasterizer> TileRasterizer::create(gpu::ShaderLibrary& library) {
     auto emptyLights = buffer(*r.device_, 1, 96, "splat.lights.empty");
     if (!emptyLights) return std::move(emptyLights).error();
     r.emptyLights_ = *emptyLights;
+    auto emptyShadow = buffer(*r.device_, 1, 4, "splat.shadow.empty");
+    if (!emptyShadow) return std::move(emptyShadow).error();
+    r.emptyShadow_ = *emptyShadow;
+    // A relit splat's shadow ray is traced inline, which not every device can.
+    r.shadowsSupported_ = r.device_->caps().rayQuery && r.device_->caps().accelerationStructure;
+    if (r.shadowsSupported_) {
+        LRT_TRY(make(r.splatShadow_, "lrt/splat/splat_shadow", "splatShadowFactors"));
+    }
     LRT_TRY(make(r.gather_, "lrt/splat/splat_gather_counts", "splatGatherCounts"));
     LRT_TRY(make(r.emit_, "lrt/splat/splat_emit", "splatEmit"));
     LRT_TRY(make(r.clear_, "lrt/splat/splat_tiles_clear", "splatTilesClear"));
@@ -219,6 +227,61 @@ Result<FrameStats> TileRasterizer::render(const Projection& projection,
     // Both counts come from prefix sums over what the projection wrote, so one
     // readback answers both, and everything after it is sized exactly.
     gpu::CommandBatch batch(*device_);
+    // A relit cloud's shadows, measured before anything is projected: one ray
+    // a splat a light (splat_shadow.slang), read by the projection as a
+    // factor. Its own kernel, since an inline ray is a feature a device may
+    // not have and the projection must stay available everywhere.
+    const bool splatShadows = lights != nullptr && lights->any() && lights->shadows() && shadowsSupported_ &&
+                              std::any_of(instances.begin(), instances.end(),
+                                          [](const SplatInstance& i) { return i.relight; });
+    const uint32_t shadowLights = splatShadows ? std::min(lights->count, uint32_t{8}) : 0u;
+    if (splatShadows) {
+        uint64_t wanted = 0;
+        for (const SplatInstance& instance : instances) {
+            wanted += instance.splats != nullptr ? instance.splats->count : 0;
+        }
+        wanted *= shadowLights;
+        if (!shadowFactors_.valid() || shadowFactors_.bytes() < wanted * sizeof(float)) {
+            auto made = buffer(*device_, std::max<uint64_t>(wanted, 1), 4, "splat.shadowFactors");
+            if (!made) return std::move(made).error();
+            shadowFactors_ = *made;
+        }
+        uint32_t at = 0;
+        for (const SplatInstance& instance : instances) {
+            const scene::GpuSplats* cloud = instance.splats;
+            if (cloud == nullptr || cloud->count == 0) {
+                continue;
+            }
+            if (instance.relight) {
+                const std::array<float, 12> rows = instance.objectToWorld.rows3x4();
+                splatShadow_.dispatch(batch, {cloud->count, 1, 1}, [&](rhi::ShaderCursor cursor) {
+                    cursor["positions"].setBinding(cloud->positions.rhi());
+                    cursor["shape"].setBinding(cloud->shape.rhi());
+                    cursor["lights"].setBinding(lights->records->rhi());
+                    cursor["shadowFrames"].setBinding(lights->shadowFrames->rhi());
+                    cursor["shadowColours"].setBinding(lights->shadowColours->rhi());
+                    cursor["shadowInstanceData"].setBinding(lights->shadowInstanceData->rhi());
+                    cursor["shadowInstanceIndices"].setBinding(lights->shadowInstanceIndices->rhi());
+                    cursor["factors"].setBinding(shadowFactors_.rhi());
+                    cursor["scene"].setBinding(lights->shadowTlas);
+                    rhi::ShaderCursor p = cursor["params"];
+                    p["count"].setData(cloud->count);
+                    p["base"].setData(at);
+                    p["lights"].setData(shadowLights);
+                    p["offset"].setData(lights->shadowOffset);
+                    p["cut"].setData(lights->shadowCut);
+                    p["categoriesLo"].setData(static_cast<uint32_t>(instance.categories & 0xFFFFFFFFu));
+                    p["categoriesHi"].setData(static_cast<uint32_t>(instance.categories >> 32));
+                    static const char* kRow[12] = {"w00", "w01", "w02", "w03", "w10", "w11",
+                                                   "w12", "w13", "w20", "w21", "w22", "w23"};
+                    for (int k = 0; k < 12; ++k) {
+                        p[kRow[k]].setData(rows[static_cast<size_t>(k)]);
+                    }
+                });
+            }
+            at += cloud->count;
+        }
+    }
     Stopwatch watch(batch, settings.timeStages);
     uint32_t base = 0;
     for (const SplatInstance& instance : instances) {
@@ -254,6 +317,13 @@ Result<FrameStats> TileRasterizer::render(const Projection& projection,
             cursor["params"]["categoriesLo"].setData(static_cast<uint32_t>(instance.categories & 0xFFFFFFFFu));
             cursor["params"]["categoriesHi"].setData(static_cast<uint32_t>(instance.categories >> 32));
             cursor["lights"].setBinding(relight ? lights->records->rhi() : emptyLights_.rhi());
+            // The shadow ray a relit splat casts against the cloud's own
+            // proxies. Bound either way; taken only where there is a
+            // structure to trace and the device can trace it inline.
+            const bool shadows = relight && splatShadows && instance.relight;
+            cursor["params"]["shadowRays"].setData(uint32_t{shadows ? 1u : 0u});
+            cursor["params"]["shadowLights"].setData(shadowLights);
+            cursor["shadowFactors"].setBinding(shadows ? shadowFactors_.rhi() : emptyShadow_.rhi());
         });
         base += cloud->count;
     }

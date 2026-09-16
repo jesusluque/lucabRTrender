@@ -64,6 +64,10 @@ public struct FrameParams {
     public uint  lightCount;     // lights in `lights`, 0 when nothing is relit
     public uint  categoriesLo;   // this cloud's categories, for a light's link
     public uint  categoriesHi;
+    public uint  shadowRays;     // 1: a relit splat is shadowed by the cloud's own proxies
+    public uint  shadowLights;   // lights splat_shadow measured a factor for
+    public float shadowOffset;   // where its shadow ray starts, in the splat's own sigmas
+    public float shadowCut;      // and where the ray gives up
     public EditParams edit;      // this cloud instance's SplatEdit (common/edit.slang)
 };
 

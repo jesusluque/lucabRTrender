@@ -93,8 +93,15 @@ public:
                                                 const RenderSettings& settings,
                                                 RenderTargets& targets);
 
-    /// The structures the last render built, for a ray that only needs
-    /// transmittance (rt_shadow.slang). Valid until the next render.
+    /// Everything `render` builds before it draws -- the per-cloud
+    /// structures and this frame's colours -- for a caller that will not
+    /// draw with it: a shadow ray needs the proxies, not the image.
+    [[nodiscard]] Result<RayTracerStats> prepare(const Projection& projection,
+                                                 std::span<const SplatInstance> instances,
+                                                 uint32_t maxShDegree = 3);
+
+    /// The structures the last render or prepare built, for a ray that only
+    /// needs transmittance (rt_shadow.slang). Valid until the next of either.
     [[nodiscard]] ShadowScene shadowScene() const noexcept;
 
 private:

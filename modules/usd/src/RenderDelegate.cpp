@@ -331,6 +331,11 @@ lrt::usd::MeshVisibility HdLrtRenderDelegate::GetMeshVisibility() const {
     return lrt::usd::MeshVisibility::Automatic;
 }
 
+bool HdLrtRenderDelegate::GetSplatShadows() const {
+    const VtValue value = GetRenderSetting(TfToken("lrt:splatShadows"));
+    return value.IsHolding<bool>() && value.UncheckedGet<bool>();
+}
+
 bool HdLrtRenderDelegate::GetChooseLights() const {
     const VtValue value = GetRenderSetting(_lrtSettings->chooseLights);
     return value.IsHolding<bool>() && value.UncheckedGet<bool>();

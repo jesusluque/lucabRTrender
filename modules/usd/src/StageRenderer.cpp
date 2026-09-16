@@ -462,6 +462,9 @@ void StageRenderer::setLightSamples(uint32_t samples) {
 void StageRenderer::setChooseLights(bool choose) {
     impl_->delegate->SetRenderSetting(TfToken("lrt:chooseLights"), VtValue(choose));
 }
+void StageRenderer::setSplatShadows(bool shadows) {
+    impl_->delegate->SetRenderSetting(TfToken("lrt:splatShadows"), VtValue(shadows));
+}
 void StageRenderer::setPathSamples(uint32_t samples) {
     impl_->delegate->SetRenderSetting(TfToken("lrt:pathSamples"),
                                       VtValue(static_cast<int>(std::max(samples, 1u))));
