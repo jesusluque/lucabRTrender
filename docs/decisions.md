@@ -3901,3 +3901,31 @@ cache written before the fix would have been served back into a fixed build,
 putting the defect quietly under it. The cache path now carries a generation
 (`shaders/gen1`, and `gen1-ldg` under the escape hatch), so a changed prelude
 looks elsewhere instead.
+
+## lrt view: the path tracer's own settings in the window
+
+Switching the viewer's Technique from Raster to Path traced was reported not
+to work. What was measured, before touching anything:
+
+- **The switch itself works.** A new test ("a renderer told another technique
+  between frames draws that technique") draws raster frames and then rt
+  frames on one `StageRenderer`, and the other way round, against renderers
+  that drew one technique from the start: 0.00e+00 relative both ways, with
+  the two techniques 7.07e-01 apart at their worst pixel as the control.
+- **A viewport accumulates.** `draw` adds its paths every frame of a still
+  camera -- 2 after two frames, then 3, 4, ... 12 -- whatever `pathTotal`
+  says; the total only decides when the frame counts as converged (and so
+  when a denoise runs).
+- **Nothing failed in the window**: a session on Kitchen_set_lit logged 608
+  frames and no error.
+- **Kitchen_set.usd has no lights.** Path traced, it is lit by the headlight,
+  which lights the first hit from the eye as the raster does: the two look
+  the same by construction. `Kitchen_set_lit.usda` is the one to look at.
+
+What the window lacked is the path tracer's settings: it left the delegate's
+defaults, one path a pixel a frame and one bounce, which lights a room little
+more than the raster does. The View panel now shows, under Path traced,
+paths per frame, bounces (4 by default in the window), denoise, and how many
+paths a pixel the frame holds; `lrt view` takes `--path-samples`,
+`--path-bounces`, `--path-total` and `--denoise` as `lrt stage` does. What
+the report saw beyond that is not reproduced yet.

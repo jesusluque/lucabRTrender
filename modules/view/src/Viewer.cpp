@@ -9,6 +9,7 @@
 #include <functional>
 #include <optional>
 #include <span>
+#include <string_view>
 #include <vector>
 
 #include <imgui.h>
@@ -295,6 +296,14 @@ Result<ViewStats> runViewer(const ViewOptions& options) {
     LRT_TRY(stage.setMeshVisibility(kVisibility[static_cast<size_t>(visibility)].value));
     stage.setLightSamples(options.lightSamples);
     stage.setChooseLights(options.chooseLights);
+    int pathSamples = static_cast<int>(std::max(options.pathSamples, 1u));
+    int pathBounces = static_cast<int>(options.pathBounces);
+    int pathTotal = static_cast<int>(std::max(options.pathTotal, 1u));
+    bool denoise = options.denoise;
+    stage.setPathSamples(static_cast<uint32_t>(pathSamples));
+    stage.setPathBounces(static_cast<uint32_t>(pathBounces));
+    stage.setPathTotal(static_cast<uint32_t>(pathTotal));
+    stage.setDenoise(denoise);
 
     const auto displaySettings = [&] {
         technique::DisplaySettings settings;
@@ -408,6 +417,24 @@ Result<ViewStats> runViewer(const ViewOptions& options) {
                 }
             }
             combo("Technique", technique, kTechniques);
+            if (kTechniques[static_cast<size_t>(technique)].value == std::string_view("rt")) {
+                // The path tracer's own settings: the delegate's defaults are
+                // one bounce, which lights a room little more than the raster.
+                ImGui::Indent();
+                if (ImGui::SliderInt("Paths per frame", &pathSamples, 1, 64)) {
+                    stage.setPathSamples(static_cast<uint32_t>(pathSamples));
+                }
+                if (ImGui::SliderInt("Bounces", &pathBounces, 0, 16)) {
+                    stage.setPathBounces(static_cast<uint32_t>(pathBounces));
+                }
+                if (ImGui::Checkbox("Denoise", &denoise)) {
+                    stage.setDenoise(denoise);
+                }
+                // A viewport keeps gathering while the camera is still and
+                // starts again when it moves; the count says which.
+                ImGui::Text("%u paths a pixel", stage.pathAccumulated());
+                ImGui::Unindent();
+            }
             if (combo("Mesh visibility", visibility, kVisibility)) {
                 LRT_TRY(stage.setMeshVisibility(kVisibility[static_cast<size_t>(visibility)].value));
             }

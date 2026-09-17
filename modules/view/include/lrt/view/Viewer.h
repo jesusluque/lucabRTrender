@@ -24,6 +24,13 @@ struct ViewOptions {
     uint32_t              frames = 0;               ///< stop after this many; 0, when the window closes
     uint32_t              lightSamples = 1;         ///< samples per light per pixel
     bool                  chooseLights = false;     ///< one light a sample, by power
+    /// The path traced technique. A window keeps gathering paths while the
+    /// camera is still and starts again when it moves; `pathTotal` is when
+    /// the frame counts as converged, which is when a denoise runs.
+    uint32_t              pathSamples = 1;          ///< paths a pixel each frame
+    uint32_t              pathBounces = 4;          ///< bounces after the first hit
+    uint32_t              pathTotal = 64;           ///< paths a pixel it counts as converged at
+    bool                  denoise = false;          ///< denoise once converged
     /// Extended dynamic range: a float surface in linear P3, ACES 2.0 with
     /// the screen's peak as its peak. On a standard display the same as off.
     bool                  edr = false;

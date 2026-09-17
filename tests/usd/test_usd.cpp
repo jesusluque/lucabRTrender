@@ -5618,3 +5618,101 @@ TEST_CASE("a plane with authored normals under a dome reads its albedo through H
         }
     }
 }
+
+// What the viewer's Technique selector does: the same renderer, one frame
+// after another, told a different technique. The frame it draws must be the
+// frame a renderer drawing that technique from the start draws -- not the
+// technique it was drawing before. A floor and a red wall under one sphere
+// light, so that the path tracer's bounce puts red on the floor where the
+// raster has none, and the two techniques cannot pass for each other.
+TEST_CASE("a renderer told another technique between frames draws that technique", "[usd][gpu][mesh][technique]") {
+    LRT_REQUIRE_GPU(gpu);
+    const gpu::Caps& caps = gpu->device->caps();
+    if (!caps.rasterization || !caps.accelerationStructure || !(caps.rayQuery || caps.rayTracing)) {
+        SKIP("needs rasterisation and rays");
+    }
+    const uint32_t w = 64, h = 48;
+    const fs::path path = scratch("technique_switch.usda");
+    {
+        std::ofstream out(path);
+        out << "#usda 1.0\n(\n    upAxis = \"Y\"\n)\n"
+               "def Mesh \"Floor\"\n{\n"
+               "    int[] faceVertexCounts = [4]\n    int[] faceVertexIndices = [0, 1, 2, 3]\n"
+               "    point3f[] points = [(-4, -1, 2), (4, -1, 2), (4, -1, -6), (-4, -1, -6)]\n"
+               "    uniform token subdivisionScheme = \"none\"\n}\n"
+               "def Mesh \"Wall\"\n{\n"
+               "    int[] faceVertexCounts = [4]\n    int[] faceVertexIndices = [0, 1, 2, 3]\n"
+               "    point3f[] points = [(-4, -1, -4), (4, -1, -4), (4, 4, -4), (-4, 4, -4)]\n"
+               "    color3f[] primvars:displayColor = [(0.9, 0.1, 0.1)]\n"
+               "    uniform token subdivisionScheme = \"none\"\n}\n"
+               "def SphereLight \"Bulb\"\n{\n    float inputs:intensity = 30\n    float inputs:radius = 0.3\n"
+               "    double3 xformOp:translate = (0, 2, -2)\n    uniform token[] xformOpOrder = [\"xformOp:translate\"]\n}\n";
+    }
+    render::Camera camera = render::Camera::lookingAt({0.0, 0.5, 2.0}, {0.0, 0.0, -3.0});
+    camera.lens.focal = 30.0;
+    gpu::BufferDesc desc;
+    desc.bytes = uint64_t{w} * h * 16;
+    desc.elementBytes = 16;
+    // Draws `sequence` in order on one renderer and returns the last frame.
+    const auto lastOf = [&](std::initializer_list<const char*> sequence) -> gpu::Buffer {
+        auto renderer = usd::StageRenderer::open(path);
+        if (!renderer) FAIL(renderer.error().toString());
+        const char* last = nullptr;
+        size_t k = 0;
+        for (const char* technique : sequence) {
+            if (++k == sequence.size()) {
+                last = technique;
+                break;
+            }
+            auto drawn = (*renderer)->draw(camera, 0.0, w, h, technique);
+            if (!drawn) FAIL(drawn.error().toString());
+        }
+        auto image = (*renderer)->render(camera, 0.0, w, h, last);
+        if (!image) FAIL(image.error().toString());
+        auto frame = gpu::Buffer::create(*gpu->device, desc, image->rgba.data());
+        if (!frame) FAIL(frame.error().toString());
+        return std::move(*frame);
+    };
+    const gpu::Buffer raster = lastOf({"raster", "raster"});
+    const gpu::Buffer rt = lastOf({"rt", "rt"});
+    const gpu::Buffer rasterThenRt = lastOf({"raster", "raster", "rt", "rt"});
+    const gpu::Buffer rtThenRaster = lastOf({"rt", "rt", "raster", "raster"});
+    const auto compare = [&](const gpu::Buffer& a, const gpu::Buffer& b, const char* what) {
+        auto d = render::compareHdr(*gpu->library, a, b, w, h);
+        REQUIRE(d);
+        std::printf("  %s: relMse %.3e, worst %.2e\n", what, d->relMse, d->maxRelative);
+        return *d;
+    };
+    // The control: the techniques differ, or the test cannot see a switch.
+    CHECK(compare(raster, rt, "raster against rt").maxRelative > 1e-2);
+    CHECK(compare(rasterThenRt, rt, "raster then rt, against rt").maxRelative < 1e-4);
+    CHECK(compare(rtThenRaster, raster, "rt then raster, against raster").maxRelative < 1e-4);
+
+    // And what a window does between switches: frame after frame of one
+    // camera. A viewport keeps gathering -- a frame adds its paths whatever
+    // the total, which only says when the frame counts as converged -- and a
+    // switch back to raster reads as finished.
+    auto renderer = usd::StageRenderer::open(path);
+    if (!renderer) FAIL(renderer.error().toString());
+    REQUIRE((*renderer)->draw(camera, 0.0, w, h, "rt"));
+    REQUIRE((*renderer)->draw(camera, 0.0, w, h, "rt"));
+    const uint32_t stuck = (*renderer)->pathAccumulated();
+    (*renderer)->setPathTotal(8);
+    std::vector<uint32_t> gathered;
+    for (int frame = 0; frame < 10; ++frame) {
+        REQUIRE((*renderer)->draw(camera, 0.0, w, h, "rt"));
+        gathered.push_back((*renderer)->pathAccumulated());
+    }
+    std::printf("  %u paths after two frames; with a total of 8, frame by frame:", stuck);
+    for (const uint32_t g : gathered) {
+        std::printf(" %u", g);
+    }
+    std::printf("%s\n", (*renderer)->pathConverged() ? " (converged)" : "");
+    CHECK(stuck == 2);
+    for (size_t k = 0; k < gathered.size(); ++k) {
+        CHECK(gathered[k] == stuck + 1 + k);
+    }
+    CHECK((*renderer)->pathConverged());
+    REQUIRE((*renderer)->draw(camera, 0.0, w, h, "raster"));
+    CHECK((*renderer)->pathConverged());
+}
