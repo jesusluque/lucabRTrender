@@ -138,6 +138,61 @@ bool occluded(float3 p, float3 n, float3 wi, float distance, uint shadowCategory
 )";
 
 const char* kKernelBody = R"(
+/// Lights at infinity -- a dome, a distant light -- are the ones the raster
+/// can also meet along a lobe's own sample, since nothing but occlusion stands
+/// between: with the same shadow ray, or none where the light casts none, the
+/// two strategies see the same light and are weighed against each other. A
+/// light whose shadow links leave some occluders out keeps light sampling
+/// alone, since a lobe sample would have to ask the same of every occluder.
+bool atInfinity(LightRecord l) {
+    return l.kind == kLightDome || l.kind == kLightDistant;
+}
+bool rasterWeighs(LightRecord l) {
+    return atInfinity(l) && ((l.flags & kLightShadow) == 0 || l.shadowCategory == kLightUnlinked);
+}
+/// Light k's probability of being chosen, as the frame chooses: one for every
+/// light at every pixel, its power share, or the light tree's.
+float rasterChoice(uint k, float3 p, float3 n) {
+    if (lighting.chooseLights == 2) {
+        return lightPdfChoiceAny(iesValues, lightNodeBase, lightTreeNodes, lightUnboundedCount, lights, k, p, n);
+    }
+    if (lighting.chooseLights == 1) {
+        const float power = lights[lightCount - 1].cumulative;
+        if (!(power > 0.0)) {
+            return 0.0;
+        }
+        const float before = k == 0 ? 0.0 : lights[k - 1].cumulative;
+        return max(lights[k].cumulative - before, 1.0e-9) / power;
+    }
+    return 1.0;
+}
+/// The power heuristic between n_a samples at density a and n_b at density b.
+float rasterMis(float na, float a, float nb, float b) {
+    const float x = na * a;
+    const float y = nb * b;
+    return x * x / max(x * x + y * y, 1.0e-30);
+}
+static const uint kLobeLookups = 32;
+/// Above this peak density (per steradian) a lobe is narrow enough for the
+/// raster to meet lights at infinity along its samples as well as by light
+/// sampling. A Phong lobe peaks at (e + 1) / 2 pi, so 4 is an exponent near 24,
+/// roughly a GGX alpha of 0.35. Below it light sampling keeps the whole
+/// weight, and the shadow ray it traces: a diffuse floor's dome shadows are
+/// light sampling's alone.
+static const float kNarrowPeak = 4.0;
+/// The density both strategies are weighed by: a Phong lobe about the mirror
+/// direction with the stack's own peak density, zero for a broad stack and
+/// below the surface. Weights only have to sum to one where both can sample,
+/// not to use the true density -- and the true density is not asked for
+/// near a shadow ray (the note in the kernel).
+float lobeProxyPdf(float3 wi, float3 mirror, float3 up, float peak) {
+    if (!(peak > kNarrowPeak) || dot(wi, up) <= 0.0) {
+        return 0.0;
+    }
+    const float exponent = max(2.0 * kPi * peak - 1.0, 0.0);
+    return (exponent + 1.0) / (2.0 * kPi) * pow(max(dot(wi, mirror), 0.0), exponent);
+}
+
 [shader("compute")]
 [numthreads(16, 16, 1)]
 void shadeMaterials(uint3 group: SV_GroupID, uint index: SV_GroupIndex) {
@@ -173,6 +228,82 @@ void shadeMaterials(uint3 group: SV_GroupID, uint index: SV_GroupIndex) {
 #define stack gLrtResult
     const float3 toEye = normalize(inputs.viewPosition - inputs.positionWorld);
     float3 radiance = stack.emission;
+    // What light sampling cannot reach, or reaches badly, is met along the
+    // lobes' own samples instead: a dome is sampled over the hemisphere above
+    // the normal, so light through the surface (glass) never meets it; a
+    // delta lobe (smooth glass, a mirror) answers no light sample; a glossy
+    // metal's narrow lobe is almost never found by a dome's samples. Without
+    // this, the chess set's glass pawn heads and polished rims drew black.
+    //
+    // All of it here, before the first shadow ray, and none of it live after:
+    // this kernel writes garbage on Metal when material state is live across
+    // the intersector (the note below). Measured twice more with this very
+    // loop -- drawn after the light loops, a raster frame after a path traced
+    // one differed from a fresh one in 3 runs of 4; drawn before but kept in
+    // arrays for shadow rays after, the unoccluded floor's shadowed frame
+    // differed from its unshadowed one by a thousand words, differently each
+    // run. So a lobe's sample traces no shadow ray of its own: a reflection
+    // sees the sky whether or not something stands in the way, as an
+    // environment map's does. Weighed against light sampling, which does
+    // trace, that shows only where the lobe is narrow enough to take the
+    // weight: glass, mirrors, polished metal.
+    const uint lightSampleCount = max(lighting.samples, 1u);
+    const uint lobeCount = lightCount != 0 ? min(lightSampleCount, kLobeLookups) : 0u;
+    const float3 lobeUp = dot(toEye, inputs.normalWorld) < 0.0 ? -inputs.normalWorld : inputs.normalWorld;
+    const float3 lobeMirror = reflect(-toEye, lobeUp);
+    const float lobePeak = lobeCount != 0 ? stackPdf(stack, toEye, lobeMirror) : 0.0;
+    if (lobeCount != 0) {
+        const float3 n0 = inputs.normalWorld;
+        const float eyeSide = dot(toEye, n0);
+        float3 lobeSum = float3(0.0);
+        for (uint j = 0; j < lobeCount; ++j) {
+            const float2 ua = sampleAt(tid, lightCount + 1, j);
+            const float2 ub = sampleAt(tid, lightCount + 2, j);
+            const LobeSample ms = stackSample(stack, toEye, float3(ua, ub.x));
+            if (!ms.valid || !any(ms.weight > float3(0.0))) {
+                continue;
+            }
+            const bool through = dot(ms.wi, n0) * eyeSide < 0.0;
+            for (uint k = 0; k < lightCount; ++k) {
+                const LightRecord light = lights[k];
+                if (!atInfinity(light) ||
+                    !lightLinked(light.lightCategory, s.instance.categoriesLo, s.instance.categoriesHi)) {
+                    continue;
+                }
+                const bool weighs = rasterWeighs(light);
+                // Light sampling has a light it weighs, and a delta lobe never;
+                // through the surface only the dome, which light sampling does
+                // not reach there, and a distant light through a delta lobe.
+                if (through) {
+                    if (light.kind != kLightDome && !ms.delta) {
+                        continue;
+                    }
+                } else if (!weighs && !ms.delta) {
+                    continue;
+                }
+                const LightHit lh = lightHitImaged(light, inputs.positionWorld, ms.wi);
+                if (!lh.valid) {
+                    continue;
+                }
+                float weight = 1.0;
+                if (!ms.delta && !through) {
+                    const float proxy = lobeProxyPdf(ms.wi, lobeMirror, lobeUp, lobePeak);
+                    if (!(proxy > 0.0)) {
+                        continue;   // a broad lobe: light sampling has all of it
+                    }
+                    const float lightDensity = rasterChoice(k, inputs.positionWorld, n0) *
+                                               lightPdfImaged(light, inputs.positionWorld, n0, ms.wi);
+                    weight = rasterMis(float(lobeCount), proxy, float(lightSampleCount), lightDensity);
+                }
+                const float3 arrived = weight * ms.weight * lh.radiance;
+                lobeSum += arrived;
+                if (kLightGroups && light.group != 0 && light.group <= 8) {
+                    groups[light.group - 1] += arrived / float(lobeCount);
+                }
+            }
+        }
+        radiance += lobeSum / float(lobeCount);
+    }
     if (lightCount == 0) {
         // The headlight: unit radiance from the eye, so a white Lambert
         // surface facing it shows 1. What meshes were lit by before there
@@ -207,11 +338,18 @@ void shadeMaterials(uint3 group: SV_GroupID, uint index: SV_GroupIndex) {
             if (!any(f > float3(0.0))) {
                 continue;
             }
+            // Weighed by the proxy, never the stack: asked for the stack's
+            // density in a loop that traces, this kernel writes garbage.
+            float weight = 1.0;
+            if (!ls.delta && rasterWeighs(light)) {
+                weight = rasterMis(float(samples), ls.pdf * choice.probability, float(lobeCount),
+                                   lobeProxyPdf(ls.wi, lobeMirror, lobeUp, lobePeak));
+            }
             if ((light.flags & kLightShadow) != 0 &&
                 occluded(inputs.positionWorld, inputs.normalWorld, ls.wi, ls.distance, light.shadowCategory)) {
                 continue;
             }
-            const float3 arrived = f * ls.radiance / (ls.pdf * choice.probability);
+            const float3 arrived = weight * f * ls.radiance / (ls.pdf * choice.probability);
             sum += arrived;
             if (kLightGroups && light.group != 0 && light.group <= 8) {
                 groups[light.group - 1] += arrived / float(samples);
@@ -241,11 +379,17 @@ void shadeMaterials(uint3 group: SV_GroupID, uint index: SV_GroupIndex) {
                 if (!any(f > float3(0.0))) {
                     continue;
                 }
+                // Weighed by the proxy, as above.
+                float weight = 1.0;
+                if (!ls.delta && rasterWeighs(light)) {
+                    weight = rasterMis(float(samples), ls.pdf, float(lobeCount),
+                                       lobeProxyPdf(ls.wi, lobeMirror, lobeUp, lobePeak));
+                }
                 if (shadow && occluded(inputs.positionWorld, inputs.normalWorld, ls.wi, ls.distance,
                                        light.shadowCategory)) {
                     continue;
                 }
-                sum += f * ls.radiance / ls.pdf;
+                sum += weight * f * ls.radiance / ls.pdf;
             }
             radiance += sum / float(samples);
             if (kLightGroups && light.group != 0 && light.group <= 8) {

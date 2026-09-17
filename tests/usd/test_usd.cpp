@@ -5612,7 +5612,7 @@ TEST_CASE("a plane with authored normals under a dome reads its albedo through H
             auto difference = render::compareHdr(*gpu->library, *frame, *reference, w, h);
             REQUIRE(difference);
             std::printf("  normals %s, %s: %llu pixels, worst %.2e relative to 0.18\n", authored ? "authored" : "computed",
-                        technique, static_cast<unsigned long long>(difference->pixels), difference->maxRelative);
+                        technique, static_cast<unsigned long long>(difference->pixels), difference->relMse, difference->p99Relative, difference->maxRelative);
             CHECK(difference->pixels == uint64_t{w} * h);
             CHECK(difference->maxRelative < 1e-4);
         }
@@ -5773,5 +5773,162 @@ TEST_CASE("default lights in the session layer light a stage that has none, and 
                     changed->relMse, restored->maxRelative);
         CHECK(changed->relMse > 1e-2);
         CHECK(restored->maxRelative < 1e-4);
+    }
+}
+
+// A glass pane under a dome, drawn by the raster, which has no rays for what
+// is behind it. Before the raster looked the dome up along what light
+// sampling cannot reach -- the far side of the surface, and a delta lobe
+// that answers no light sample -- glass drew black: the chess set's pawn
+// heads. Two checks, each with an answer that owes nothing to the raster:
+//
+//  - a bare smooth dielectric_bsdf in scatter mode RT is lossless: every
+//    sample goes to reflection or transmission with a weight of exactly one,
+//    so under a uniform dome of radiance 1 every pixel reads 1;
+//  - standard_surface with transmission (the pawns' own material) is not --
+//    MaterialX layers its specular reflection over the transmission, which
+//    it attenuates by one minus the reflection's albedo, so a pane reads
+//    F + (1 - F)^2 and not 1 -- but with nothing behind the pane the path
+//    tracer sees exactly what the raster should, so the two must agree.
+TEST_CASE("the raster sees a dome through glass as the path tracer does", "[usd][gpu][mesh][lights][glass]") {
+    LRT_REQUIRE_GPU(gpu);
+    const gpu::Caps& caps = gpu->device->caps();
+    if (!caps.rasterization || !caps.accelerationStructure || !(caps.rayQuery || caps.rayTracing)) {
+        SKIP("needs rasterisation and rays");
+    }
+    const uint32_t w = 64, h = 48;
+    const auto stageWith = [&](const std::string& name, const std::string& shader) {
+        const fs::path material = scratch(name + ".mtlx");
+        {
+            std::ofstream out(material);
+            out << "<?xml version=\"1.0\"?>\n<materialx version=\"1.39\">\n" << shader
+                << "  <surfacematerial name=\"M_Glass\" type=\"material\">\n"
+                   "    <input name=\"surfaceshader\" type=\"surfaceshader\" nodename=\"Glass\" />\n"
+                   "  </surfacematerial>\n</materialx>\n";
+        }
+        const fs::path path = scratch(name + ".usda");
+        std::ofstream out(path);
+        // The pane fills the view: 8 wide at distance 1.5 against a 35mm lens.
+        out << "#usda 1.0\n(\n    upAxis = \"Y\"\n)\n"
+               "def Scope \"Looks\" (\n    prepend references = @./" << name << ".mtlx@</MaterialX/Materials>\n)\n{\n}\n"
+               "def Mesh \"Pane\" (\n    prepend apiSchemas = [\"MaterialBindingAPI\"]\n)\n{\n"
+               "    int[] faceVertexCounts = [4]\n    int[] faceVertexIndices = [0, 1, 2, 3]\n"
+               "    point3f[] points = [(-4, -4, -1.5), (4, -4, -1.5), (4, 4, -1.5), (-4, 4, -1.5)]\n"
+               "    uniform token subdivisionScheme = \"none\"\n"
+               "    rel material:binding = </Looks/M_Glass>\n}\n"
+               "def DomeLight \"Sky\"\n{\n    float inputs:intensity = 1\n}\n"
+               "def Camera \"Camera\"\n{\n    float focalLength = 35\n"
+               "    float horizontalAperture = 24.576\n    float verticalAperture = 18.432\n"
+               "    float2 clippingRange = (0.1, 1000)\n}\n";
+        return path;
+    };
+    gpu::BufferDesc desc;
+    desc.bytes = uint64_t{w} * h * 16;
+    desc.elementBytes = 16;
+    const auto upload = [&](const std::vector<float>& rgba) {
+        auto made = gpu::Buffer::create(*gpu->device, desc, rgba.data());
+        if (!made) FAIL(made.error().toString());
+        return std::move(*made);
+    };
+
+    {
+        const fs::path path = stageWith(
+            "glass_lossless",
+            "  <dielectric_bsdf name=\"b\" type=\"BSDF\">\n"
+            "    <input name=\"roughness\" type=\"vector2\" value=\"0, 0\" />\n"
+            "    <input name=\"scatter_mode\" type=\"string\" value=\"RT\" />\n"
+            "  </dielectric_bsdf>\n"
+            "  <surface name=\"Glass\" type=\"surfaceshader\">\n"
+            "    <input name=\"bsdf\" type=\"BSDF\" nodename=\"b\" />\n  </surface>\n");
+        const gpu::Buffer ones = upload(std::vector<float>(size_t{w} * h * 4, 1.0F));
+        auto renderer = usd::StageRenderer::open(path);
+        if (!renderer) FAIL(renderer.error().toString());
+        for (const uint32_t lightSamples : {1u, 4u}) {
+            (*renderer)->setLightSamples(lightSamples);
+            auto image = (*renderer)->render("/Camera", 0.0, w, h, "raster");
+            if (!image) FAIL(image.error().toString());
+            auto difference = render::compareHdr(*gpu->library, upload(image->rgba), ones, w, h);
+            REQUIRE(difference);
+            std::printf("  lossless dielectric, %u light samples: %llu pixels, worst %.2e relative to the dome\n",
+                        lightSamples, static_cast<unsigned long long>(difference->pixels), difference->maxRelative);
+            CHECK(difference->pixels == uint64_t{w} * h);
+            CHECK(difference->maxRelative < 1e-3);
+        }
+    }
+    {
+        const fs::path path = stageWith(
+            "glass_standard",
+            "  <standard_surface name=\"Glass\" type=\"surfaceshader\">\n"
+            "    <input name=\"base_color\" type=\"color3\" value=\"1, 1, 1\" />\n"
+            "    <input name=\"specular_roughness\" type=\"float\" value=\"0\" />\n"
+            "    <input name=\"transmission\" type=\"float\" value=\"1\" />\n"
+            "    <input name=\"transmission_color\" type=\"color3\" value=\"0.3, 0.5, 0.45\" />\n"
+            "  </standard_surface>\n");
+        auto renderer = usd::StageRenderer::open(path);
+        if (!renderer) FAIL(renderer.error().toString());
+        // The path tracer first, deep, as the answer; then the raster at two
+        // sample counts. Its lobe choice between reflection and a tinted
+        // transmission is noise, so agreement is stated as the error falling
+        // with the samples as one over their number, not as a threshold met
+        // once.
+        (*renderer)->setPathBounces(2);
+        (*renderer)->setPathTotal(4096);
+        auto traced = (*renderer)->render("/Camera", 0.0, w, h, "rt");
+        if (!traced) FAIL(traced.error().toString());
+        const gpu::Buffer answer = upload(traced->rgba);
+        double errors[2] = {0.0, 0.0};
+        const uint32_t counts[2] = {2u, 32u};
+        for (size_t c = 0; c < 2; ++c) {
+            (*renderer)->setLightSamples(counts[c]);
+            auto raster = (*renderer)->render("/Camera", 0.0, w, h, "raster");
+            if (!raster) FAIL(raster.error().toString());
+            auto difference = render::compareHdr(*gpu->library, upload(raster->rgba), answer, w, h);
+            REQUIRE(difference);
+            std::printf("  standard_surface glass, raster at %u samples against rt at 4096 paths: relMse %.2e, p99 %.2e\n",
+                        counts[c], difference->relMse, difference->p99Relative);
+            CHECK(difference->pixels == uint64_t{w} * h);
+            errors[c] = difference->relMse;
+        }
+        // Sixteen times the samples -- within the 32 lobe samples the raster
+        // draws a pixel -- and an unbiased estimator's squared error is a
+        // sixteenth, less the path tracer's own noise in both; a bias would
+        // leave it where it was.
+        CHECK(errors[0] / errors[1] > 8.0);   // 16.0 measured
+        CHECK(errors[1] < 5e-4);   // 1.24e-04 measured at 32
+    }
+    {
+        // A polished metal: a lobe too narrow for a dome's light samples to
+        // find and not narrow enough to be a delta, which is where the two
+        // strategies are weighed against each other. Before, the chess set's
+        // rims drew black; the same one-over-N as the glass says the weights
+        // add up to one.
+        const fs::path path = stageWith(
+            "metal_glossy",
+            "  <conductor_bsdf name=\"b\" type=\"BSDF\">\n"
+            "    <input name=\"roughness\" type=\"vector2\" value=\"0.1, 0.1\" />\n"
+            "  </conductor_bsdf>\n"
+            "  <surface name=\"Glass\" type=\"surfaceshader\">\n"
+            "    <input name=\"bsdf\" type=\"BSDF\" nodename=\"b\" />\n  </surface>\n");
+        auto renderer = usd::StageRenderer::open(path);
+        if (!renderer) FAIL(renderer.error().toString());
+        (*renderer)->setPathBounces(1);
+        (*renderer)->setPathTotal(4096);
+        auto traced = (*renderer)->render("/Camera", 0.0, w, h, "rt");
+        if (!traced) FAIL(traced.error().toString());
+        const gpu::Buffer answer = upload(traced->rgba);
+        double errors[2] = {0.0, 0.0};
+        const uint32_t counts[2] = {2u, 32u};
+        for (size_t c = 0; c < 2; ++c) {
+            (*renderer)->setLightSamples(counts[c]);
+            auto raster = (*renderer)->render("/Camera", 0.0, w, h, "raster");
+            if (!raster) FAIL(raster.error().toString());
+            auto difference = render::compareHdr(*gpu->library, upload(raster->rgba), answer, w, h);
+            REQUIRE(difference);
+            std::printf("  polished conductor, raster at %u samples against rt at 4096 paths: relMse %.2e, p99 %.2e\n",
+                        counts[c], difference->relMse, difference->p99Relative);
+            CHECK(difference->pixels == uint64_t{w} * h);
+            errors[c] = difference->relMse;
+        }
+        CHECK(errors[0] / errors[1] > 8.0);
     }
 }

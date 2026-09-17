@@ -3951,3 +3951,77 @@ The report's screenshots then said the rest, on the chess set:
   again the frame is the unlit one to 0.00e+00 on both.
 - **A frame took 1190 ms** at 1920x1018 path traced with 4 bounces; Render
   scale is what trades that for interactivity.
+
+## The raster sees lights at infinity along its lobes: glass and polished metal
+
+The chess set's glass pawn heads and polished rims drew black under the
+raster. Its surfaces were lit by light sampling alone, and three kinds of
+lobe get nothing from that: light **through** the surface (a dome is sampled
+over the hemisphere above the normal), a **delta** lobe (smooth glass, a
+mirror, which answers no light sample), and a **glossy** lobe too narrow for a
+dome's samples to find.
+
+`MaterialShading` now also samples the lobe stack (up to 32 samples a pixel)
+and meets the lights at infinity -- domes and distant lights -- along those
+samples: through the surface, only the dome, which light sampling never
+reaches there; a delta lobe, weight one; a narrow lobe, weighed against light
+sampling by the power heuristic. Through the surface the lobe's sample is
+followed as it leaves this surface, without the second refraction a solid adds
+on its far side, and the raster traces nothing behind it: a glass object in
+the raster shows the sky, not the room behind it.
+
+**What the Metal compiler allowed, measured each time.** This kernel already
+carries a note: with a copy of the lobe stack live across the shadow ray's
+intersector, it writes garbage. Three arrangements hit it again, each caught
+by a test that must be bit exact:
+
+| arrangement | caught by | result |
+|---|---|---|
+| lobe samples drawn after the light loops | a raster frame after a path traced one, against a fresh one | differed in 3 runs of 4, worst 69 times the value |
+| drawn before, kept in arrays for shadow rays after | shadows on against off over an unoccluded floor | 681-1625 of 24576 words, different each run |
+| the true lobe density (`stackPdf`) asked for inside a loop that traces, before or after its shadow ray | the same | 969-1424 words |
+
+What holds: every lobe sample is drawn, looked up and summed **before the
+first shadow ray**, and nothing of the stack is asked for after. That has two
+consequences, both deliberate:
+
+- **A lobe's sample traces no shadow ray.** A reflection sees the sky whether
+  or not something stands in the way, as an environment map's does.
+- **Both strategies are weighed by a proxy density**, not the stack's: a Phong
+  lobe about the mirror direction with the stack's own peak density, taken
+  once before any shadow ray. MIS weights only have to sum to one wherever
+  both strategies can sample, which a density shared by both does. The proxy
+  is **zero for a broad stack** (peak density 4 or less, a Phong exponent
+  near 24): there light sampling keeps the whole weight and its shadow ray, so
+  a diffuse floor's dome shadows are untouched. The narrow lobes the proxy
+  hands to the lobe side are where the missing shadow ray shows, as a
+  reflection of sky under something that should hide it.
+
+After it: the floor 0 words in 6 runs of 6, the technique switch 0.00e+00 in
+4 of 4, and the light groups and shadow link tests, which the corrupted
+arrangements had also failed, pass.
+
+Measured, in "the raster sees a dome through glass as the path tracer does":
+
+| material, under a uniform dome | check | result |
+|---|---|---|
+| `dielectric_bsdf` RT, roughness 0 | every pixel reads the dome (lossless) | worst 1.66e-05, at 1 and 4 samples |
+| `standard_surface`, transmission 1 | raster against rt at 4096 paths, 2 and 32 samples | relMse 1.98e-03 then 1.24e-04: **16.0** |
+| `conductor_bsdf`, roughness 0.1 | the same | relMse 7.51e-02 then 4.78e-03: **15.7** |
+
+Sixteen times the samples dividing the squared error by sixteen is what an
+unbiased estimator does. A bias would have stayed where it was. The first attempt
+measured 1 against `standard_surface`, which was wrong: MaterialX layers its
+specular reflection over the transmission and attenuates that by one minus
+the reflection's albedo, so a pane reads F + (1 - F)^2, and the error sat at
+3.8% whatever the samples. That is why the lossless case is a bare dielectric.
+
+Not done: reflections in the raster see only the sky -- not the neighbouring
+pieces, and not what should hide the sky -- so the chess set's rims read
+darker than under rt.
+
+`LRT_VIEW_SWITCH_AT=N` makes `lrt view` flip its Technique selector at frame
+N, as a click would, so a sequence someone reports ("opened in Raster, switched
+to Path traced") runs under `--frames` and `--snapshot` instead of being
+described. Run that way on the chess set, the switched frame showed the glass
+heads as glass: the black heads in the report were the raster's.

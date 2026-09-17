@@ -5,6 +5,7 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <functional>
 #include <optional>
@@ -13,6 +14,8 @@
 #include <vector>
 
 #include <imgui.h>
+
+#include "lrt/core/Platform.h"
 #include <imgui_impl_glfw.h>
 
 #include "lrt/core/Log.h"
@@ -311,6 +314,12 @@ Result<ViewStats> runViewer(const ViewOptions& options) {
     // on the stage -- minutes, the first time, for a stage like the chess set
     // -- and the window cannot draw while it does. One frame says so first.
     std::array<bool, kTechniques.size()> techniqueDrawn{};
+    // LRT_VIEW_SWITCH_AT=N: at frame N the Technique selector goes to the
+    // other technique, as a click on it would -- so the sequence a person
+    // reports (open in one, switch to the other) can be run with --frames
+    // and --snapshot rather than described.
+    const std::string switchAtText = platform::env("LRT_VIEW_SWITCH_AT");
+    const long switchAt = switchAtText.empty() ? -1L : std::strtol(switchAtText.c_str(), nullptr, 10);
     int announcedFor = -1;
 
     const auto displaySettings = [&] {
@@ -345,6 +354,9 @@ Result<ViewStats> runViewer(const ViewOptions& options) {
         const uint32_t rw = std::max<uint32_t>(1, static_cast<uint32_t>(float(fbw) * renderScale));
         const uint32_t rh = std::max<uint32_t>(1, static_cast<uint32_t>(float(fbh) * renderScale));
 
+        if (switchAt >= 0 && static_cast<long>(frames) == switchAt) {
+            technique = technique == 0 ? 1 : 0;
+        }
         // The free camera, from the mouse the panels do not want.
         if (!io.WantCaptureMouse) {
             if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
