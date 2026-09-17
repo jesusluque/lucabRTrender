@@ -4074,3 +4074,57 @@ What the host does with 24:
 After it, `bundles openFXplayer built load in this host` loads openFXplayer's
 ABI 25 bundles, `aofx_sdk_manifest` is re-recorded against the copied
 headers, and the manifest's own message now names aopenfx as the reference.
+
+## Splats shadow meshes in the path tracer
+
+A relit cloud lit a floor it never darkened: the path tracer traces triangles,
+and a splat is not one. Its shadow rays now carry the transmittance of every
+cloud in the frame -- the same query the splat tracer has always had
+(`rt_shadow.slang`: a particle evaluated at its peak, `1 - alpha` multiplied
+in, a ring that collapses a proxy offered twice), asked at three places: a
+light's next event estimate, the same inside a medium, and an emitting
+triangle's.
+
+**The tables are packed into one buffer** (`rt_shadow_packed.slang`,
+`technique::SplatShadows`). The query wants four -- frames, colours, each
+instance's world-to-cloud rows, its bases -- and a kernel of its own can bind
+them; the path tracer cannot, because it sits at Metal's limit of 31 buffers.
+So `rtShadowPack` gathers them on the device into one `float4` buffer whose
+offsets travel in `PathParams`, and the two uint tables ride in float4 lanes
+(`asfloat` in, `asuint` out). Two slots were still one too many, so **the
+denoiser's guides became a link-constant variant too**: a frame that asks for
+albedo and shading normal compiles a kernel with them, one that does not gets
+the buffer back. With both asked for at once the guides win, and the engine
+says so once -- a denoised frame needs them, while a cloud that shadows
+nothing is a frame too bright in one place.
+
+The engine asks for the guides only when something wants them (`denoise`, or
+an albedo/shadingNormal AOV: `AovRequest::aux`), so the ordinary path traced
+frame has room for the cloud.
+
+**Measured** (`tests/technique/test_splat_shadows.cpp`):
+
+- **The packed tables answer what the separate ones answer**: 0 of 4 rays
+  differ, over a cloud of 20004 particles, with the first ray stopped almost
+  entirely (0.0000) so that agreement is not two ones agreeing.
+- **A cloud between a point light and a floor darkens it by what it lets
+  through**: under an isotropic particle's centre a shadow ray peaks with
+  power 0 and takes its opacity whole, so the frame with the cloud over the
+  frame without it reads **0.5000** where the particle's opacity is 0.5, and
+  **1.0000** at a pixel whose ray passes ten sigmas away. No pixel of 3185
+  came out brighter with the cloud than without.
+
+**What the dispatch cost to find.** `ComputeKernel::dispatch` takes threads
+and divides by the kernel's group size; the packing passed groups, which were
+divided again. A cloud of 741872 particles wants 3.7 million entries packed
+and got 14592 -- the frames, and not one colour -- so every shadow ray read
+opacity 0 and said the cloud was transparent, while the tests passed: a cloud
+of four particles needs nine entries, and one group is 256 threads. The test
+now packs twenty thousand particles, where the difference is a black floor
+rather than nothing at all.
+
+**Not done.** A cloud still does not shadow itself through this path (that is
+the splat tracer's own `--splat-shadows`, unchanged), a bounce ray meets no
+splats (only shadow rays do), and on a device that traces in a pipeline
+(CUDA) there are no splat shadows at all: the traversal would have to be an
+any hit program of its own, and the path tracer already carries two.

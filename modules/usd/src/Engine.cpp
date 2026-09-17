@@ -1067,6 +1067,9 @@ Result<void> Engine::render(const render::Projection& projection, const render::
                             render::RenderTargets& targets, Technique technique, bool settleStreams,
                             const pxr::TfTokenVector* renderTags, const AovRequest& aovRequest,
                             MeshVisibility visibility) {
+    // A frame builds the clouds' shadow proxies at most once, wherever it
+    // first needs them: for a mesh's shadow rays, or for a relit cloud's own.
+    shadowTracerReady_ = false;
     lastTargets_ = &targets;
     aovsValid_ = false;
     // A frame drawn since the shutter changed: this one draws the prims as
@@ -1489,6 +1492,37 @@ Result<void> Engine::render(const render::Projection& projection, const render::
         }
         // What a material needs wherever it is evaluated: shading always,
         // visibility only where a material cuts its samples away.
+        // Splats a mesh is shadowed by: the proxies of every cloud in the
+        // frame, and their tables packed into one buffer. Only path traced,
+        // only where the device traces inline, and only when the setting asks
+        // -- the same setting a cloud's own shadow answers to.
+        technique::SplatShadows* meshSplatShadows = nullptr;
+        if (pathTracing && !splats.empty() && splatShadows_.load() && device_->caps().rayQuery &&
+            device_->caps().accelerationStructure) {
+            if (!shadowTracer_.has_value()) {
+                render::RayTracerSettings rtSettings;
+                rtSettings.route = render::RayTracingRoute::Hardware;
+                auto made = render::GaussianRayTracer::create(*library_, rtSettings);
+                if (!made) return std::move(made).error();
+                shadowTracer_.emplace(std::move(*made));
+            }
+            if (!splatShadowScene_.has_value()) {
+                auto made = technique::SplatShadows::create(*library_);
+                if (!made) return std::move(made).error();
+                splatShadowScene_.emplace(std::move(*made));
+            }
+            auto prepared = shadowTracer_->prepare(projection, splats, settings.maxShDegree);
+            if (!prepared) return std::move(prepared).error();
+            shadowTracerReady_ = true;
+            {
+                gpu::CommandBatch packing(*device_);
+                LRT_TRY(splatShadowScene_->prepare(packing, shadowTracer_->shadowScene()));
+                LRT_TRY(packing.submit(true));
+            }
+            if (splatShadowScene_->valid()) {
+                meshSplatShadows = &*splatShadowScene_;
+            }
+        }
         technique::MaterialFrame frame;
         frame.programs = &*materialPrograms_;
         frame.scene = &*scene_;
@@ -1652,6 +1686,7 @@ Result<void> Engine::render(const render::Projection& projection, const render::
         // with it -- taking the pointer earlier left shading tracing against
         // a freed structure.
         frame.shadows = raysWanted ? rayTracingScene_->topLevel() : nullptr;
+        frame.splatShadows = meshSplatShadows;
         if (pathTracing) {
             if (!pathTracer_.has_value()) {
                 auto made = technique::PathTracer::create(*library_);
@@ -1722,8 +1757,13 @@ Result<void> Engine::render(const render::Projection& projection, const render::
                 pathState_ = now;
             }
             paths.seed = pathSeed_++ * 7919u;
-            LRT_TRY(pathTracer_->trace(batch, visibility_, projection, frame, paths, meshLayer_, &pathAux_));
-            pathAuxValid_ = true;
+            // The denoiser's guides only where something asks for them: they
+            // cost a buffer, and on Metal that buffer is the one a cloud's
+            // shadow tables want (technique::PathTracer says which wins).
+            const bool wantAux = denoise_.load() || aovRequest.aux;
+            LRT_TRY(pathTracer_->trace(batch, visibility_, projection, frame, paths, meshLayer_,
+                                       wantAux ? &pathAux_ : nullptr));
+            pathAuxValid_ = wantAux;
         } else {
             LRT_TRY(materialShading_->shade(batch, visibility_, projection, frame, meshLayer_));
         }
@@ -1867,8 +1907,10 @@ Result<void> Engine::render(const render::Projection& projection, const render::
             if (!made) return std::move(made).error();
             shadowTracer_.emplace(std::move(*made));
         }
-        auto prepared = shadowTracer_->prepare(projection, splats, settings.maxShDegree);
-        if (!prepared) return std::move(prepared).error();
+        if (!shadowTracerReady_) {
+            auto prepared = shadowTracer_->prepare(projection, splats, settings.maxShDegree);
+            if (!prepared) return std::move(prepared).error();
+        }
         const render::ShadowScene scene = shadowTracer_->shadowScene();
         splatLights.shadowTlas = scene.tlas;
         splatLights.shadowFrames = scene.frames;

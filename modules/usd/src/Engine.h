@@ -50,6 +50,7 @@
 #include "lrt/technique/MaterialShading.h"
 #include "lrt/technique/Denoiser.h"
 #include "lrt/technique/PathTracer.h"
+#include "lrt/technique/SplatShadows.h"
 #include "lrt/technique/EmissiveTable.h"
 #include "lrt/render/GaussianRayTracer.h"
 #include "lrt/render/PointRasterizer.h"
@@ -165,6 +166,10 @@ struct AovView {
 struct AovRequest {
     bool                     ids = false;       ///< primId, instanceId, elementId
     bool                     normals = false;   ///< Neye, normal
+    /// albedo, shadingNormal: the path tracer's guides, which cost it a
+    /// buffer -- and on Metal a buffer is what decides whether a cloud can
+    /// shadow a mesh in the same frame (technique::PathTracer).
+    bool                     aux = false;
     std::vector<std::string> primvars;          ///< "primvars:NAME" outputs, by NAME
     /// "lightGroup:NAME" outputs, by NAME: each light's direct contribution
     /// under its group (`lrt:lightGroup`). At most technique::kMaxLightGroups.
@@ -399,6 +404,10 @@ private:
     /// there is a structure an inline ray can trace (the frame's own tracer
     /// may be on the compute route, which has none).
     std::optional<render::GaussianRayTracer>  shadowTracer_;
+    /// The same proxies packed into one buffer, for the path tracer's shadow
+    /// rays (technique::SplatShadows), and whether this frame built them.
+    std::optional<technique::SplatShadows> splatShadowScene_;
+    bool                                   shadowTracerReady_ = false;
     std::atomic<uint32_t>                     pathSamples_{1};
     std::atomic<uint32_t>                     pathBounces_{1};
     std::atomic<uint32_t>                     motionBuckets_{4};

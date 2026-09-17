@@ -96,6 +96,36 @@ lrt aofx run tv.mediapro.aofx.invert in.exr out.exr
 - **Shaders** are compiled at run time for the device that opened. They are
   found through `LRT_SHADER_DIR` or `<exe>/../shaders`.
 
+## What it owes to Falcor
+
+[Falcor](https://github.com/NVIDIAGameWorks/Falcor), NVIDIA's real-time
+rendering research framework, is one of the two renderers this one was read
+out of before it was written. It sits under `ref/falcor` as reading material
+and is **never built, never linked and never shipped**: no header of its is
+included anywhere here, and nothing of it ends up in a binary. It is a
+reference the way a paper is.
+
+What it was read for, concretely:
+
+- **Loop subdivision.** `ref/falcor`'s `LoopSubdivide` was read for the Loop
+  stencils the GPU subdivider implements -- and only read; the implementation
+  here is a set of compute kernels checked against closed forms, not a port
+  (`docs/decisions.md`, M8, "the limit projection is `subdivLimit`").
+- **How a Slang renderer is laid out**: one shader source compiled for
+  whichever device the machine has, a render graph of techniques over a
+  visibility buffer that every route fills alike, and a reference renderer to
+  test the fast paths against. That shape is Falcor's, and it is why
+  `modules/technique` reads the way it does.
+
+Where this engine goes its own way is written down too: it refuses CPU
+arithmetic on scene data (no CPU reference renderer, no fallback, no test
+oracle -- the ground truth is a GPU kernel), its entities come from OpenUSD
+through a Hydra 2.0 render delegate rather than from a scene format of its
+own, its materials are MaterialX graphs compiled into Slang, and it carries
+Gaussian splats as a primitive beside triangles rather than as a demo.
+
+`ref/spire-engine` is kept for the same reason and on the same terms.
+
 ## Status
 
 Verified on an Apple M5 Pro (Metal). Not verified:

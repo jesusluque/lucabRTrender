@@ -1,6 +1,9 @@
 // Copyright (c) 2026 lucabRTrender contributors.
 #include "lrt/technique/PathTracer.h"
 
+#include "lrt/core/Log.h"
+#include "lrt/technique/SplatShadows.h"
+
 #include <algorithm>
 
 #include "lrt/gpu/CommandBatch.h"
@@ -43,13 +46,22 @@ struct PathParams {
     float cameraTime1;
     float shutterOpen;
     float shutterClose;
+    // Where the packed splat tables start, in float4 entries, and when a
+    // shadow ray through the cloud gives up. Here rather than in a constant
+    // buffer of their own: this kernel binds 31 buffers on Metal, which is
+    // all Metal gives, so a block of its own would not fit (kSplats).
+    uint splatFrames;
+    uint splatColours;
+    uint splatInstances;
+    uint splatIndices;
+    uint splatInstanceCount;
+    float splatCut;
 };
 
 Texture2D<uint4>               visibility;   // (instance + 1, triangle); row 0 on top
 RWStructuredBuffer<float4>     sum;          // paths added so far, a pixel
 RWStructuredBuffer<float4>     colour;       // their mean
 RWStructuredBuffer<float>      depth;
-RWStructuredBuffer<float4>     aux;          // written when path.writeAux: the albedo's plane, then the normal's
 RWStructuredBuffer<uint>       moments;      // the luminance's second moment as float bits, a pixel; then 1 once adaptive sampling stopped the pixel, a pixel
 
 static const float3 kPathLuminance = float3(0.2126, 0.7152, 0.0722);
@@ -301,6 +313,78 @@ bool pathOccluded(float3 p, float3 n, float3 wi, float distance, uint shadowCate
 }
 
 static const bool kTraces = false;
+)";
+
+/// Splats between a surface and a light.
+///
+/// The path tracer traces triangles; a splat cloud is not one, and until this
+/// a relit cloud lit a floor it never darkened. The query is the shadow
+/// query the splat tracer already has (rt_shadow.slang), over the cloud's
+/// tables packed into one buffer -- because this kernel is at Metal's limit
+/// of 31 buffers and the four the query wants would not fit
+/// (rt_shadow_packed.slang, technique::SplatShadows).
+///
+/// Only where the device has inline rays: a ray tracing pipeline would need
+/// the whole traversal as an any hit program of its own, and this one already
+/// carries two.
+const char* kSplats = R"(
+static const bool kSplatShadows = true;
+
+StructuredBuffer<float4>          splatPacked;
+uniform RaytracingAccelerationStructure splatScene;
+
+/// The offsets the packing kernel wrote the tables at, out of `path`.
+PackedShadow splatTables() {
+    PackedShadow where;
+    where.frames = path.splatFrames;
+    where.colours = path.splatColours;
+    where.instances = path.splatInstances;
+    where.indices = path.splatIndices;
+    where.instanceCount = path.splatInstanceCount;
+    return where;
+}
+
+/// What the cloud lets through between a surface and a light: one, where it
+/// stands in no light's way. Offset off the surface exactly as pathOccluded
+/// offsets, so the two answers are about the same segment.
+float splatVisibility(float3 p, float3 n, float3 wi, float distance) {
+    const float scale = max(1.0, length(p));
+    const float3 away = dot(n, wi) < 0.0 ? -n : n;
+    LrtRay ray;
+    ray.Origin = p + (away + wi) * (1.0e-3 * scale);
+    ray.Direction = wi;
+    ray.TMin = 1.0e-3 * scale;
+    ray.TMax = max(distance - ray.TMin, 0.0);
+    if (ray.TMax <= ray.TMin) {
+        return 1.0;
+    }
+    // Every particle between the two ends counts, however near or far.
+    return packedShadowTransmittance(splatPacked, splatTables(), splatScene, ray, path.splatCut, 0.0, 3.0e38);
+}
+)";
+
+const char* kNoSplats = R"(
+static const bool kSplatShadows = false;
+float splatVisibility(float3 p, float3 n, float3 wi, float distance) { return 1.0; }
+)";
+
+/// The denoiser's guides -- the first hit's albedo and shading normal -- are
+/// a buffer of their own, and a buffer is what this kernel has none of to
+/// spare on Metal: 31 is the limit and the frame that shadows meshes with a
+/// cloud is at it. So they are declared only in the kernel of a frame that
+/// asked for them, as the light groups and the volumes are.
+const char* kAux = R"(
+static const bool kAux = true;
+RWStructuredBuffer<float4> aux;   // the albedo's plane, then the normal's
+void writeAuxAt(uint at, uint pixels, float4 albedo, float4 normal) {
+    aux[at] = albedo;
+    aux[pixels + at] = normal;
+}
+)";
+
+const char* kNoAux = R"(
+static const bool kAux = false;
+void writeAuxAt(uint at, uint pixels, float4 albedo, float4 normal) {}
 )";
 
 /// The surface a hit lands on, its material evaluated, and the light it
@@ -921,6 +1005,12 @@ float3 gatherLight(Shaded sh, uint2 pixel, uint sample, uint bounce, uint mask, 
         transmittance = mediumTransmittanceAny(sh.inputs.positionWorld, ls.wi, 1.0e-3 * max(1.0, length(sh.inputs.positionWorld)),
                                                ls.distance, rng);
     }
+    if (kSplatShadows && (light.flags & kLightShadow) != 0) {
+        transmittance *= splatVisibility(sh.inputs.positionWorld, sh.inputs.normalWorld, ls.wi, ls.distance);
+        if (!(transmittance > 0.0)) {
+            return float3(0.0);
+        }
+    }
     const float density = ls.pdf * choice.probability * (1.0 - share);
     // Weighed against the material's strategy by the power heuristic where
     // that strategy reaches this light too: at a vertex the path leaves by
@@ -980,6 +1070,13 @@ float3 gatherLightMedium(float3 p, float3 wo, float g, uint2 pixel, uint sample,
     if (f <= 0.0) {
         return float3(0.0);
     }
+    float splatThrough = 1.0;
+    if (kSplatShadows && (light.flags & kLightShadow) != 0) {
+        splatThrough = splatVisibility(p, ls.wi, ls.wi, ls.distance);
+        if (!(splatThrough > 0.0)) {
+            return float3(0.0);
+        }
+    }
     if ((light.flags & kLightShadow) != 0 && pathOccluded(p, ls.wi, ls.wi, ls.distance, light.shadowCategory, mask)) {
         return float3(0.0);
     }
@@ -988,7 +1085,7 @@ float3 gatherLightMedium(float3 p, float3 wo, float g, uint2 pixel, uint sample,
         uint rng = mediumSeed(pixel, sample, bounce, 25u);
         transmittance = mediumTransmittanceAny(p, ls.wi, 1.0e-4 * max(1.0, length(p)), ls.distance, rng);
     }
-    return f * ls.radiance * transmittance / (ls.pdf * choice.probability);
+    return f * ls.radiance * transmittance * splatThrough / (ls.pdf * choice.probability);
 }
 
 void tracePathsAt(uint2 group, uint index) {
@@ -1018,9 +1115,8 @@ void tracePathsAt(uint2 group, uint index) {
     first.depth = 0.0;
     bool firstShaded = false;
     bool auxWritten = false;
-    if (path.writeAux != 0) {
-        aux[at] = float4(0.0);
-        aux[pixels + at] = float4(0.0);
+    if (kAux && path.writeAux != 0) {
+        writeAuxAt(at, pixels, float4(0.0), float4(0.0));
     }
     float3 total = float3(0.0);
     float  alpha = 0.0;
@@ -1126,9 +1222,9 @@ void tracePathsAt(uint2 group, uint index) {
                 lightStep = false;
             } else {
                 cur = shaded;
-                if (bounce == 0 && path.writeAux != 0 && !auxWritten) {
-                    aux[at] = float4(stackAlbedo(cur.stack, cur.toEye), 1.0);
-                    aux[pixels + at] = float4(cur.inputs.normalWorld, 1.0);
+                if (kAux && bounce == 0 && path.writeAux != 0 && !auxWritten) {
+                    writeAuxAt(at, pixels, float4(stackAlbedo(cur.stack, cur.toEye), 1.0),
+                               float4(cur.inputs.normalWorld, 1.0));
                     auxWritten = true;
                 }
                 if (!vertexSeen) {
@@ -1167,7 +1263,14 @@ void tracePathsAt(uint2 group, uint index) {
                                 const float other = stackPdf(cur.stack, cur.toEye, lp.wi);
                                 weight = lp.weighPdf * lp.weighPdf / (lp.weighPdf * lp.weighPdf + other * other);
                             }
-                            lightScale = throughput * f * weight / lp.pdf;
+                            const float throughSplats =
+                                kSplatShadows ? splatVisibility(cur.inputs.positionWorld,
+                                                                cur.inputs.normalWorld, lp.wi, lp.distance)
+                                              : 1.0;
+                            if (!(throughSplats > 0.0)) {
+                                continue;
+                            }
+                            lightScale = throughput * f * weight * throughSplats / lp.pdf;
                             lightPoint = lp.found;
                             lightStep = true;
                             continue;
@@ -1385,26 +1488,36 @@ Result<PathTracer> PathTracer::create(gpu::ShaderLibrary& library) {
 }
 
 Result<void> PathTracer::setPrograms(const MaterialPrograms& programs) {
-    return setPrograms(programs, groups_, volumes_);
+    return setPrograms(programs, groups_, volumes_, splats_, aux_);
 }
 
-Result<void> PathTracer::setPrograms(const MaterialPrograms& programs, bool groups, bool volumes) {
-    if (programs.module() == module_ && groups == groups_ && volumes == volumes_ &&
-        (kernel_.has_value() || rayKernel_.has_value())) {
+Result<void> PathTracer::setPrograms(const MaterialPrograms& programs, bool groups, bool volumes, bool splats,
+                                    bool aux) {
+    if (programs.module() == module_ && groups == groups_ && volumes == volumes_ && splats == splats_ &&
+        aux == aux_ && (kernel_.has_value() || rayKernel_.has_value())) {
         return ok();
     }
+    splats_ = splats;
+    aux_ = aux;
     const bool traces = device_->caps().rayQuery && device_->caps().accelerationStructure;
     const std::string name = programs.module() + (traces ? "_path_traced" : "_path_direct") +
-                             (groups ? "_groups" : "") + (volumes ? "_volumes" : "");
+                             (groups ? "_groups" : "") + (volumes ? "_volumes" : "") +
+                             (traces && splats ? "_splatshadows" : "") + (aux_ ? "_aux" : "");
     // Three ways to trace, and the module carries exactly one: inline rays in
     // a compute kernel, a ray tracing pipeline where there are no inline rays
     // (CUDA, through OptiX), or no rays at all -- direct light alone, which
     // the tracer says of itself.
     const bool pipeline = !traces && device_->caps().rayTracing && device_->caps().accelerationStructure;
+    // Splats shadow meshes only where the rays are inline: the pipeline route
+    // would need the traversal again as an any hit program, and it carries two.
+    const bool withSplats = traces && splats;
+    const bool withAux = aux_;
     const std::string source = "import " + programs.module() + ";\n" +
-                               (volumes ? std::string("import lrt.volume.medium;\n") : std::string()) + kPrelude +
+                               (volumes ? std::string("import lrt.volume.medium;\n") : std::string()) +
+                               (withSplats ? std::string("import lrt.rt.rt_shadow_packed;\n") : std::string()) + kPrelude +
                                (groups ? kGroups : kNoGroups) + (volumes ? kVolumes : kNoVolumes) +
-                               (traces ? kRays : pipeline ? kRaysPipeline : kNoRays) + kBody +
+                               (traces ? kRays : pipeline ? kRaysPipeline : kNoRays) +
+                               (withSplats ? kSplats : kNoSplats) + (withAux ? kAux : kNoAux) + kBody +
                                (pipeline ? kEntryRays : kEntryCompute);
     std::vector<std::string> entries{pipeline ? "tracePathsGen" : "tracePaths", "pathDecide"};
     if (pipeline) {
@@ -1448,8 +1561,25 @@ Result<void> PathTracer::trace(gpu::CommandBatch& batch, const VisibilityTargets
     }
     const bool groups = frame.groups.count > 0;
     const bool volumes = frame.volumes != nullptr && frame.volumeCount > 0 && frame.volumes->valid();
-    if ((groups != groups_ || volumes != volumes_) && frame.programs != nullptr) {
-        LRT_TRY(setPrograms(*frame.programs, groups, volumes));
+    // A cloud that shadows meshes is another kernel: compiled when one
+    // arrives, and the kernel without it again when the frame has none.
+    const bool wantAux = aux != nullptr;
+    // The cloud's tables and the denoiser's guides are a buffer each, and on
+    // Metal this kernel has one to spare: with both asked for, the guides win
+    // -- the denoiser cannot work without them, and a cloud that shadows
+    // nothing is a frame that is merely too bright in one place. Said once.
+    bool splats = frame.splatShadows != nullptr && frame.splatShadows->valid();
+    if (splats && wantAux && device_->backend() == gpu::Backend::Metal) {
+        if (!saidNoRoomForSplats_) {
+            saidNoRoomForSplats_ = true;
+            lrt::log::warn("path tracer: the denoiser's guides and a cloud's shadows want the same buffer, "
+                      "and Metal binds 31: the cloud casts no shadow on meshes this frame");
+        }
+        splats = false;
+    }
+    if ((groups != groups_ || volumes != volumes_ || splats != splats_ || wantAux != aux_) &&
+        frame.programs != nullptr) {
+        LRT_TRY(setPrograms(*frame.programs, groups, volumes, splats, wantAux));
     }
     const uint32_t groupCount = std::min(frame.groups.count, kMaxLightGroups);
     const uint64_t pixels = uint64_t{targets.width} * targets.height;
@@ -1530,13 +1660,27 @@ Result<void> PathTracer::trace(gpu::CommandBatch& batch, const VisibilityTargets
         if (frame.shadows != nullptr) {
             cursor["scene"].setBinding(frame.shadows);
         }
+        if (splats_ && frame.splatShadows != nullptr && frame.splatShadows->valid()) {
+            const PackedShadowLayout& where = frame.splatShadows->layout();
+            cursor["splatPacked"].setBinding(frame.splatShadows->packed().rhi());
+            cursor["splatScene"].setBinding(frame.splatShadows->topLevel());
+            cursor["path"]["splatFrames"].setData(where.frames);
+            cursor["path"]["splatColours"].setData(where.colours);
+            cursor["path"]["splatInstances"].setData(where.instances);
+            cursor["path"]["splatIndices"].setData(where.indices);
+            cursor["path"]["splatInstanceCount"].setData(where.instanceCount);
+            cursor["path"]["splatCut"].setData(frame.splatShadowCut);
+        }
         cursor["visibility"].setBinding((*ids).get());
         cursor["sum"].setBinding(sum_.rhi());
         cursor["colour"].setBinding(out.colour.rhi());
         cursor["depth"].setBinding(out.depth.rhi());
         // A buffer has to be bound either way; without aux the colour stands in
         // and the kernel never writes it.
-        cursor["aux"].setBinding(aux != nullptr ? aux->planes.rhi() : out.colour.rhi());
+        // Only the kernel of a frame that asked for the guides declares them.
+        if (const rhi::ShaderCursor guides = cursor["aux"]; guides.isValid()) {
+            guides.setBinding(aux != nullptr ? aux->planes.rhi() : out.colour.rhi());
+        }
         cursor["path"]["writeAux"].setData(uint32_t{aux != nullptr ? 1u : 0u});
         cursor["moments"].setBinding(moments_.rhi());
         if (groups) {

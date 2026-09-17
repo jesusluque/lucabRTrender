@@ -29,6 +29,8 @@ class ShaderLibrary;
 
 namespace lrt::technique {
 
+class SplatShadows;
+
 /// A material row, as shaders/lrt/technique/material_lookup.slang reads it.
 /// `function` 0 is the fallback (displayColor); k is the k-th module given to
 /// MaterialPrograms::setModules, counted from 1.
@@ -90,6 +92,14 @@ struct MaterialFrame {
     const light::LightTable*      lights = nullptr;
     /// What a shadow ray traces against, when the device traces at all.
     rhi::IAccelerationStructure*  shadows = nullptr;
+    /// Splat clouds a shadow ray is dimmed by: their tables packed into one
+    /// buffer (technique::SplatShadows). Null, or a scene with no instances,
+    /// and a cloud casts no shadow on a mesh -- which is what every frame did
+    /// before. Only where the device has inline rays; the path tracer says so.
+    const SplatShadows*           splatShadows = nullptr;
+    /// A splat shadow ray stops once this little light is left: the cloud's
+    /// far side cannot brighten what its near side has already blocked.
+    float                         splatShadowCut = 0.01F;
     /// Samples per light. One is the interactive choice; a test that wants
     /// an area light's irradiance without noise asks for more.
     uint32_t                      samples = 1;
