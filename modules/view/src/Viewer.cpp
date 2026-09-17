@@ -304,6 +304,14 @@ Result<ViewStats> runViewer(const ViewOptions& options) {
     stage.setPathBounces(static_cast<uint32_t>(pathBounces));
     stage.setPathTotal(static_cast<uint32_t>(pathTotal));
     stage.setDenoise(denoise);
+    const bool stageLit = stage.hasLights();
+    bool defaultLights = !stageLit && options.defaultLights;
+    LRT_TRY(stage.setDefaultLights(defaultLights));
+    // The first frame of a technique compiles its kernels for every material
+    // on the stage -- minutes, the first time, for a stage like the chess set
+    // -- and the window cannot draw while it does. One frame says so first.
+    std::array<bool, kTechniques.size()> techniqueDrawn{};
+    int announcedFor = -1;
 
     const auto displaySettings = [&] {
         technique::DisplaySettings settings;
@@ -417,6 +425,9 @@ Result<ViewStats> runViewer(const ViewOptions& options) {
                 }
             }
             combo("Technique", technique, kTechniques);
+            if (!stageLit && ImGui::Checkbox("Default lights (the stage has none)", &defaultLights)) {
+                LRT_TRY(stage.setDefaultLights(defaultLights));
+            }
             if (kTechniques[static_cast<size_t>(technique)].value == std::string_view("rt")) {
                 // The path tracer's own settings: the delegate's defaults are
                 // one bounce, which lights a room little more than the raster.
@@ -530,7 +541,22 @@ Result<ViewStats> runViewer(const ViewOptions& options) {
         const auto drawStart = std::chrono::steady_clock::now();
         const std::string techniqueName = kTechniques[static_cast<size_t>(technique)].value;
         Result<void> drawn = ok();
-        if (cameraIndex == 0) {
+        const size_t techniqueAt = static_cast<size_t>(technique);
+        const bool announce = !techniqueDrawn[techniqueAt] && frames > 0 && announcedFor != technique;
+        if (announce) {
+            // Shown over the last frame; the frame that compiles is the next.
+            announcedFor = technique;
+            const ImGuiViewport* viewport = ImGui::GetMainViewport();
+            ImGui::SetNextWindowPos(ImVec2(viewport->Size.x * 0.5F, viewport->Size.y * 0.5F), ImGuiCond_Always,
+                                    ImVec2(0.5F, 0.5F));
+            ImGui::Begin("##preparing", nullptr,
+                         ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
+                             ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing);
+            ImGui::Text("Preparing %s: its kernels compile for this stage's materials.",
+                        kTechniques[techniqueAt].label);
+            ImGui::Text("The window waits until they have; next time they come from the cache.");
+            ImGui::End();
+        } else if (cameraIndex == 0) {
             drawn = stage.draw(cameraOf(orbit, up, focal), time, rw, rh, techniqueName);
             if (drawn && !framed) {
                 auto bounds = stage.bounds();
@@ -546,6 +572,9 @@ Result<ViewStats> runViewer(const ViewOptions& options) {
         drawMs.push_back(
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - drawStart).count());
         status = drawn ? std::string() : drawn.error().toString();
+        if (drawn && !announce) {
+            techniqueDrawn[techniqueAt] = true;
+        }
         if (drawn) {
             if (distinctTimes == 0 || time != drawnTime) {
                 ++distinctTimes;

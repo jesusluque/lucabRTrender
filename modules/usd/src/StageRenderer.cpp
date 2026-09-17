@@ -28,6 +28,11 @@
 #include <pxr/usd/usdGeom/camera.h>
 #include <pxr/usd/usdGeom/metrics.h>
 #include <pxr/usd/usdGeom/tokens.h>
+#include <pxr/usd/usdGeom/xformable.h>
+#include <pxr/usd/usd/editContext.h>
+#include <pxr/usd/usdLux/distantLight.h>
+#include <pxr/usd/usdLux/domeLight.h>
+#include <pxr/usd/usdLux/lightAPI.h>
 #include <pxr/usdImaging/usdImaging/sceneIndices.h>
 
 #include <pxr/imaging/hd/sceneIndexPluginRegistry.h>
@@ -451,6 +456,56 @@ Result<void> StageRenderer::setMeshVisibility(const std::string& route) {
         return Error::make(ErrorCode::InvalidArgument, "mesh visibility '{}': automatic, raster, rays or bvh", route);
     }
     impl_->delegate->SetRenderSetting(TfToken("lrt:visibility"), VtValue(TfToken(route)));
+    return ok();
+}
+
+namespace {
+const SdfPath& defaultLightsPath() {
+    static const SdfPath path("/lrtDefaultLights");
+    return path;
+}
+}   // namespace
+
+bool StageRenderer::hasLights() const {
+    for (const UsdPrim& prim : impl_->stage->Traverse()) {
+        if (prim.GetPath().HasPrefix(defaultLightsPath())) {
+            continue;
+        }
+        if (prim.HasAPI<UsdLuxLightAPI>()) {
+            return true;
+        }
+    }
+    return false;
+}
+
+Result<void> StageRenderer::setDefaultLights(bool on) {
+    Impl& impl = *impl_;
+    const UsdEditContext session(impl.stage, impl.stage->GetSessionLayer());
+    if (!on) {
+        if (impl.stage->GetPrimAtPath(defaultLightsPath())) {
+            impl.stage->RemovePrim(defaultLightsPath());
+        }
+        return ok();
+    }
+    if (impl.stage->GetPrimAtPath(defaultLightsPath())) {
+        return ok();
+    }
+    impl.stage->DefinePrim(defaultLightsPath(), TfToken("Scope"));
+    UsdLuxDomeLight sky = UsdLuxDomeLight::Define(impl.stage, defaultLightsPath().AppendChild(TfToken("Sky")));
+    if (!sky) {
+        return Error(ErrorCode::InternalError, "cannot define the default sky in the session layer");
+    }
+    sky.CreateIntensityAttr(VtValue(0.6F));
+    UsdLuxDistantLight sun = UsdLuxDistantLight::Define(impl.stage, defaultLightsPath().AppendChild(TfToken("Sun")));
+    if (!sun) {
+        return Error(ErrorCode::InternalError, "cannot define the default sun in the session layer");
+    }
+    sun.CreateIntensityAttr(VtValue(2.5F));
+    sun.CreateAngleAttr(VtValue(2.0F));
+    // A distant light shines down its own -Z: tilted from overhead toward
+    // the viewer's side, about whichever axis is up.
+    const bool zUp = UsdGeomGetStageUpAxis(impl.stage) == UsdGeomTokens->z;
+    UsdGeomXformable(sun.GetPrim()).AddRotateXYZOp().Set(zUp ? GfVec3f(35.0F, 0.0F, 30.0F) : GfVec3f(-55.0F, 30.0F, 0.0F));
     return ok();
 }
 

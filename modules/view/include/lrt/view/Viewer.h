@@ -31,6 +31,11 @@ struct ViewOptions {
     uint32_t              pathBounces = 4;          ///< bounces after the first hit
     uint32_t              pathTotal = 64;           ///< paths a pixel it counts as converged at
     bool                  denoise = false;          ///< denoise once converged
+    /// A sky and a sun in the session layer when the stage authors no lights
+    /// (StageRenderer::setDefaultLights). Without them a stage like the chess
+    /// set or Kitchen_set is lit from the eye, and the path tracer has
+    /// nothing to show that the raster does not.
+    bool                  defaultLights = true;
     /// Extended dynamic range: a float surface in linear P3, ACES 2.0 with
     /// the screen's peak as its peak. On a standard display the same as off.
     bool                  edr = false;

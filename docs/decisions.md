@@ -3927,5 +3927,27 @@ defaults, one path a pixel a frame and one bounce, which lights a room little
 more than the raster does. The View panel now shows, under Path traced,
 paths per frame, bounces (4 by default in the window), denoise, and how many
 paths a pixel the frame holds; `lrt view` takes `--path-samples`,
-`--path-bounces`, `--path-total` and `--denoise` as `lrt stage` does. What
-the report saw beyond that is not reproduced yet.
+`--path-bounces`, `--path-total` and `--denoise` as `lrt stage` does.
+
+The report's screenshots then said the rest, on the chess set:
+
+- **The window froze on the switch.** The first frame of a technique compiles
+  its kernels for every material on the stage -- the chess set's fifteen --
+  on the thread that draws the window. The first time that is long; with the
+  shader cache warm, opening the chess set path traced takes 6 s in all. The
+  window now puts up a notice over the last frame first ("Preparing Path
+  traced: its kernels compile for this stage's materials"), and draws the
+  compiling frame after it. The wait is not removed: compiling off the
+  drawing thread would mean a second caller on the device.
+- **Path traced still looked like the raster.** The chess set authors no
+  lights, like Kitchen_set, so both were lit from the eye.
+  `StageRenderer::setDefaultLights` puts a sky dome (0.6) and a sun (2.5,
+  2 degrees, tilted from overhead) in the stage's **session layer**, at
+  `/lrtDefaultLights`: the file is not touched, and the lights reach the
+  engine through Hydra as authored ones do. `hasLights` does not count them.
+  The viewer turns them on for a stage with no lights, with a checkbox to
+  turn them off, and `--no-default-lights`. A test on a floor and a wall with
+  no lights: lit against unlit relMse 0.366 raster and 0.504 rt, and removed
+  again the frame is the unlit one to 0.00e+00 on both.
+- **A frame took 1190 ms** at 1920x1018 path traced with 4 bounces; Render
+  scale is what trades that for interactivity.

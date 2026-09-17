@@ -5716,3 +5716,62 @@ TEST_CASE("a renderer told another technique between frames draws that technique
     REQUIRE((*renderer)->draw(camera, 0.0, w, h, "raster"));
     CHECK((*renderer)->pathConverged());
 }
+
+// A stage that authors no lights, as the chess set and Kitchen_set do: path
+// traced, it is lit from the eye like the raster and has nothing to bounce.
+// The viewer's default lights are a sky and a sun in the session layer. They
+// must reach the frame (it changes), leave the file alone (the stage still
+// authors none), and go away again exactly (the frame is the unlit one).
+TEST_CASE("default lights in the session layer light a stage that has none, and leave it as it was",
+          "[usd][gpu][mesh][lights]") {
+    LRT_REQUIRE_GPU(gpu);
+    const gpu::Caps& caps = gpu->device->caps();
+    if (!caps.rasterization || !caps.accelerationStructure || !(caps.rayQuery || caps.rayTracing)) {
+        SKIP("needs rasterisation and rays");
+    }
+    const uint32_t w = 64, h = 48;
+    const fs::path path = scratch("default_lights.usda");
+    {
+        std::ofstream out(path);
+        out << "#usda 1.0\n(\n    upAxis = \"Y\"\n)\n"
+               "def Mesh \"Floor\"\n{\n"
+               "    int[] faceVertexCounts = [4]\n    int[] faceVertexIndices = [0, 1, 2, 3]\n"
+               "    point3f[] points = [(-4, -1, 2), (4, -1, 2), (4, -1, -6), (-4, -1, -6)]\n"
+               "    uniform token subdivisionScheme = \"none\"\n}\n"
+               "def Mesh \"Wall\"\n{\n"
+               "    int[] faceVertexCounts = [4]\n    int[] faceVertexIndices = [0, 1, 2, 3]\n"
+               "    point3f[] points = [(-4, -1, -4), (4, -1, -4), (4, 4, -4), (-4, 4, -4)]\n"
+               "    uniform token subdivisionScheme = \"none\"\n}\n";
+    }
+    render::Camera camera = render::Camera::lookingAt({0.0, 0.5, 2.0}, {0.0, 0.0, -3.0});
+    camera.lens.focal = 30.0;
+    gpu::BufferDesc desc;
+    desc.bytes = uint64_t{w} * h * 16;
+    desc.elementBytes = 16;
+    auto renderer = usd::StageRenderer::open(path);
+    if (!renderer) FAIL(renderer.error().toString());
+    const auto frame = [&](const char* technique) -> gpu::Buffer {
+        auto image = (*renderer)->render(camera, 0.0, w, h, technique);
+        if (!image) FAIL(image.error().toString());
+        auto made = gpu::Buffer::create(*gpu->device, desc, image->rgba.data());
+        if (!made) FAIL(made.error().toString());
+        return std::move(*made);
+    };
+    CHECK_FALSE((*renderer)->hasLights());
+    for (const char* technique : {"raster", "rt"}) {
+        const gpu::Buffer unlit = frame(technique);
+        REQUIRE((*renderer)->setDefaultLights(true));
+        CHECK_FALSE((*renderer)->hasLights());   // the session's lights are not the stage's
+        const gpu::Buffer lit = frame(technique);
+        REQUIRE((*renderer)->setDefaultLights(false));
+        const gpu::Buffer again = frame(technique);
+        auto changed = render::compareHdr(*gpu->library, lit, unlit, w, h);
+        auto restored = render::compareHdr(*gpu->library, again, unlit, w, h);
+        REQUIRE(changed);
+        REQUIRE(restored);
+        std::printf("  %s: lit against unlit relMse %.3e; lights removed against unlit, worst %.2e\n", technique,
+                    changed->relMse, restored->maxRelative);
+        CHECK(changed->relMse > 1e-2);
+        CHECK(restored->maxRelative < 1e-4);
+    }
+}

@@ -26,6 +26,8 @@ void addView(CLI::App& app) {
     cmd->add_option("--path-bounces", options->pathBounces, "rt: bounces after the first hit");
     cmd->add_option("--path-total", options->pathTotal, "rt: paths a pixel at which the frame counts as converged (and is denoised)");
     cmd->add_flag("--denoise", options->denoise, "rt: denoise once converged (OIDN)");
+    cmd->add_flag("!--no-default-lights", options->defaultLights,
+                  "a stage with no lights of its own stays unlit, rather than getting a sky and a sun");
     cmd->add_flag("--edr", options->edr, "extended dynamic range: a float surface and ACES 2.0 up to the screen's peak");
     cmd->add_option("--ocio-config", options->ocioConfig, "an OpenColorIO config (default with --ocio-display/--ocio-view: ocio://studio-config-latest)");
     cmd->add_option("--ocio-display", options->ocioDisplay, "the OCIO display (default: the config's)");

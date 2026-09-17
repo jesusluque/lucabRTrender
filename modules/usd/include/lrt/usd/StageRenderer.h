@@ -111,6 +111,15 @@ public:
     /// "raster", "rays" or "bvh". The delegate's `lrt:visibility` setting.
     [[nodiscard]] Result<void> setMeshVisibility(const std::string& route);
 
+    /// Whether the stage authors a UsdLux light of its own.
+    [[nodiscard]] bool hasLights() const;
+    /// A sky dome and a sun in the stage's session layer, or not. For a stage
+    /// that authors no lights: without them the path tracer lights the first
+    /// hit from the eye, as the raster does, and has nothing to bounce. The
+    /// file is not touched; the lights live at `/lrtDefaultLights` and reach
+    /// the renderer through Hydra as authored ones do.
+    [[nodiscard]] Result<void> setDefaultLights(bool on);
+
     /// Samples per light per pixel: one for an interactive frame, more where
     /// an area light's noise would be read as error.
     void setLightSamples(uint32_t samples);
