@@ -5,12 +5,15 @@
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
+#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 
 #include "aofx/Effect.h"
 #include "lrt/aofx/EffectRegistry.h"
 #include "lrt/aofx/EffectRender.h"
+#include "lrt/aofx/EffectRunner.h"
+#include "lrt/core/Platform.h"
 #include "lrt/gpu_host/Context.h"
 
 namespace fs = std::filesystem;
@@ -170,4 +173,99 @@ TEST_CASE("bundles openFXplayer built load in this host", "[aofx][compat]") {
     }
     CHECK(loaded > 0);
     CHECK(registry.find("tv.mediapro.aofx.invert") != nullptr);
+}
+
+// ABI 24: an effect's pages bound where they are. On a device that reads host
+// memory in place the borrowed buffer *is* the pages -- a change to them after
+// the borrow is what the device reads -- while a kept buffer is a copy taken
+// at the call. Numbers the test wrote, read back: bookkeeping, not a picture.
+TEST_CASE("a borrowed buffer is the effect's pages in place, and a kept one is a copy", "[aofx][abi24]") {
+    gpu_host::Context* gpu = context();
+    if (gpu == nullptr || gpu->compute() == nullptr) {
+        SKIP("no gpe device");
+    }
+    const uint64_t bytes = platform::pageSize();
+    REQUIRE(bytes % 16 == 0);
+    void* pages = platform::mapPages(bytes);
+    REQUIRE(pages != nullptr);
+    auto* words = static_cast<uint32_t*>(pages);
+    for (uint64_t i = 0; i < bytes / 4; ++i) {
+        words[i] = static_cast<uint32_t>(i * 7 + 3);
+    }
+    bool borrowed = false;
+    uint32_t borrowedBefore = 0, borrowedAfter = 0, keptAfter = 0;
+    bool sameBuffer = false, rebound = false, otherPagesRefused = false;
+    REQUIRE(gpu->run([&] {
+        aofx_host::EffectRunner runner(*gpu);
+        const aofx::Buffer b = runner.borrow("test.borrow", pages, bytes);
+        borrowed = b.isValid();
+        if (!borrowed) {
+            return;
+        }
+        const aofx::Buffer k = runner.keep("test.keep", pages, bytes);
+        (void)runner.read(b, &borrowedBefore, sizeof(borrowedBefore));
+        words[0] = 0xB0770u;
+        (void)runner.read(b, &borrowedAfter, sizeof(borrowedAfter));
+        (void)runner.read(k, &keptAfter, sizeof(keptAfter));
+        sameBuffer = runner.borrow("test.borrow", pages, bytes).device == b.device;
+        // Pages that are not page-aligned cannot be bound in place.
+        otherPagesRefused = !runner.borrow("test.borrow.odd", static_cast<const char*>(pages) + 16, bytes - 16).isValid();
+        // The same key over other pages is a new binding, not the old one.
+        void* more = platform::mapPages(bytes);
+        rebound = more != nullptr && runner.borrow("test.borrow", more, bytes).isValid();
+        runner.drop("test.borrow");
+        runner.drop("test.keep");
+        platform::unmapPages(more, bytes);
+    }));
+    platform::unmapPages(pages, bytes);
+    if (!borrowed) {
+        SKIP("this device does not read host memory in place: borrow answers invalid, and keep is the path");
+    }
+    std::printf("  borrowed read %u, then %#x after the pages changed; kept read %u\n", borrowedBefore,
+                borrowedAfter, keptAfter);
+    CHECK(borrowedBefore == 3u);
+    CHECK(borrowedAfter == 0xB0770u);
+    CHECK(keptAfter == 3u);
+    CHECK(sameBuffer);
+    CHECK(otherPagesRefused);
+    CHECK(rebound);
+}
+
+// ABI 24: what the host fills for an effect -- the project's format, the
+// output's bounds when the job names none -- and the effect's own reason for
+// failing, carried into the error instead of "did not render".
+TEST_CASE("an effect is told the project's format and its complaint reaches the caller", "[aofx][abi24]") {
+    gpu_host::Context* gpu = context();
+    if (gpu == nullptr || gpu->compute() == nullptr) {
+        SKIP("no gpe device");
+    }
+    aofx_host::EffectRegistry registry;
+    registry.addSearchPath(LRT_AOFX_TEST_RUN_BUNDLES);
+    registry.scan(gpu);
+    aofx::Effect* reporter = registry.find("tv.mediapro.aofx.test.reporter");
+    REQUIRE(reporter != nullptr);
+
+    aofx_host::EffectJob job;
+    job.bounds = {0, 0, 64, 36};
+    job.instance = "reporter.format";
+    job.projectWidth = 1920;
+    job.projectHeight = 1080;
+    REQUIRE(aofx_host::renderEffect(*gpu, *reporter, job));
+    auto state = aofx_host::EffectRunner::publishedState();
+    CHECK(state[job.instance]["projectWidth"] == 1920.0);
+    CHECK(state[job.instance]["projectHeight"] == 1080.0);
+
+    job.instance = "reporter.bounds";
+    job.projectWidth = 0;
+    job.projectHeight = 0;
+    REQUIRE(aofx_host::renderEffect(*gpu, *reporter, job));
+    state = aofx_host::EffectRunner::publishedState();
+    CHECK(state[job.instance]["projectWidth"] == 64.0);
+    CHECK(state[job.instance]["projectHeight"] == 36.0);
+
+    job.params.push_back(aofx::ParamValue{"fail", {1.0}, {}});
+    auto failed = aofx_host::renderEffect(*gpu, *reporter, job);
+    REQUIRE_FALSE(failed);
+    std::printf("  %s\n", failed.error().toString().c_str());
+    CHECK(failed.error().toString().find("the reporter was told to fail") != std::string::npos);
 }

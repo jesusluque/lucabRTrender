@@ -55,8 +55,10 @@ cmake --build build/macos-arm64-debug --target lrt_render_tests   # one test bin
 - **Submodules.** `third_party/gpe` is on branch `lrt-fixes` and genlock on
   `main`. gpe changes are committed in the submodule.
 - **aofx compatibility is mandatory.** Its SDK and host change only
-  additively and only following openFXplayer's ABI. `aofx_sdk_manifest` fails
-  on any header change, and `lrt_aofx_tests` must stay green.
+  additively and only following the ABI in its own repository,
+  github.com/jesusluque/aopenfx (`sdk/include/aofx`, copied verbatim), so
+  openFXplayer's bundles load unchanged. `aofx_sdk_manifest` fails on any
+  header change, and `lrt_aofx_tests` must stay green.
 - **One Slang, one slang-rhi, one TBB** in the process. `single_tbb` checks
   the TBB count.
 - **Toolchain.** OpenUSD with MaterialX/OpenVDB is built by
@@ -88,7 +90,7 @@ the ones above it.
 | technique | how a frame is drawn: `VisibilityRaster` / `VisibilityTrace` / `VisibilityBvh` (same ids), `HeadlightShading`, `AovShading`, `Denoiser` (OIDN on the engine's own queue: Metal, CUDA, and Vulkan through CUDA with imported memory), `DisplayTransform` (view transforms, and OpenColorIO compiled into a kernel) |
 | lod | `LodBuilder`, `CutSelector`; `Lrtc.h` for the `.lrtc` reader/writer and `StreamingPool` |
 | usd | `Engine`, `StageRenderer`, `Export`; the `hdLrt` plugin; codeless schemas in `modules/usd/schemas` |
-| aofx | openFXplayer's plugin SDK (ABI 23) and host |
+| aofx | the AOFX plugin SDK (ABI 25, from aopenfx) and host |
 | mcp | the engine as an MCP server: JSON-RPC 2.0 (`Server`), the tools over a warm stage (`Tools.cpp`); `apps/lrt-mcp` is the stdio transport |
 | view | `lrt view`: GLFW `Window`, `ImGuiRenderer` (Dear ImGui on the engine's device), `runViewer` |
 

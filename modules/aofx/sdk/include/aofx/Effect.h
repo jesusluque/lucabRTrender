@@ -1,4 +1,4 @@
-// Copyright (c) 2026 openFXplayer contributors.
+// Copyright (c) 2026 aopenfx contributors.
 //
 // The interface an effect implements, and the only way it reaches the GPU.
 //
@@ -124,15 +124,8 @@ public:
     /// Runs `kernel` over `buffers`, with `uniforms` copied into the launch.
     ///
     /// The buffers are bound in the order given, and that order is the contract
-    /// between this call and the kernel's declarations.
-    ///
-    /// Checked where it can be. A kernel compiled with this SDK's
-    /// `aofx_add_kernel` carries its own reflection (gpe's kernel trailer), and
-    /// the host refuses a run whose buffer count or uniform size differs from
-    /// what the kernel declares -- returning false, with the reason in the
-    /// host's complaint. A kernel built before the trailer existed is not
-    /// checked, and the old rule stands: get it wrong and it reads the wrong
-    /// picture.
+    /// between this call and the kernel's declarations. Nothing checks it,
+    /// because nothing can: get it wrong and the kernel reads the wrong picture.
     ///
     /// `uniforms` must match the kernel's parameter struct byte for byte. Use
     /// four-byte members in declaration order and a `static_assert` on the
@@ -194,8 +187,57 @@ public:
     [[nodiscard]] virtual Buffer keep(const std::string& key, const void* data,
                                       size_t bytes) = 0;
 
-    /// Forgets what `keep` was holding for this key, freeing it.
+    /// Forgets what `keep`, `borrow` or `importFd` was holding for this key,
+    /// freeing it.
     virtual void drop(const std::string& key) = 0;
+
+    /// Pages the effect has mapped, used by the device where they are.
+    ///
+    /// `keep` copies, and for data that changes every frame -- a picture
+    /// another process paints into shared memory, sixty times a second -- the
+    /// copy is the whole cost. On a device that shares memory with the host
+    /// (Apple silicon) there is nothing to copy: the same pages can be bound
+    /// to a kernel as they are.
+    ///
+    /// `pages` must be page-aligned, `bytes` a whole number of pages and of
+    /// sixteen, and the mapping must stay valid until `drop(key)`: the device
+    /// reads it in place, whenever a kernel bound to it runs. Keyed like
+    /// `keep`, and like `keep` a second call with the same key hands back the
+    /// first buffer.
+    ///
+    /// A second call with the same key and different `pages` or `bytes` drops
+    /// the first binding and makes a new one. That is a safety net, not the
+    /// way to change a mapping: by the time the effect calls with new pages it
+    /// has already unmapped the old ones, and a kernel still queued may read
+    /// them. To replace a mapping: `drop` the key, wait for the device (below),
+    /// then unmap, map the new pages and `borrow` again.
+    ///
+    /// UNMAPPING. `drop` releases the binding at once, but a kernel already
+    /// queued may still read the pages. Before unmapping them the effect waits
+    /// for the device: `drop`, then a synchronous `read` of a few values from
+    /// any buffer the device writes after that kernel -- the rule every slow
+    /// node already follows. Unmapping first is a read of freed memory
+    /// on the GPU, which is not an error anybody sees, only a wrong picture.
+    ///
+    /// An invalid Buffer where the device cannot -- a discrete GPU, a host too
+    /// old -- and the effect uses `keep` instead.
+    [[nodiscard]] virtual Buffer borrow(const std::string& /*key*/, const void* /*pages*/,
+                                        size_t /*bytes*/) {
+        return {};
+    }
+
+    /// Device memory another process exported as a file descriptor, imported.
+    ///
+    /// The discrete-GPU half of `borrow`: a Vulkan buffer exported as an opaque
+    /// descriptor, say, holding a frame another process's GPU wrote. Imported
+    /// once per key and bound in place; the descriptor stays the effect's to
+    /// close. `bytes` must be a whole number of sixteen.
+    ///
+    /// An invalid Buffer where the device cannot import it.
+    [[nodiscard]] virtual Buffer importFd(const std::string& /*key*/, int /*fd*/,
+                                          size_t /*bytes*/) {
+        return {};
+    }
 
     // --- running a network the host compiled --------------------------------
     //
@@ -472,13 +514,6 @@ struct RenderRequest {
     /// of. They differ when the host is rendering in tiles: an effect that
     /// treats the window's edge as the picture's edge produces a seam exactly
     /// where nobody expects one.
-    ///
-    /// What hosts actually send, which is not quite that: openFXplayer's engine
-    /// renders untiled and sets `outputRod` to the render window (the region of
-    /// definition intersected with the region of interest), so the two are
-    /// equal there. lucabRTrender's host sets both to the output image's
-    /// bounds. Relate buffers through their `rect`s and neither host surprises
-    /// an effect.
     Rect renderWindow;
     Rect outputRod;
 
@@ -488,6 +523,24 @@ struct RenderRequest {
 
     /// Never null during `process`.
     Gpu* gpu = nullptr;
+
+    /// The project's format, in full-resolution pixels, whatever `scaleX` and
+    /// `scaleY` are.
+    ///
+    /// A generator draws for the frame, and until this it had to work the
+    /// frame out -- from a size parameter somebody set to match, or from the
+    /// shape of the window the host clamps "everywhere" to. Zero only from a
+    /// host too old to say.
+    int projectWidth = 0;
+    int projectHeight = 0;
+
+    /// Why `process` returned false, in a sentence somebody can act on.
+    ///
+    /// Mutable for the reason `produced` is. The host shows it where it would
+    /// otherwise say only that the node could not render: "the weights file
+    /// named in Model does not exist" rather than "'org.example.effect' could
+    /// not render". Ignored when `process` succeeds.
+    mutable std::string complaint;
 
     /// Numbers to hang on the picture this render produces.
     ///
@@ -751,10 +804,14 @@ public:
     /// rectangle, which for a quad somewhere else in the frame is nothing at
     /// all or, worse, part of it.
     ///
-    /// A spreading effect -- a blur -- does not need this: its region of
-    /// definition already grew, so what it is asked to produce is already
-    /// bigger than what it needs to read. A *moving* effect does, because there
-    /// is no relationship between where its output is and where its input is.
+    /// A spreading effect -- a blur -- needs it too, and this comment used to
+    /// say otherwise. Its grown region of definition covers a render of the
+    /// *whole* picture, but a host does not always ask for the whole picture: a
+    /// viewer asks for its window, a tiled render for one tile. A pixel at the
+    /// edge of that rectangle is a sum over neighbours outside it, so a blur
+    /// asks for the output grown by its reach, at the render's scale. A
+    /// *moving* effect needs it for a different reason: there is no
+    /// relationship at all between where its output is and where its input is.
     ///
     /// Return one rectangle per input, in clip order. Anything empty is read as
     /// "the same as the output", so an effect can answer for one input and

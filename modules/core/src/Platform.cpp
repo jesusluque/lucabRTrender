@@ -339,6 +339,57 @@ void* newTrackedMetalBuffer(void* mtlDevice, uint64_t bytes) {
 #endif
 }
 
+uint64_t pageSize() {
+    return static_cast<uint64_t>(::sysconf(_SC_PAGESIZE));
+}
+
+void* mapPages(uint64_t bytes) {
+    if (bytes == 0) {
+        return nullptr;
+    }
+    const uint64_t page = pageSize();
+    const uint64_t whole = (bytes + page - 1) / page * page;
+    void* pages = ::mmap(nullptr, static_cast<size_t>(whole), PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    return pages == MAP_FAILED ? nullptr : pages;
+}
+
+void unmapPages(void* pages, uint64_t bytes) {
+    if (pages == nullptr || bytes == 0) {
+        return;
+    }
+    const uint64_t page = pageSize();
+    ::munmap(pages, static_cast<size_t>((bytes + page - 1) / page * page));
+}
+
+void* newMetalBufferOverPages(void* mtlDevice, const void* pages, uint64_t bytes) {
+#if defined(__APPLE__)
+    if (mtlDevice == nullptr || pages == nullptr || bytes == 0) {
+        return nullptr;
+    }
+    const uint64_t page = pageSize();
+    if (reinterpret_cast<uintptr_t>(pages) % page != 0 || bytes % page != 0) {
+        return nullptr;
+    }
+    // A discrete GPU would read these pages over the bus: not what borrowing
+    // promises, so it is refused and the effect keeps a copy instead.
+    const BOOL unified = reinterpret_cast<BOOL (*)(void*, SEL)>(objc_msgSend)(mtlDevice, sel_registerName("hasUnifiedMemory"));
+    if (!unified) {
+        return nullptr;
+    }
+    // MTLResourceStorageModeShared (0 << 4), no deallocator: the pages stay
+    // the caller's.
+    const unsigned long options = 0UL;
+    return reinterpret_cast<void* (*)(void*, SEL, void*, unsigned long, unsigned long, void*)>(objc_msgSend)(
+        mtlDevice, sel_registerName("newBufferWithBytesNoCopy:length:options:deallocator:"),
+        const_cast<void*>(pages), static_cast<unsigned long>(bytes), options, nullptr);
+#else
+    (void)mtlDevice;
+    (void)pages;
+    (void)bytes;
+    return nullptr;
+#endif
+}
+
 void releaseMetalBuffer(void* mtlBuffer) {
 #if defined(__APPLE__)
     if (mtlBuffer != nullptr) {

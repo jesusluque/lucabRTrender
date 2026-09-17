@@ -4,7 +4,7 @@
 // machine, and nothing more.
 //
 // Ported from openFXplayer's sdk_host::EffectRunner for the verbs a renderer
-// host needs -- kernels, scratch, keep, read, publish. The media verbs (clip,
+// host needs -- kernels, scratch, keep, borrow, read, publish. The media verbs (clip,
 // decode, recorder, audio) and the model verbs (model, infer) answer "not
 // available in this host" and say why: they are openFXplayer's GStreamer and
 // TensorRT/worker stacks, which this engine does not carry.
@@ -39,6 +39,14 @@ public:
     [[nodiscard]] aofx::Buffer scratch(int width, int height) override;
     [[nodiscard]] aofx::Buffer keep(const std::string& key, const void* data,
                                     size_t bytes) override;
+    /// Pages the effect mapped, bound in place where the device reads host
+    /// memory (Apple silicon): a Metal buffer over the pages, adopted by the
+    /// pool. Invalid elsewhere, which the contract reads as "use keep".
+    [[nodiscard]] aofx::Buffer borrow(const std::string& key, const void* pages, size_t bytes) override;
+    /// Invalid: importing another process's exported device memory is CUDA or
+    /// Vulkan external memory, which gpe does not reach -- the same answer as
+    /// the reference host's, and every caller has keep to fall back on.
+    [[nodiscard]] aofx::Buffer importFd(const std::string& key, int fd, size_t bytes) override;
     void drop(const std::string& key) override;
     [[nodiscard]] bool read(const aofx::Buffer& buffer, void* into, size_t bytes) override;
     void publish(const std::string& instance, const char* key, double value) override;

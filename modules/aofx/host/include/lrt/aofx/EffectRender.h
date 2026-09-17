@@ -39,6 +39,12 @@ struct EffectJob {
     /// Frames the host is prepared to be behind (RenderRequest::bufferFrames,
     /// ABI 22): the depth of a live jitter buffer. Zero for a render with none.
     int                           bufferFrames = 0;
+    /// The project's format in full-resolution pixels (RenderRequest::
+    /// projectWidth/projectHeight, ABI 24), what a generator draws for. Zero
+    /// means the output's bounds: this host renders one image, and that image
+    /// is the frame.
+    int                           projectWidth = 0;
+    int                           projectHeight = 0;
 };
 
 /// Renders `effect`. Images must live on the context's device (the context's

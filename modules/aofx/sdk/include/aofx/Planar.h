@@ -1,4 +1,4 @@
-// Copyright (c) 2026 openFXplayer contributors.
+// Copyright (c) 2026 aopenfx contributors.
 //
 // A solved plane, and how it gets into a document.
 //

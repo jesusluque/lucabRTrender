@@ -1,4 +1,4 @@
-// Copyright (c) 2026 openFXplayer contributors.
+// Copyright (c) 2026 aopenfx contributors.
 //
 // The sixty-four-slot box format, written down once.
 //

@@ -91,6 +91,8 @@ Result<image::ImagePtr> renderEffect(gpu_host::Context& context, aofx::Effect& e
     request.instance = job.instance;
     request.renderWindow = toRect(bounds);
     request.outputRod = toRect(bounds);
+    request.projectWidth = job.projectWidth > 0 ? job.projectWidth : bounds.width();
+    request.projectHeight = job.projectHeight > 0 ? job.projectHeight : bounds.height();
 
     const aofx::InputPlane* passThrough = nullptr;
     for (const EffectInput& input : job.inputs) {
@@ -180,7 +182,9 @@ Result<image::ImagePtr> renderEffect(gpu_host::Context& context, aofx::Effect& e
         }
         device->sync();
         if (!processed) {
-            complaint = EffectRunner::lastComplaint();
+            // The effect's own sentence first (RenderRequest::complaint,
+            // ABI 24); the host's, from a refused load or run, otherwise.
+            complaint = !request.complaint.empty() ? request.complaint : EffectRunner::lastComplaint();
         }
     }));
     out->deviceWrote();

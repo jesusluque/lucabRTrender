@@ -1,19 +1,20 @@
-// Copyright (c) 2026 openFXplayer contributors.
+// Copyright (c) 2026 aopenfx contributors.
 //
 // AOFX — an alternative to OpenFX, for effects that run on the GPU.
 //
 // WHAT IT IS FOR
 //
-// OpenFX is a C ABI designed around host-allocated CPU pixel buffers, with GPU
-// rendering bolted on afterwards as an OpenGL extension. It works, and this
-// application hosts it. But an effect that wants to run a compute kernel on
-// CUDA or Metal has to go through a graphics API to get there, and write the
-// same filter twice to reach both.
+// OpenFX is a C ABI designed around host-allocated pixel buffers. Its GPU
+// rendering suite (ofxGPURender.h) covers OpenGL and, since OpenFX 1.5, CUDA
+// and Metal -- where both the host and the plugin implement them. An effect
+// that uses those still writes its kernel once per backend and manages the
+// device API itself.
 //
-// AOFX is the other way round. An effect declares its kernels in Slang, they
+// AOFX is a smaller contract. An effect declares its kernels in Slang, they
 // are compiled at build time to PTX and to a metallib, and the host runs them
-// on whichever device the machine has. One filter, both backends, no graphics
-// API in the middle.
+// on whichever device the machine has, owning the buffers, the dispatch and
+// any inference. One filter source, both backends, no device API in the
+// plugin.
 //
 // THE VERSION HANDSHAKE, AND WHY IT IS TWO NUMBERS AND A STRING
 //
@@ -27,6 +28,11 @@
 // says why is a plugin somebody can fix; one that loads and misbehaves is a bug
 // report about the wrong thing entirely.
 #pragma once
+
+#include <cstddef>
+#include <functional>
+#include <string>
+#include <vector>
 
 namespace aofx {
 
@@ -148,7 +154,20 @@ namespace aofx {
 /// a tracker's reference frame beside every frame it renders, so it can
 /// read its reference again without the playhead going there. A struct
 /// layout change, so every bundle is rebuilt.
-inline constexpr int kAbiVersion = 23;
+/// 24: `EffectDesc::flowsWhen`, a node that is a live source while a
+/// parameter says so, `RenderRequest::projectWidth`/`projectHeight` and
+/// `complaint`, and the `Gpu::borrow` and `Gpu::importFd` verbs -- a frame
+/// another process paints bound where it is instead of copied. A struct
+/// layout and vtable change, so every bundle is rebuilt.
+/// 25: `buildTag()` says which ABI of its standard library a translation unit
+/// was built with, and what that library's containers measure. The same GCC
+/// with `_GLIBCXX_USE_CXX11_ABI=0` and `=1` used to write the same tag while
+/// `std::string` was 8 bytes on one side and 32 on the other -- `EffectDesc`
+/// 136 against 280 -- and MSVC wrote no version at all. No struct or vtable
+/// moves; what changes is the *contents* of the tag, and the host compares
+/// tags, so a host and a bundle built against 24 and 25 no longer match and
+/// both are rebuilt.
+inline constexpr int kAbiVersion = 25;
 
 /// What this translation unit was compiled with.
 ///
@@ -156,24 +175,112 @@ inline constexpr int kAbiVersion = 23;
 /// strings are produced by the two compilers that actually built them. Comparing
 /// them catches the case the version number cannot: same interface, different
 /// toolchain, and a `std::string` that means something different on each side.
-[[nodiscard]] inline const char* buildTag() {
-#if defined(_LIBCPP_VERSION)
-#define AOFX_STDLIB "libc++"
-#elif defined(__GLIBCXX__)
-#define AOFX_STDLIB "libstdc++"
+///
+/// WHAT IS IN IT, AND WHY EACH PART
+///
+/// A compiler name and version is not enough, and that was learned the hard way
+/// on paper before it was learned in a crash: GCC 13.3 with
+/// `_GLIBCXX_USE_CXX11_ABI=0` and with `=1` wrote the same "gcc-13.3.0
+/// libstdc++" while `std::string` was 8 bytes on one side and 32 on the other.
+/// So the tag carries, in this order:
+///
+///   - the compiler and its version (MSVC: `_MSC_FULL_VER`, where it used to say
+///     only "msvc");
+///   - the standard library, and the ABI switch that library has:
+///     `_GLIBCXX_USE_CXX11_ABI` for libstdc++, `_LIBCPP_ABI_VERSION` for libc++,
+///     `_ITERATOR_DEBUG_LEVEL` and debug or release for Microsoft's, whose
+///     containers change shape with both;
+///   - a fingerprint of what crosses the boundary: the sizes of `std::string`,
+///     `std::vector<int>` and `std::function<void()>`, and of a pointer. The
+///     switches above are the causes; these are the effects, and they catch a
+///     cause nobody thought to list.
+///
+/// Built once, at compile time, into a constant this function returns. The
+/// pointer is stable for the life of the module and the text never allocates.
+namespace detail {
+
+/// A string built by a constant expression: text and unsigned numbers, appended.
+struct BuildTagText {
+    char        text[384]{};
+    std::size_t length = 0;
+
+    constexpr void put(const char* more) {
+        for (std::size_t i = 0; more[i] != '\0' && length + 1 < sizeof(text); ++i) {
+            text[length++] = more[i];
+        }
+    }
+    constexpr void put(unsigned long long value) {
+        char digits[24]{};
+        std::size_t count = 0;
+        do {
+            digits[count++] = static_cast<char>('0' + value % 10);
+            value /= 10;
+        } while (value != 0 && count < sizeof(digits));
+        while (count > 0 && length + 1 < sizeof(text)) {
+            text[length++] = digits[--count];
+        }
+    }
+};
+
+[[nodiscard]] constexpr BuildTagText makeBuildTag() {
+    BuildTagText tag;
+#if defined(__clang__)
+    tag.put("clang-");
+    tag.put(__clang_version__);
+#elif defined(__GNUC__)
+    tag.put("gcc-");
+    tag.put(__VERSION__);
+#elif defined(_MSC_VER)
+    tag.put("msvc-");
+    tag.put(static_cast<unsigned long long>(_MSC_FULL_VER));
 #else
-#define AOFX_STDLIB "unknown-stdlib"
+    tag.put("unknown-compiler");
 #endif
 
-#if defined(__clang__)
-    return "clang-" __clang_version__ " " AOFX_STDLIB;
-#elif defined(__GNUC__)
-    return "gcc-" __VERSION__ " " AOFX_STDLIB;
-#elif defined(_MSC_VER)
-    return "msvc " AOFX_STDLIB;
+#if defined(_LIBCPP_VERSION)
+    tag.put(" libc++");
+#  if defined(_LIBCPP_ABI_VERSION)
+    tag.put(" abi=");
+    tag.put(static_cast<unsigned long long>(_LIBCPP_ABI_VERSION));
+#  endif
+#elif defined(__GLIBCXX__)
+    tag.put(" libstdc++");
+#  if defined(_GLIBCXX_USE_CXX11_ABI)
+    tag.put(" cxx11abi=");
+    tag.put(static_cast<unsigned long long>(_GLIBCXX_USE_CXX11_ABI));
+#  endif
+#elif defined(_MSVC_STL_VERSION) || defined(_MSC_VER)
+    tag.put(" msvcstl");
+#  if defined(_ITERATOR_DEBUG_LEVEL)
+    tag.put(" idl=");
+    tag.put(static_cast<unsigned long long>(_ITERATOR_DEBUG_LEVEL));
+#  endif
+#  if defined(_DEBUG)
+    tag.put(" debug");
+#  else
+    tag.put(" release");
+#  endif
 #else
-    return "unknown-compiler " AOFX_STDLIB;
+    tag.put(" unknown-stdlib");
 #endif
+
+    tag.put(" sizes:string=");
+    tag.put(static_cast<unsigned long long>(sizeof(std::string)));
+    tag.put(",vector=");
+    tag.put(static_cast<unsigned long long>(sizeof(std::vector<int>)));
+    tag.put(",function=");
+    tag.put(static_cast<unsigned long long>(sizeof(std::function<void()>)));
+    tag.put(",pointer=");
+    tag.put(static_cast<unsigned long long>(sizeof(void*)));
+    return tag;
+}
+
+inline constexpr BuildTagText kBuildTag = makeBuildTag();
+
+}   // namespace detail
+
+[[nodiscard]] inline const char* buildTag() {
+    return detail::kBuildTag.text;
 }
 
 }   // namespace aofx

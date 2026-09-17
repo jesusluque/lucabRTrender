@@ -1,4 +1,4 @@
-// Copyright (c) 2026 openFXplayer contributors.
+// Copyright (c) 2026 aopenfx contributors.
 //
 // The arithmetic of a transform: Nuke's, written down once.
 //

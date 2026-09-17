@@ -1,4 +1,4 @@
-// Copyright (c) 2026 openFXplayer contributors.
+// Copyright (c) 2026 aopenfx contributors.
 //
 // What a node that delivers has to say, written down once.
 //

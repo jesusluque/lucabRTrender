@@ -4025,3 +4025,52 @@ N, as a click would, so a sequence someone reports ("opened in Raster, switched
 to Path traced") runs under `--frames` and `--snapshot` instead of being
 described. Run that way on the chess set, the switched frame showed the glass
 heads as glass: the black heads in the report were the raster's.
+
+## aofx at ABI 25, from aopenfx
+
+The AOFX ABI now lives in its own repository, **github.com/jesusluque/aopenfx**,
+and that is where the SDK is copied from -- `sdk/include/aofx`, verbatim, at
+`73d8071` -- not openFXplayer. The ask came from `bundles openFXplayer built
+load in this host` failing: openFXplayer's bundles were rebuilt against ABI 25,
+and this host spoke 23.
+
+What the two bumps are, with comments set aside (every header differed, but
+eleven only in their copyright line and in dropping the names of particular
+hosts):
+
+- **24.** `EffectDesc::flowsWhen` (a node is a live source while a parameter
+  says so), `RenderRequest::projectWidth`, `projectHeight` and `complaint`,
+  and the verbs `Gpu::borrow` and `Gpu::importFd`, which default to an invalid
+  buffer -- the contract's "use `keep`".
+- **25.** `buildTag()` says which ABI of its standard library a translation
+  unit was built with and what `std::string`, `std::vector`, `std::function`
+  and a pointer measure. No struct moves; the tag's contents do, and the host
+  compares tags, so 24 and 25 do not match.
+
+What the host does with 24:
+
+- **`borrow`**, where the device reads host memory in place: the pages wrapped
+  as a shared-storage Metal buffer without a copy
+  (`platform::newMetalBufferOverPages`: page-aligned, whole pages, refused on
+  a discrete GPU), adopted by gpe's pool like any foreign buffer, given back
+  by `drop`. The same key over the same pages hands back the same buffer;
+  over other pages the old binding goes first. Measured: a kernel's read of a
+  borrowed page gave 3, then `0xb0770` after the test wrote that into the
+  page, while a `keep` of the same pages still read 3.
+  `platform::pageSize`, `mapPages` and `unmapPages` join Platform for it.
+- **`importFd`** answers invalid, as the reference host does: importing
+  another process's exported device memory is CUDA or Vulkan external memory,
+  which gpe does not reach.
+- **`projectWidth`/`projectHeight`** from `EffectJob`, which gains the two
+  fields; zero there means the output's bounds, since this host renders one
+  image and that image is the frame.
+- **`complaint`**: when `process` returns false, the effect's own sentence is
+  what the error says ("'tv.mediapro.aofx.test.reporter' did not render: the
+  reporter was told to fail"), and the host's own complaint from a refused
+  load or run only when the effect gave none.
+- **`flowsWhen`** changes nothing here: it tells a node graph that a node is a
+  live source, and this host renders single jobs.
+
+After it, `bundles openFXplayer built load in this host` loads openFXplayer's
+ABI 25 bundles, `aofx_sdk_manifest` is re-recorded against the copied
+headers, and the manifest's own message now names aopenfx as the reference.

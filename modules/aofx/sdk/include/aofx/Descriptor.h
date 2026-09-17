@@ -1,4 +1,4 @@
-// Copyright (c) 2026 openFXplayer contributors.
+// Copyright (c) 2026 aopenfx contributors.
 //
 // What an effect says about itself, before anybody asks it to render.
 //
@@ -356,7 +356,7 @@ struct ClipDesc {
     /// Keeping is still right as a **cache**: hold the pyramid you built, note
     /// which frame it was for, and use it when it happens to be the frame you
     /// were going to build anyway. That is fast in order and correct out of
-    /// it. `plugins/flow` does exactly this.
+    /// it. An optical-flow node is the usual case.
     ///
     /// Clamped at the ends of the clip: an offset that would run off the front
     /// gives the first frame, which is the same answer OFX gives and better
@@ -420,7 +420,7 @@ struct PlaneDesc {
 /// which is a different thing and the first plugin written against this SDK
 /// found out the hard way: a kernel wants a globally unique name, and a Slang
 /// entry point wants to be called `blurMain`. Conflating them means the backend
-/// looks for a function called `tv.mediapro.aofx.blur.blurMain` and reports,
+/// looks for a function called `org.aopenfx.blur.blurMain` and reports,
 /// correctly and unhelpfully, that there is no such function in the library.
 ///
 /// The blob is the compiled form for the backend this was built for -- PTX or a
@@ -496,6 +496,23 @@ struct EffectDesc {
     /// whatever sound the effect set. An effect that sets this and then
     /// writes to an output has nothing to write to.
     bool audioOnly = false;
+
+    /// While this holds, the node is a live source: its picture arrives on
+    /// its own rather than with the timeline.
+    ///
+    /// A graphic a browser is animating, a feed, a clock -- anything whose
+    /// frame is not a function of the frame number. The host treats such a
+    /// node the way it treats a Movie set to Live: never served from the
+    /// cache for a time it rendered before, never prefetched ahead of the
+    /// playhead, and rendered on the live clock while the transport is
+    /// parked. Without it an effect like that is rendered once per frame
+    /// number and frozen there.
+    ///
+    /// The same form as `ParamDesc::shownWhen`: a parameter and the value it
+    /// must have (a Choice's option `value`, anything else written out).
+    /// Empty `param` means never. A parameter the node does not set counts as
+    /// its declared default.
+    ShownWhen flowsWhen;
 };
 
 }   // namespace aofx

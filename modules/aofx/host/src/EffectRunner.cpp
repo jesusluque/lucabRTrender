@@ -8,6 +8,7 @@
 #include "gpe/kernels.h"
 #include "gpe/pool.h"
 #include "lrt/core/Log.h"
+#include "lrt/core/Platform.h"
 #include "lrt/gpu_host/Context.h"
 
 namespace lrt::aofx_host {
@@ -28,6 +29,9 @@ struct Kept {
     std::mutex                                     mutex;
     std::unordered_map<std::string, gpe::BufferId> buffers;
     std::unordered_map<std::string, size_t>        sizes;
+    /// The pages each borrowed key was bound over, so a second borrow can
+    /// tell the same mapping from a new one.
+    std::unordered_map<std::string, const void*>   borrowed;
 };
 Kept& kept() {
     static Kept kStore;
@@ -204,6 +208,51 @@ aofx::Buffer EffectRunner::keep(const std::string& key, const void* data, size_t
     return rowBuffer(buffer, bytes);
 }
 
+aofx::Buffer EffectRunner::borrow(const std::string& key, const void* pages, size_t bytes) {
+    if (key.empty() || impl_->device == nullptr) {
+        return {};
+    }
+    Kept& store = kept();
+    const std::lock_guard<std::mutex> holding(store.mutex);
+    if (const auto found = store.buffers.find(key); found != store.buffers.end()) {
+        const auto bound = store.borrowed.find(key);
+        const bool same = pages == nullptr ||
+                          (bound != store.borrowed.end() && bound->second == pages && store.sizes[key] == bytes);
+        if (same) {
+            return rowBuffer(found->second, store.sizes[key]);
+        }
+        // The key names other pages now: the old binding goes rather than
+        // being handed back over pages that may already be unmapped.
+        impl_->device->release(found->second);
+        store.borrowed.erase(key);
+        store.sizes.erase(key);
+        store.buffers.erase(found);
+    }
+    if (pages == nullptr || bytes == 0 || bytes % gpe::kBytesPerPixel != 0) {
+        return {};
+    }
+    void* wrapped = platform::newMetalBufferOverPages(reinterpret_cast<void*>(impl_->device->backendDevice()),
+                                                      pages, bytes);
+    if (wrapped == nullptr) {
+        return {};
+    }
+    // The pool adopts it like any foreign buffer, taking its own reference;
+    // `drop` gives that back, and the pages stay the effect's.
+    const gpe::BufferId buffer = impl_->device->adopt(reinterpret_cast<uint64_t>(wrapped), bytes);
+    platform::releaseMetalBuffer(wrapped);
+    if (buffer == gpe::kInvalidBuffer) {
+        return {};
+    }
+    store.buffers.emplace(key, buffer);
+    store.sizes.emplace(key, bytes);
+    store.borrowed.insert_or_assign(key, pages);
+    return rowBuffer(buffer, bytes);
+}
+
+aofx::Buffer EffectRunner::importFd(const std::string& /*key*/, int /*fd*/, size_t /*bytes*/) {
+    return {};
+}
+
 void EffectRunner::drop(const std::string& key) {
     Kept& store = kept();
     const std::lock_guard<std::mutex> holding(store.mutex);
@@ -212,6 +261,7 @@ void EffectRunner::drop(const std::string& key) {
             impl_->device->release(found->second);
         }
         store.sizes.erase(key);
+        store.borrowed.erase(key);
         store.buffers.erase(found);
     }
 }

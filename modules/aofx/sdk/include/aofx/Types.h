@@ -1,10 +1,10 @@
-// Copyright (c) 2026 openFXplayer contributors.
+// Copyright (c) 2026 aopenfx contributors.
 //
 // The small types that cross the boundary.
 //
 // Deliberately its own vocabulary rather than the host's. An SDK that included
-// `ofxp/image/Image.h` would drag in the host's allocator, its Result type and
-// its dependencies, and a plugin that linked the host would not be a plugin.
+// a host's own image header would drag in the host's allocator, its result
+// type and its dependencies, and a plugin that linked the host would not be a plugin.
 // These are plain structs with the same *meaning* as the host's, and the host
 // converts at the one place they meet.
 #pragma once
@@ -116,7 +116,7 @@ inline constexpr RecorderId kInvalidRecorder = 0;
 /// same on two machines: the render host encodes on an NVIDIA card and a
 /// workstation through VideoToolbox. A number would mean a different codec
 /// depending on where the document was opened. Ask the host what it has
-/// (`ofxplayer-cli media` prints the same list) and refuse by name when it
+/// and refuse by name when it
 /// does not have it.
 struct RecorderDesc {
     std::string codec = "h265";
@@ -237,14 +237,6 @@ struct ParamValue {
 };
 
 /// How a dispatch is shaped: one thread per output pixel, normally.
-///
-/// Threads, never groups. How threads are grouped is the kernel's own
-/// [numthreads] when its blob carries gpe's kernel trailer (every kernel built
-/// with `aofx_add_kernel` from this SDK) -- whole groups of that shape on every
-/// backend, as D3D and Vulkan do. A blob without the trailer gets the old
-/// answer: 16x16 groups, or flat 256 for a one-dimensional grid on CUDA, and
-/// clipped partial groups on Metal. Either way the last group runs past the
-/// grid, so every kernel bounds-checks.
 struct Grid {
     uint32_t x = 1;
     uint32_t y = 1;

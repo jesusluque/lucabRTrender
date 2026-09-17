@@ -105,4 +105,21 @@ bool enableExtendedRange(void* nsWindow);
 [[nodiscard]] void* newTrackedMetalBuffer(void* mtlDevice, uint64_t bytes);
 void releaseMetalBuffer(void* mtlBuffer);
 
+/// The size of a page of virtual memory.
+[[nodiscard]] uint64_t pageSize();
+
+/// `bytes` rounded up to whole pages, mapped readable and writable, zeroed and
+/// page-aligned: memory a device can be handed in place. Null on failure.
+/// Given back with unmapPages and the same byte count.
+[[nodiscard]] void* mapPages(uint64_t bytes);
+void unmapPages(void* pages, uint64_t bytes);
+
+/// A shared-storage Metal buffer over `pages` as they are, no copy, where the
+/// device reads host memory in place (unified memory). `pages` must be
+/// page-aligned and `bytes` whole pages, and the pages must outlive the
+/// buffer. Null off macOS, on a discrete GPU, for memory that is not pages, or
+/// on failure; released with releaseMetalBuffer. What AOFX's `Gpu::borrow`
+/// binds.
+[[nodiscard]] void* newMetalBufferOverPages(void* mtlDevice, const void* pages, uint64_t bytes);
+
 }   // namespace lrt::platform
