@@ -151,6 +151,10 @@ public:
     /// The stage's own time range, for a conversion that was given none.
     [[nodiscard]] std::pair<double, double> timeRange() const;
 
+    /// Which way it stood: 'y' or 'z'. The gaussians are in that stage's
+    /// world space, so the cloud written from them has to say the same.
+    [[nodiscard]] char upAxis() const;
+
     /// The layers the stage was opened from, for a message.
     [[nodiscard]] std::string source() const;
 

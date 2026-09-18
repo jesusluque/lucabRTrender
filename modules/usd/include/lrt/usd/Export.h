@@ -57,6 +57,11 @@ struct ExportOptions {
     /// the material's body, not an albedo, so a frame that relights this
     /// cloud adds the polish and nothing else. What `lrt mesh2splat` bakes.
     bool     litBody = false;
+    /// Which way the stage the gaussians came from stood: 'y' or 'z'. They
+    /// are in that stage's world space, so a cloud written as Y-up when they
+    /// were laid out Z-up lies on its side -- which is what every asset out
+    /// of Blender did.
+    char     upAxis = 'y';
     /// The rig the cloud is carried by, or nothing. When it is there the
     /// stage takes a time range and the joints' transforms as time samples.
     const SplatSkinning* skinning = nullptr;

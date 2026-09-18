@@ -151,7 +151,7 @@ Result<void> writeParticleFieldStage(gpu::ShaderLibrary& library, const io::RawS
     if (!stage) {
         return Error::make(ErrorCode::IoFailure, "cannot create '{}'", path.string());
     }
-    UsdGeomSetStageUpAxis(stage, UsdGeomTokens->y);
+    UsdGeomSetStageUpAxis(stage, options.upAxis == 'z' ? UsdGeomTokens->z : UsdGeomTokens->y);
     UsdGeomXform world = UsdGeomXform::Define(stage, SdfPath("/World"));
     stage->SetDefaultPrim(world.GetPrim());
     auto splats = UsdVolParticleField3DGaussianSplat::Define(stage, SdfPath("/World/Splats"));

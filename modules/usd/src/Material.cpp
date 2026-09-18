@@ -92,6 +92,27 @@ void matchDeclaredTypes(const MaterialX::DocumentPtr& document) {
         if (!nodeDef) {
             continue;
         }
+        // AN INPUT THE NODEDEF DOES NOT HAVE IS DROPPED, NOT A FAILURE.
+        //
+        // MaterialX refuses a node whose interface does not match its
+        // declaration, and the whole material goes with it. What authors such
+        // an input is every day work: Blender's USD exporter writes
+        // `inputs:specular` on a UsdPreviewSurface, which the specification
+        // does not have (it has `specularColor`), so every fox, every
+        // character and every asset that came out of Blender arrived here
+        // grey -- "Could not find a nodedef for node 'Surface'". One input
+        // nobody declared is worth exactly what it says and no more, and
+        // losing the material over it is the wrong trade.
+        std::vector<std::string> undeclared;
+        for (const MaterialX::InputPtr& input : node->getInputs()) {
+            if (!nodeDef->getActiveInput(input->getName())) {
+                undeclared.push_back(input->getName());
+            }
+        }
+        for (const std::string& name : undeclared) {
+            lrt::log::info("materials: {} has no input {}; it is left out", node->getCategory(), name);
+            node->removeInput(name);
+        }
         for (const MaterialX::InputPtr& input : node->getInputs()) {
             const MaterialX::InputPtr declared = nodeDef->getActiveInput(input->getName());
             if (!declared || declared->getType() == input->getType()) {

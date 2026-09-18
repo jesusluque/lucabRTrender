@@ -49,7 +49,7 @@ struct Mesh2SplatUniforms {
     float    sigmaX = 0.65F;
     float    sigmaY = 0.65F;
 
-    float    flatness = 1.0e-7F;
+    float    flatness = 0.1F;
     float    opacity = 1.0F;
     float    transmission = 0.0F;
     uint32_t useNormalMap = 0;
@@ -162,9 +162,9 @@ public:
         aofx::ParamDesc flatness;
         flatness.name = "flatness";
         flatness.label = "Thickness";
-        flatness.hint = "The third size, across the surface. mesh2splat writes 1e-7: a disc.";
+        flatness.hint = "The third size, as a fraction of the smaller of the other two. A length instead of a fraction makes how thin a gaussian is depend on how big the model is, and a ray tracer sees a ghost where a rasteriser sees a surface.";
         flatness.type = aofx::ParamType::Double;
-        flatness.defaults = {1.0e-7};
+        flatness.defaults = {0.1};
         flatness.hardMin = {0.0};
         into.params.push_back(flatness);
 
@@ -346,7 +346,7 @@ public:
             static_cast<uint32_t>(std::max(request.number("maxCells", 65536.0), 1.0));
         uniforms.sigmaX = static_cast<float>(request.number("sigma", 0.65, 0));
         uniforms.sigmaY = static_cast<float>(request.number("sigma", 0.65, 1));
-        uniforms.flatness = static_cast<float>(std::max(request.number("flatness", 1.0e-7), 0.0));
+        uniforms.flatness = static_cast<float>(std::max(request.number("flatness", 0.1), 0.0));
         uniforms.opacity =
             static_cast<float>(std::clamp(request.number("opacity", 1.0), 0.0, 1.0));
         uniforms.transmission =

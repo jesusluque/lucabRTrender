@@ -16,6 +16,7 @@
 #include <pxr/usd/usd/primRange.h>
 #include <pxr/usd/usd/stage.h>
 #include <pxr/usd/usdGeom/mesh.h>
+#include <pxr/usd/usdGeom/metrics.h>
 #include <pxr/usd/usdGeom/primvarsAPI.h>
 #include <pxr/usd/usdGeom/tokens.h>
 #include <pxr/usd/usdGeom/xformCache.h>
@@ -329,6 +330,13 @@ std::pair<double, double> MeshStage::timeRange() const {
         return {0.0, 0.0};
     }
     return {impl_->stage->GetStartTimeCode(), impl_->stage->GetEndTimeCode()};
+}
+
+char MeshStage::upAxis() const {
+    if (impl_ == nullptr) {
+        return 'y';
+    }
+    return UsdGeomGetStageUpAxis(impl_->stage) == UsdGeomTokens->z ? 'z' : 'y';
 }
 
 std::string MeshStage::source() const {

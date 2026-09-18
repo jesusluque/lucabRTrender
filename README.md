@@ -126,6 +126,24 @@ Gaussian splats as a primitive beside triangles rather than as a demo.
 
 `ref/spire-engine` is kept for the same reason and on the same terms.
 
+## The assets it is shown with
+
+`~/tools/assets`, fetched rather than checked in:
+
+- **OpenChessSet** -- the marble pawn with the glass head, which is what the
+  conversion's textures, transmission and path-traced bake were measured on.
+- **Kitchen_set** -- Pixar's, for the breadth of a real stage.
+- **Fox** -- the Khronos glTF sample, fetched and turned into USD by
+  `scripts/fetch-fox.sh`, which is the rigged asset `lrt mesh2splat --skinned`
+  is shown on. Model **CC0** by PixelMannen; rig and animation **CC-BY 4.0**
+  by tomkranis; glTF conversion **CC-BY 4.0** by @AsoboStudio and @scurest.
+  <https://github.com/KhronosGroup/glTF-Sample-Assets/tree/main/Models/Fox>
+
+The script needs Blender, which is a dependency of that asset and of nothing
+else: no build, no test and no part of the engine uses it. `guc`, the glTF to
+USD converter this project would otherwise reach for, says plainly that
+animation and skinning are the two glTF features it does not implement.
+
 ## What it owes to mesh2splat
 
 [mesh2splat](https://github.com/electronicarts/mesh2splat), Electronic Arts'
@@ -142,9 +160,16 @@ fragment shader -- into one Slang compute kernel:
   `|Ju| * sigma / resolution` and `|Jv| * sigma / resolution`, so a gaussian
   is as wide as one cell of the grid the triangle is drawn on;
 - the frame is the triangle's longest edge, its normal, and the third axis
-  square to both; the flat axis is `1e-7`;
-- a gaussian is appended for every cell the triangle covers, sampling albedo,
-  normal and metallic-roughness there, with an atomic counter and a budget.
+  square to both;
+- a gaussian is written for every cell the triangle covers, sampling albedo,
+  normal and metallic-roughness there, within a budget.
+
+Two of those differ here and the reasons are in `docs/decisions.md`: the flat
+axis is a **fraction** of the other two rather than their `1e-7`, which is a
+length and so makes how thin a gaussian is depend on how big the model is;
+and the cells are counted and then written at an offset rather than appended
+with an atomic, so that the same mesh gives the same array and a gaussian can
+be followed from one pose of an animation to the next.
 
 The copyright notice and the three conditions are at the head of
 `plugins/mesh2splat/mesh2splat.slang`, which is the file the algorithm lives

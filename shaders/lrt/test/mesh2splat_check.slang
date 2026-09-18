@@ -118,8 +118,10 @@ void m2sCheckQuad(uint3 tid: SV_DispatchThreadID) {
     // As wide as a cell of the grid: `|Ju| * sigma / resolution` with
     // `|Ju| = |Jv| = 1`, which is the whole of mesh2splat's sizing.
     const float want = params.sigma / float(max(params.resolution, 1u));
+    // And as thick as the fraction of that the third size asks for.
+    const float wantThird = want * params.flatness;
     if (abs(scale.x - want) > params.tolerance * want || abs(scale.y - want) > params.tolerance * want ||
-        abs(scale.z - params.flatness) > 1.0e-9) {
+        abs(scale.z - wantThird) > params.tolerance * max(wantThird, 1.0e-9)) {
         InterlockedAdd(counts[1], 1u);
     }
     // Flat against the quad: the short axis of the frame is the plane's own.

@@ -373,8 +373,19 @@ M2sTriangle m2sTriangleOf(uint triangle) {
     const float3 ju = (e1 * duv2.y - e2 * duv1.y) * inverse;
     const float3 jv = (e2 * duv1.x - e1 * duv2.x) * inverse;
     const float perCell = 1.0 / float(max(params.resolution, 1u));
-    t.scale = float3(length(ju) * params.sigmaX * perCell,
-                     length(jv) * params.sigmaY * perCell, params.flatness);
+    const float alongU = length(ju) * params.sigmaX * perCell;
+    const float alongV = length(jv) * params.sigmaY * perCell;
+    // THE THIRD SIZE IS A FRACTION OF THE OTHER TWO, not a length.
+    //
+    // mesh2splat writes 1e-7 there, a number in the model's own units, while
+    // the two sizes across the surface are in cells -- so how thin a gaussian
+    // is depends on how big the model happens to be. The chess pawn is 66 mm
+    // across and traced fine; the Khronos fox is a hundred units long, which
+    // makes the same 1e-7 fifteen hundred times more extreme, and the ray
+    // tracer -- which integrates density along the ray rather than projecting
+    // an ellipse as the rasteriser does -- saw a ghost where the rasteriser
+    // saw a fox. A fraction is the same number for every model.
+    t.scale = float3(alongU, alongV, min(alongU, alongV) * params.flatness);
 
     // THE FRAME every gaussian of this triangle shares, and theirs: along the
     // triangle's longest edge, with the surface normal as the short axis and

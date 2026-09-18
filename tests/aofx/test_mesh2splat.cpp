@@ -34,7 +34,7 @@ namespace {
 
 constexpr uint32_t kResolution = 16;
 constexpr float    kSigma = 0.65F;
-constexpr float    kFlatness = 1.0e-7F;
+constexpr float    kFlatness = 0.1F;
 
 /// A slang-rhi view of an image's own pixels, as the conversion's own host
 /// takes one: the effect and the test write the same memory.

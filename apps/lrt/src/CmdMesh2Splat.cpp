@@ -97,7 +97,7 @@ struct Options {
     // it leaves a converted surface 30% transparent (docs/decisions.md has
     // the table). 1.0 closes it to 91%, 1.2 to 96%.
     double                   sigma = 1.0;
-    double                   flatness = 1.0e-7;
+    double                   flatness = 0.1;
     double                   opacity = 1.0;
     double                   minOpacity = 0.6;
     uint32_t                 maxCells = 1u << 18;
@@ -796,7 +796,8 @@ void addMesh2Splat(CLI::App& app) {
     cmd->add_option("--sigma", o->sigma,
                     "how wide a gaussian is against its cell; mesh2splat's own number is 0.65, which "
                     "leaves a traced surface 30% transparent");
-    cmd->add_option("--flatness", o->flatness, "the third size, across the surface");
+    cmd->add_option("--flatness", o->flatness,
+                    "the third size, as a fraction of the smaller of the other two");
     cmd->add_option("--opacity", o->opacity, "the opacity every gaussian starts from");
     cmd->add_option("--glass-opacity", o->minOpacity,
                     "what a fully transmitting material still stops. Low is a window -- you see what "
@@ -949,6 +950,7 @@ void addMesh2Splat(CLI::App& app) {
             options.skinning = rig.valid() ? &rig : nullptr;
             options.maxDegree = o->bake ? std::min(o->bakeDegree, 3u) : 0;
             options.addCamera = o->addCamera;
+            options.upAxis = (*stage).upAxis();
             // Both baked and not, the cloud is relit -- what differs is what
             // its colours are. Baked, they are the light on the material's
             // body and the frame adds the polish; not baked, they are an

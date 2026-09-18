@@ -5105,3 +5105,60 @@ and getting it into USD needs an exporter this machine does not have -- `guc`
 says plainly that "all glTF features with the exception of animation and
 skinning are implemented", and Blender is not installed. The run above is what
 that run would report.
+
+## The fox
+
+`scripts/fetch-fox.sh` fetches the Khronos glTF sample and turns it into a USD
+stage with its rig: model CC0 by PixelMannen, rig and animation CC-BY 4.0 by
+tomkranis, glTF conversion CC-BY 4.0 by @AsoboStudio and @scurest. It needs
+Blender, which is a dependency of that asset and of nothing else -- `guc`, the
+converter this project would otherwise use, says plainly that animation and
+skinning are the two glTF features it does not implement.
+
+`lrt mesh2splat --skinned --resolution 512`:
+
+| | |
+|---|---|
+| triangles | 576 |
+| gaussians | **204 517** |
+| joints | 24, over 28 instants |
+| the cloud | **13.35 MB** |
+
+Rendered pose for pose against the mesh, path traced under the same lights,
+the cloud is the fox: rounder at the silhouettes, because a gaussian rounds
+off a 576-triangle model's facets, and the same animal in the same pose.
+
+**Three things it turned up**, all of them defects nothing in this repository
+had been able to see before, because every asset here until now was hand-built
+or Pixar's:
+
+- **One undeclared input lost the whole material.** Blender's USD exporter
+  writes `inputs:specular` on a `UsdPreviewSurface`, which the specification
+  does not have -- it has `specularColor` -- and MaterialX refuses a node
+  whose interface does not match its declaration, so the fox arrived grey:
+  *"Could not find a nodedef for node 'Surface'"*. Every asset out of Blender
+  did. An input nobody declared is now dropped with a line saying so, beside
+  the pass that already repairs mismatched input *types* for the same reason.
+- **The written cloud was always Y-up.** The gaussians are in the source
+  stage's world space, and `writeParticleFieldStage` said `upAxis = "Y"`
+  whatever that stage said -- so a fox exported Z-up, as Blender exports, lay
+  on its side. The export carries the source's up axis now.
+- **The flat axis is a fraction, not a length.** mesh2splat writes `1e-7`
+  there, in the model's own units, while the two sizes across the surface are
+  in cells: how thin a gaussian is then depends on how big the model happens
+  to be. The chess pawn is 66 mm across and traced correctly; the fox is a
+  hundred units long, which makes the same `1e-7` fifteen hundred times more
+  extreme, and **the ray tracer saw a ghost where the rasteriser saw a fox** --
+  it integrates density along the ray rather than projecting an ellipse.
+
+  It is `min(alongU, alongV) * flatness` now, default 0.1. Measured: the fox
+  becomes solid, and the pawn does not move -- its marble body reads
+  0.0645/0.0799/0.0780 where it read 0.0644/0.0798/0.0778, and its gold ring
+  0.459/0.339/0.180 where it read 0.456/0.337/0.179.
+
+  This was tried once before, as a guess at the dark fringe around every
+  silhouette, and **reverted because the measurement did not support it**: the
+  fringe was the sky not being composited under partial coverage, and widening
+  the axis three hundred times left the dark minimum exactly as deep. The same
+  change is right here for a different reason, and this time the measurement
+  says so.
