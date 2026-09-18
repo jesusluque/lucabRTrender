@@ -27,6 +27,7 @@
 #include <pxr/usd/usdGeom/points.h>
 #include <pxr/usd/usdGeom/xformCommonAPI.h>
 #include <pxr/usd/usdGeom/xform.h>
+#include <pxr/usd/usdGeom/primvarsAPI.h>
 #include <pxr/usd/usdVol/particleField3DGaussianSplat.h>
 
 #include "lrt/geom/Mesh.h"
@@ -6260,4 +6261,88 @@ TEST_CASE("a skinned stage is read in the pose it holds at the time asked for", 
             CHECK(skin.influences[point * 2 + 1] == 1.0F);   // and all of it
         }
     }
+}
+
+// A CLOUD THAT CARRIES ITS RIG RATHER THAN ITS FRAMES.
+//
+// Four joints a gaussian and their weights, the transform out of the cloud's
+// space, and the joints' own transforms as time samples -- which is the only
+// thing about an animated cloud that changes from frame to frame. Sixty
+// joints are four kilobytes a frame, against forty bytes a gaussian a frame
+// for the arrays this replaces.
+TEST_CASE("a cloud writes the skeleton that carries it, and its joints over time", "[usd][gpu][export][skinning]") {
+    LRT_REQUIRE_GPU(gpu);
+    const io::RawSplats raw = cloud(256);
+
+    usd::SplatSkinning rig;
+    rig.skeleton = "/Root/Skel";
+    rig.joints = 3;
+    rig.influences.resize(size_t{raw.count} * 8, 0.0F);
+    for (uint32_t k = 0; k < raw.count; ++k) {
+        // Two joints each, and the two weights a whole.
+        float* one = rig.influences.data() + size_t{k} * 8;
+        one[0] = static_cast<float>(k % 3);        one[1] = 0.75F;
+        one[2] = static_cast<float>((k + 1) % 3);  one[3] = 0.25F;
+    }
+    rig.times = {0.0, 1.0, 2.0};
+    rig.xforms.resize(rig.times.size() * rig.joints * 16, 0.0F);
+    for (size_t frame = 0; frame < rig.times.size(); ++frame) {
+        for (uint32_t joint = 0; joint < rig.joints; ++joint) {
+            float* m = rig.xforms.data() + (frame * rig.joints + joint) * 16;
+            m[0] = m[5] = m[10] = m[15] = 1.0F;
+            // The translation is in the last row, as GfMatrix4f holds it.
+            m[12] = static_cast<float>(frame) + static_cast<float>(joint) * 0.1F;
+        }
+    }
+    REQUIRE(rig.valid());
+
+    const fs::path path = scratch("cloud-rigged.usda");
+    fs::remove(path);
+    usd::ExportOptions options;
+    options.addCamera = false;
+    options.skinning = &rig;
+    REQUIRE(usd::writeParticleFieldStage(*gpu->library, raw, path, options));
+
+    UsdStageRefPtr stage = UsdStage::Open(path.string());
+    REQUIRE(stage);
+    const UsdPrim prim = stage->GetPrimAtPath(SdfPath("/World/Splats"));
+    REQUIRE(prim);
+    const UsdGeomPrimvarsAPI primvars(prim);
+
+    VtIntArray indices;
+    VtFloatArray weights;
+    REQUIRE(primvars.GetPrimvar(TfToken("primvars:lrt:splat:jointIndices")).Get(&indices));
+    REQUIRE(primvars.GetPrimvar(TfToken("primvars:lrt:splat:jointWeights")).Get(&weights));
+    CHECK(indices.size() == size_t{raw.count} * 4);
+    CHECK(weights.size() == size_t{raw.count} * 4);
+    CHECK(indices[0] == 0);
+    CHECK(indices[1] == 1);
+    CHECK(weights[0] == 0.75F);
+    CHECK(weights[1] == 0.25F);
+    CHECK(primvars.GetPrimvar(TfToken("primvars:lrt:splat:jointIndices")).GetElementSize() == 4);
+
+    std::string named;
+    REQUIRE(primvars.GetPrimvar(TfToken("primvars:lrt:splat:skeleton")).Get(&named));
+    CHECK(named == "/Root/Skel");
+
+    // The joints move, and only the joints: one array a time code, and the
+    // stage's range says where they are.
+    const UsdGeomPrimvar moved = primvars.GetPrimvar(TfToken("primvars:lrt:splat:skinningXforms"));
+    REQUIRE(moved);
+    std::vector<double> times;
+    REQUIRE(moved.GetTimeSamples(&times));
+    REQUIRE(times.size() == 3);
+    CHECK(stage->GetStartTimeCode() == 0.0);
+    CHECK(stage->GetEndTimeCode() == 2.0);
+    VtMatrix4dArray at;
+    REQUIRE(moved.Get(&at, UsdTimeCode(2.0)));
+    REQUIRE(at.size() == 3);
+    CHECK(at[0][3][0] == Catch::Approx(2.0).margin(1e-6));
+    CHECK(at[2][3][0] == Catch::Approx(2.2).margin(1e-6));
+
+    // And the gaussians are all still there, one slot each.
+    const UsdVolParticleField3DGaussianSplat splats(prim);
+    VtVec3fArray positions;
+    REQUIRE(splats.GetPositionsAttr().Get(&positions));
+    CHECK(positions.size() == raw.count);
 }

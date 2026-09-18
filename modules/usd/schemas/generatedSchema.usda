@@ -108,6 +108,48 @@ surface splatting (render::PointStyle)."""
     )
 }
 
+class "LrtSplatSkinningAPI" (
+    doc = """A Gaussian splat cloud carried by a skeleton: each gaussian keeps
+the joints that move it, and the cloud keeps those joints' transforms over
+time. What `lrt mesh2splat --skinned` writes, and what lets an animated cloud
+be three megabytes rather than three hundred -- and be exact at every instant
+of the range rather than at the frames somebody sampled.
+
+The transforms are carried on the cloud itself rather than the cloud being
+bound to the Skeleton with UsdSkelBindingAPI: UsdSkel does not sanction that
+binding on a ParticleField, and usdSkelImaging makes no ext computation for a
+prim that is not UsdGeomPointBased, so nothing would reach a renderer. What it
+costs is retargeting and clip blending, which a cloud that carries baked
+transforms cannot do."""
+)
+{
+    int[] primvars:lrt:splat:jointIndices = [] (
+        doc = "Four joints a gaussian, indices into `skinningXforms`. `elementSize` is 4."
+        elementSize = 4
+        interpolation = "vertex"
+    )
+    float[] primvars:lrt:splat:jointWeights = [] (
+        doc = "How much each of those four carries it; they sum to one."
+        elementSize = 4
+        interpolation = "vertex"
+    )
+    matrix4d primvars:lrt:splat:geomBindTransform = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ) (
+        doc = "The cloud's own space into the space the joints are measured from."
+        interpolation = "constant"
+    )
+    matrix4d[] primvars:lrt:splat:skinningXforms = [] (
+        doc = """One transform a joint, in the skeleton's joint order, taking a
+point from bind space to the skeleton's space. Time sampled: this is the only
+thing about an animated cloud that changes from frame to frame, and for sixty
+joints it is four kilobytes."""
+        interpolation = "constant"
+    )
+    string primvars:lrt:splat:skeleton = "" (
+        doc = "The Skeleton prim the cloud was converted against, for provenance."
+        interpolation = "constant"
+    )
+}
+
 class "LrtSplatLightingAPI" (
     doc = """Whether the Gaussian splat clouds at and below this prim are relit
 by the scene's lights instead of showing the radiance they were baked with.

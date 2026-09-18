@@ -4971,3 +4971,47 @@ smallest-three quaternion at ten bits a component, so an axis cannot be pinned
 closer than about `sqrt(2)/1023`. At rest the frame written is the frame read,
 and re-encoding a value that was already a word's decode lands on that word --
 except at the boundary of the rounding, where two gaussians of 4096 did.
+
+## The file carries the rig, not the frames
+
+`LrtSplatSkinningAPI` (`modules/usd/schemas/generatedSchema.usda`) is what a
+cloud a skeleton moves writes beside its gaussians: `jointIndices` and
+`jointWeights`, four a gaussian with `elementSize = 4`; a
+`geomBindTransform`; the `skeleton` it was converted against, for provenance;
+and `skinningXforms`, one transform a joint in the skeleton's order, **time
+sampled**. That last is the only thing about an animated cloud that changes
+from one frame to the next, and for sixty joints it is four kilobytes a frame.
+
+The arithmetic, for a plausible character at 150k gaussians over 120 frames:
+
+| what the file carries | size |
+|---|---|
+| positions, orientations, scales as time samples | **960 MB** (half), 1.2 GB (float) |
+| the rig: four joints a gaussian, plus 60 joints a frame | **2.9 MB** |
+
+And the rig is exact at *every* instant of the range, not only at the frames
+somebody sampled.
+
+**The transforms are carried on the cloud, not bound to the Skeleton.**
+`UsdSkelBindingAPI` on a `ParticleField3DGaussianSplat` is not something
+UsdSkel sanctions, and usdSkelImaging makes no ext computation for a prim that
+is not `UsdGeomPointBased` -- so nothing would reach a renderer. Carrying the
+matrices makes the file answer for itself. **Not done**, and the cost of that
+choice: retargeting and clip blending, which a cloud holding baked transforms
+cannot do.
+
+`lrt mesh2splat --skinned [--range START:END[:STEP]]` gathers them with
+`UsdSkelSkeletonQuery::ComputeSkinningTransforms` at each instant, the stage's
+own range by default and a time code a step. Splitting the conversion's
+`(joint, weight)` pairs into USD's two arrays is a rearrangement of values the
+device computed, as the record unpack already is, and is said so where it
+happens.
+
+**Measured**: the rigged square converts to 272 gaussians whose file holds its
+two joints at two instants, the second sliding (1.2, 0.4, 0) exactly as the
+`SkelAnimation` authored it; and `tests/usd/test_usd.cpp` writes a cloud with
+three joints over three time codes and reads every primvar, the element size,
+the time samples and the stage's range back off the file.
+
+**Not done here**: nothing reads them yet. `ParticleField::Sync` does not look
+for the new primvars and no frame is deformed by them.

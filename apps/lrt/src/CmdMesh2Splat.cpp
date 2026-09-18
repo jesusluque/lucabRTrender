@@ -118,6 +118,8 @@ struct Options {
     /// Carry the skeleton: the gaussians are built in the bind pose and each
     /// keeps the joints that move it.
     bool                     skinned = false;
+    /// START:END[:STEP] in time codes; empty is the stage's own range.
+    std::string              range;
     double                   time = 0.0;
     std::vector<std::string> paths;
 };
@@ -819,6 +821,9 @@ void addMesh2Splat(CLI::App& app) {
                   "carry the skeleton: the gaussians are built in the bind pose and each keeps the "
                   "four joints that move it, so the cloud deforms with the rig instead of being one "
                   "pose. Forces --no-bake: a baked radiance does not turn with a limb");
+    cmd->add_option("--range", o->range,
+                    "START:END[:STEP] in time codes: the instants a skinned cloud keeps its "
+                    "skeleton's transforms at. The stage's own range by default, a code a step");
     cmd->add_flag("--default-lights", o->defaultLights,
                   "bake under a dome and a sun in the session layer, for a stage that brings no "
                   "lights of its own (what lrt view offers)");
@@ -903,7 +908,45 @@ void addMesh2Splat(CLI::App& app) {
                                  o->bakeBounces, o->defaultLights, std::min(o->bakeDegree, 3u)));
             }
 
+            // THE RIG, WHEN THE CLOUD KEEPS ONE. Four joints a gaussian came
+            // back with the records; what is gathered here is the joints'
+            // own transforms at each instant of the range, which is the only
+            // thing about an animated cloud that changes from frame to frame.
+            usd::SplatSkinning rig;
+            if (o->skinned && !converter.influences().empty()) {
+                for (const usd::StageMesh& one : *meshes) {
+                    if (one.skinning.bound) {
+                        rig.skeleton = one.skinning.skeleton;
+                        rig.geomBindTransform = one.skinning.geomBindTransform;
+                        rig.joints = static_cast<uint32_t>(one.skinning.joints.size());
+                        break;
+                    }
+                }
+                rig.influences = converter.influences();
+                const auto [begin, end] = (*stage).timeRange();
+                double from = begin;
+                double to = end;
+                double step = 1.0;
+                if (!o->range.empty()) {
+                    if (std::sscanf(o->range.c_str(), "%lf:%lf:%lf", &from, &to, &step) < 2) {
+                        return Error::make(ErrorCode::InvalidArgument,
+                                           "'{}': --range wants START:END[:STEP]", o->range);
+                    }
+                }
+                if (!(step > 0.0)) step = 1.0;
+                if (to < from) to = from;
+                for (double at = from; at <= to + 1e-9; at += step) {
+                    rig.times.push_back(at);
+                }
+                auto moved = (*stage).skeletonTransforms(rig.skeleton, rig.times);
+                if (!moved) return std::move(moved).error();
+                rig.xforms = std::move(*moved);
+                std::printf("mesh2splat: carried by %s, %u joints over %zu instants\n",
+                            rig.skeleton.c_str(), rig.joints, rig.times.size());
+            }
+
             usd::ExportOptions options;
+            options.skinning = rig.valid() ? &rig : nullptr;
             options.maxDegree = o->bake ? std::min(o->bakeDegree, 3u) : 0;
             options.addCamera = o->addCamera;
             // Both baked and not, the cloud is relit -- what differs is what

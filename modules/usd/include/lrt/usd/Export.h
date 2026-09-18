@@ -1,7 +1,10 @@
 // Copyright (c) 2026 lucabRTrender contributors.
 #pragma once
 
+#include <array>
 #include <filesystem>
+#include <string>
+#include <vector>
 
 #include "lrt/core/Result.h"
 #include "lrt/io/RawSplats.h"
@@ -11,6 +14,33 @@ class ShaderLibrary;
 }
 
 namespace lrt::usd {
+
+/// WHAT A CLOUD CARRIED BY A SKELETON WRITES BESIDE ITS GAUSSIANS.
+///
+/// Four joints a gaussian and how much each carries it, the transform out of
+/// the cloud's space into the one the joints are measured from, and the
+/// joints' own transforms at each of a set of instants. That last is the only
+/// thing that changes from frame to frame, and for sixty joints it is four
+/// kilobytes a frame -- which is why a cloud that carries its rig is
+/// megabytes where one that carries per-frame arrays is hundreds of them.
+struct SplatSkinning {
+    /// The Skeleton prim's path, for provenance.
+    std::string           skeleton;
+    /// `(joint, weight)` four times a gaussian, in the order the records are.
+    std::vector<float>    influences;
+    std::array<float, 16> geomBindTransform{1.0F, 0.0F, 0.0F, 0.0F, 0.0F, 1.0F, 0.0F, 0.0F,
+                                            0.0F, 0.0F, 1.0F, 0.0F, 0.0F, 0.0F, 0.0F, 1.0F};
+    uint32_t              joints = 0;
+    /// The time codes the transforms below were read at.
+    std::vector<double>   times;
+    /// `times.size() * joints * 16` floats, row major as USD holds them.
+    std::vector<float>    xforms;
+
+    [[nodiscard]] bool valid() const noexcept {
+        return joints > 0 && !times.empty() && !influences.empty() &&
+               xforms.size() == times.size() * joints * 16;
+    }
+};
 
 struct ExportOptions {
     uint32_t maxDegree = 3;
@@ -27,6 +57,9 @@ struct ExportOptions {
     /// the material's body, not an albedo, so a frame that relights this
     /// cloud adds the polish and nothing else. What `lrt mesh2splat` bakes.
     bool     litBody = false;
+    /// The rig the cloud is carried by, or nothing. When it is there the
+    /// stage takes a time range and the joints' transforms as time samples.
+    const SplatSkinning* skinning = nullptr;
 };
 
 /// Writes `raw` as a UsdVolParticleField3DGaussianSplat at /World/Splats in a

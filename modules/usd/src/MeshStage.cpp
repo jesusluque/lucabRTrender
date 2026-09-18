@@ -26,6 +26,7 @@
 #include <pxr/usd/usdSkel/cache.h>
 #include <pxr/usd/usdSkel/root.h>
 #include <pxr/usd/usdSkel/skeleton.h>
+#include <pxr/usd/usdSkel/skeletonQuery.h>
 #include <pxr/usd/usdSkel/skinningQuery.h>
 #include <pxr/usd/usdShade/material.h>
 #include <pxr/usd/usdShade/materialBindingAPI.h>
@@ -286,6 +287,49 @@ Result<MeshStage> MeshStage::open(const std::filesystem::path& path) {
 MeshStage::MeshStage(MeshStage&&) noexcept = default;
 MeshStage& MeshStage::operator=(MeshStage&&) noexcept = default;
 MeshStage::~MeshStage() = default;
+
+Result<std::vector<float>> MeshStage::skeletonTransforms(const std::string& skeleton,
+                                                         const std::vector<double>& times) const {
+    if (impl_ == nullptr) {
+        return Error(ErrorCode::InvalidArgument, "no stage");
+    }
+    const UsdPrim prim = impl_->stage->GetPrimAtPath(SdfPath(skeleton));
+    if (!prim || !prim.IsA<UsdSkelSkeleton>()) {
+        return Error::make(ErrorCode::InvalidArgument, "'{}': not a Skeleton on this stage", skeleton);
+    }
+    UsdSkelCache cache;
+    const UsdSkelSkeletonQuery query = cache.GetSkelQuery(UsdSkelSkeleton(prim));
+    if (!query) {
+        return Error::make(ErrorCode::InvalidArgument, "'{}': its skeleton cannot be queried", skeleton);
+    }
+    VtTokenArray joints;
+    UsdSkelSkeleton(prim).GetJointsAttr().Get(&joints);
+    const size_t count = joints.size();
+    if (count == 0) {
+        return Error::make(ErrorCode::InvalidArgument, "'{}': a skeleton with no joints", skeleton);
+    }
+    std::vector<float> out(times.size() * count * 16, 0.0F);
+    for (size_t frame = 0; frame < times.size(); ++frame) {
+        VtMatrix4fArray xforms;
+        if (!query.ComputeSkinningTransforms(&xforms, UsdTimeCode(times[frame])) ||
+            xforms.size() != count) {
+            return Error::make(ErrorCode::InvalidArgument, "'{}': no joint transforms at time {}",
+                               skeleton, times[frame]);
+        }
+        float* held = out.data() + frame * count * 16;
+        // A copy, not a computation: USD laid the matrices out and they go
+        // over as they are.
+        std::memcpy(held, xforms.data(), count * 16 * sizeof(float));
+    }
+    return out;
+}
+
+std::pair<double, double> MeshStage::timeRange() const {
+    if (impl_ == nullptr) {
+        return {0.0, 0.0};
+    }
+    return {impl_->stage->GetStartTimeCode(), impl_->stage->GetEndTimeCode()};
+}
 
 std::string MeshStage::source() const {
     return impl_ == nullptr ? std::string{} : impl_->source;

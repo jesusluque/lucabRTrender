@@ -28,6 +28,7 @@
 #include <array>
 #include <cstdint>
 #include <filesystem>
+#include <utility>
 #include <memory>
 #include <string>
 #include <vector>
@@ -139,6 +140,16 @@ public:
     /// Builds every mesh the options ask for. The order is the stage's.
     [[nodiscard]] Result<std::vector<StageMesh>> read(geom::MeshBuilder& builder,
                                                       const MeshStageOptions& options = {});
+
+    /// The joints of `skeleton` at each of `times`, in the skeleton's own
+    /// order: `times.size() * joints * 16` floats, row major as USD holds
+    /// them. What a cloud that carries its rig writes, and the only thing
+    /// about such a cloud that changes from one frame to the next.
+    [[nodiscard]] Result<std::vector<float>> skeletonTransforms(const std::string& skeleton,
+                                                                const std::vector<double>& times) const;
+
+    /// The stage's own time range, for a conversion that was given none.
+    [[nodiscard]] std::pair<double, double> timeRange() const;
 
     /// The layers the stage was opened from, for a message.
     [[nodiscard]] std::string source() const;

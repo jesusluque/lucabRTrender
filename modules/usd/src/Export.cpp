@@ -8,6 +8,7 @@
 
 #include <pxr/base/gf/vec3d.h>
 #include <pxr/usd/usd/stage.h>
+#include <pxr/base/gf/matrix4d.h>
 #include <pxr/usd/usdGeom/camera.h>
 #include <pxr/usd/usdGeom/metrics.h>
 #include <pxr/usd/usdGeom/primvarsAPI.h>
@@ -196,6 +197,71 @@ Result<void> writeParticleFieldStage(gpu::ShaderLibrary& library, const io::RawS
         // reflection, which is the part a single colour cannot hold.
         static const TfToken kLit("primvars:lrt:splat:litBody");
         splats.GetPrim().CreateAttribute(kLit, SdfValueTypeNames->Bool, true).Set(true);
+    }
+
+    // THE RIG, WHEN THE CLOUD IS CARRIED BY ONE.
+    //
+    // Four joints a gaussian and their weights, the transform out of the
+    // cloud's space, and the joints' own transforms as time samples -- which
+    // is the only thing about an animated cloud that changes from frame to
+    // frame. The splitting below is a rearrangement of values the device
+    // computed, not arithmetic on them: the conversion writes `(joint,
+    // weight)` pairs and USD wants two arrays.
+    if (options.skinning != nullptr && options.skinning->valid()) {
+        const SplatSkinning& rig = *options.skinning;
+        const size_t carried = rig.influences.size() / 8;
+        if (carried != positions.size()) {
+            return Error::make(ErrorCode::InvalidArgument,
+                               "the rig carries {} gaussians and the cloud has {}", carried,
+                               positions.size());
+        }
+        VtIntArray   indices(carried * 4);
+        VtFloatArray weights(carried * 4);
+        for (size_t k = 0; k < carried * 4; ++k) {
+            indices[k] = static_cast<int>(rig.influences[k * 2]);
+            weights[k] = rig.influences[k * 2 + 1];
+        }
+        UsdGeomPrimvarsAPI rigged(splats.GetPrim());
+        UsdGeomPrimvar joints = rigged.CreatePrimvar(TfToken("primvars:lrt:splat:jointIndices"),
+                                                     SdfValueTypeNames->IntArray, UsdGeomTokens->vertex, 4);
+        joints.Set(indices);
+        UsdGeomPrimvar carriedBy = rigged.CreatePrimvar(TfToken("primvars:lrt:splat:jointWeights"),
+                                                        SdfValueTypeNames->FloatArray,
+                                                        UsdGeomTokens->vertex, 4);
+        carriedBy.Set(weights);
+
+        GfMatrix4d bind;
+        for (int row = 0; row < 4; ++row) {
+            for (int column = 0; column < 4; ++column) {
+                bind[row][column] = rig.geomBindTransform[static_cast<size_t>(row) * 4 +
+                                                          static_cast<size_t>(column)];
+            }
+        }
+        rigged.CreatePrimvar(TfToken("primvars:lrt:splat:geomBindTransform"),
+                             SdfValueTypeNames->Matrix4d, UsdGeomTokens->constant)
+            .Set(bind);
+        rigged.CreatePrimvar(TfToken("primvars:lrt:splat:skeleton"), SdfValueTypeNames->String,
+                             UsdGeomTokens->constant)
+            .Set(rig.skeleton);
+
+        UsdGeomPrimvar moved = rigged.CreatePrimvar(TfToken("primvars:lrt:splat:skinningXforms"),
+                                                    SdfValueTypeNames->Matrix4dArray,
+                                                    UsdGeomTokens->constant);
+        for (size_t frame = 0; frame < rig.times.size(); ++frame) {
+            VtMatrix4dArray at(rig.joints);
+            const float* held = rig.xforms.data() + frame * rig.joints * 16;
+            for (uint32_t joint = 0; joint < rig.joints; ++joint) {
+                for (int row = 0; row < 4; ++row) {
+                    for (int column = 0; column < 4; ++column) {
+                        at[joint][row][column] = held[joint * 16 + static_cast<size_t>(row) * 4 +
+                                                     static_cast<size_t>(column)];
+                    }
+                }
+            }
+            moved.Set(at, UsdTimeCode(rig.times[frame]));
+        }
+        stage->SetStartTimeCode(rig.times.front());
+        stage->SetEndTimeCode(rig.times.back());
     }
 
     if (options.addCamera) {
