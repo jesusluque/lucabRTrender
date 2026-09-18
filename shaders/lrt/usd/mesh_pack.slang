@@ -30,7 +30,7 @@ struct PackParams {
     uint  destWidth;      ///< entries a row of the destination picture
     uint  destStride;     ///< pixels a row of it, which is padded
     uint  chunkFirst;     ///< where this mesh's chunks start, for the fold
-    uint  pad1;
+    uint  perPoint;       ///< joint influences a point; 0 when nothing carries it
 
     float4 toWorld0;      ///< object to world, three rows of four
     float4 toWorld1;
@@ -58,6 +58,8 @@ StructuredBuffer<uint>     triangleCorners;   // 3 a triangle: face-vertex corne
 StructuredBuffer<uint>     triangleFaces;     // 1 a triangle: the authored face
 StructuredBuffer<float4>   normals;           // a primvar, float4 an element
 StructuredBuffer<float4>   uvs;
+StructuredBuffer<float2>   influences;        // (joint, weight), perPoint a point
+RWStructuredBuffer<float4> skinStream;        // the same shape as `stream`, 2 entries a corner
 RWStructuredBuffer<float4> stream;
 RWStructuredBuffer<float4> extents;   // chunkCount * 2: low, high
 ConstantBuffer<PackParams> pack;
@@ -130,6 +132,36 @@ void meshPack(uint3 tid: SV_DispatchThreadID) {
         const uint atUv = elementAt(pack.uvMode, pack.uvCount, triangle, k, point);
         if (atUv != kNoPrimvar) {
             uv = uvs[atUv].xy;
+        }
+        // THE JOINTS THIS CORNER IS CARRIED BY, four of them at most.
+        //
+        // A gaussian standing inside the triangle takes the barycentric blend
+        // of its three corners', which is what interpolating the skin means;
+        // the blend is the effect's, because it is the effect that knows
+        // where inside the triangle the gaussian stands. Four is what the
+        // cloud's format carries, so a point held by more than four keeps the
+        // four heaviest -- the rest are a rounding error on a surface, and
+        // USD's own skinning caps the same way.
+        if (pack.perPoint > 0) {
+            float4 joint = float4(0.0);
+            float4 weight = float4(0.0);
+            for (uint i = 0; i < pack.perPoint; ++i) {
+                const float2 one = influences[point * pack.perPoint + i];
+                // Insertion into the four heaviest, which keeps the order
+                // settled and so keeps the conversion repeatable.
+                float2 carry = one;
+                for (uint slot = 0; slot < 4; ++slot) {
+                    if (carry.y > weight[slot]) {
+                        const float2 out = float2(joint[slot], weight[slot]);
+                        joint[slot] = carry.x;
+                        weight[slot] = carry.y;
+                        carry = out;
+                    }
+                }
+            }
+            const uint skin = pack.destFirst + triangle * 6 + k * 2;
+            skinStream[streamAt(skin)] = float4(joint.x, weight.x, joint.y, weight.y);
+            skinStream[streamAt(skin + 1)] = float4(joint.z, weight.z, joint.w, weight.w);
         }
         const uint entry = pack.destFirst + triangle * 6 + k * 2;
         stream[streamAt(entry)] = float4(corner[k], uv.x);

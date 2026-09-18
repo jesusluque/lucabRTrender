@@ -464,3 +464,115 @@ TEST_CASE("two conversions of one mesh write the same array, bit for bit", "[aof
         CHECK(seen[1] == 0);
     }));
 }
+
+// A GAUSSIAN IS CARRIED BY THE JOINTS ITS TRIANGLE IS CARRIED BY.
+//
+// The conversion blends the three corners' influences by the barycentric
+// coordinates of the cell the gaussian stands in, which is what interpolating
+// the skin means. Where every corner names one joint with all of its weight,
+// every blend is that joint with all of its weight whatever the coordinates
+// are -- and that is the case that catches the plumbing: a picture that did
+// not arrive, an entry addressed wrong, a weight left unnormalised.
+TEST_CASE("a gaussian keeps the joints of the triangle it stands on", "[aofx][mesh2splat][skinning]") {
+    gpu_host::Context* gpu = gpu_host::installProcessContext();
+    if (gpu == nullptr || gpu->compute() == nullptr) {
+        SKIP("no gpe device");
+    }
+    aofx_host::EffectRegistry registry;
+    aofx::Effect* effect = conversion(registry, gpu);
+    if (effect == nullptr) {
+        SKIP("the Mesh2Splat bundle is not built here");
+    }
+    gpu::ShaderLibrary library(gpu->deviceShared());
+
+    REQUIRE(gpu->run([&] {
+        auto quad = gpu::ComputeKernel::create(library, "lrt/test/mesh2splat_check", "m2sQuad");
+        auto joints = gpu::ComputeKernel::create(library, "lrt/test/mesh2splat_check", "m2sInfluences");
+        auto check = gpu::ComputeKernel::create(library, "lrt/test/mesh2splat_check", "m2sCheckInfluences");
+        REQUIRE(quad);
+        REQUIRE(joints);
+        REQUIRE(check);
+
+        constexpr uint32_t kMeshWidth = 64;
+        constexpr float    kJoint = 3.0F;
+        const image::ImagePtr mesh = pictureOf(kMeshWidth, 1);
+        const image::ImagePtr carried = pictureOf(kMeshWidth, 1);
+        const gpu::Buffer meshView = viewOf(*gpu, mesh);
+        const gpu::Buffer carriedView = viewOf(*gpu, carried);
+        const uint32_t budget = kResolution * kResolution * 2;
+
+        gpu::CommandBatch batch(library.device());
+        quad->dispatch(batch, {1, 1, 1}, [&](rhi::ShaderCursor cursor) {
+            cursor["mesh"].setBinding(meshView.rhi());
+            cursor["albedo"].setBinding(meshView.rhi());
+            cursor["records"].setBinding(meshView.rhi());
+            cursor["counts"].setBinding(meshView.rhi());
+            cursor["params"]["meshWidth"].setData(kMeshWidth);
+            cursor["params"]["meshStride"].setData(static_cast<uint32_t>(mesh->stride()));
+        });
+        joints->dispatch(batch, {1, 1, 1}, [&](rhi::ShaderCursor cursor) {
+            cursor["mesh"].setBinding(carriedView.rhi());
+            cursor["albedo"].setBinding(carriedView.rhi());
+            cursor["records"].setBinding(carriedView.rhi());
+            cursor["counts"].setBinding(carriedView.rhi());
+            cursor["params"]["meshWidth"].setData(kMeshWidth);
+            cursor["params"]["meshStride"].setData(static_cast<uint32_t>(carried->stride()));
+            cursor["params"]["joint"].setData(kJoint);
+        });
+        REQUIRE(batch.submit(true));
+        mesh->deviceWrote();
+        carried->deviceWrote();
+        mesh->attach("bounds", {0.0F, 0.0F, 0.0F, 1.0F, 1.0F, 0.0F});
+
+        const image::ImagePtr records = pictureOf(static_cast<int32_t>(budget * 8), 1);
+        aofx_host::EffectJob job;
+        job.bounds = records->bounds();
+        job.inputs.push_back({"Mesh", mesh});
+        job.inputs.push_back({"Influences", carried});
+        number(job, "triangles", 2);
+        number(job, "resolution", kResolution);
+        number(job, "maxSplats", budget);
+        number(job, "flatness", kFlatness);
+        number(job, "opacity", 1.0);
+        number(job, "writePbr", 1.0);
+        number(job, "writeInfluences", 1.0);
+        job.params.push_back(aofx::ParamValue{"sigma", {kSigma, kSigma}, {}});
+        auto rendered = aofx_host::renderEffect(*gpu, *effect, job);
+        REQUIRE(rendered);
+        const std::vector<float>* counted = (*rendered)->attached("splats");
+        REQUIRE(counted != nullptr);
+        const auto written = static_cast<uint32_t>((*counted)[0]);
+        REQUIRE(written >= kResolution * kResolution);
+        // Eight entries a record, which is what the joints asked for.
+        REQUIRE((*counted)[4] == 8.0F);
+
+        const gpu::Buffer recordView = viewOf(*gpu, *rendered);
+        gpu::BufferDesc desc;
+        desc.bytes = 8 * 4;
+        desc.elementBytes = 4;
+        desc.label = "joints.counts";
+        auto counts = gpu::Buffer::create(library.device(), desc);
+        REQUIRE(counts);
+        gpu::CommandBatch second(library.device());
+        check->dispatch(second, {written, 1, 1}, [&](rhi::ShaderCursor cursor) {
+            cursor["mesh"].setBinding(meshView.rhi());
+            cursor["albedo"].setBinding(meshView.rhi());
+            cursor["records"].setBinding(recordView.rhi());
+            cursor["counts"].setBinding(counts->rhi());
+            cursor["params"]["splats"].setData(written);
+            cursor["params"]["recordPixels"].setData(uint32_t{8});
+            cursor["params"]["dstWidth"].setData(static_cast<uint32_t>((*rendered)->bounds().width()));
+            cursor["params"]["dstStride"].setData(static_cast<uint32_t>((*rendered)->stride()));
+            cursor["params"]["tolerance"].setData(1.0e-5F);
+            cursor["params"]["joint"].setData(kJoint);
+        });
+        REQUIRE(second.submit(true));
+        uint32_t violations[4] = {0, 0, 0, 0};
+        REQUIRE(counts->read(library.device(), 0, sizeof(violations), violations));
+        std::printf("  %u gaussians carried; %u wrong joint, %u spilled, %u unnormalised\n", written,
+                    violations[0], violations[1], violations[2]);
+        CHECK(violations[0] == 0);   // every one on the joint its corners named
+        CHECK(violations[1] == 0);   // and nothing in the other three slots
+        CHECK(violations[2] == 0);   // and the weights a whole
+    }));
+}

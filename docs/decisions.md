@@ -4872,3 +4872,55 @@ the sample.
 that slides (1.2, 0.4, 0) between time 0 and time 1 converts to a mesh whose
 bounds -- folded on the device, not on the host -- are the square as authored
 at time 0 and exactly that slide away at time 1.
+
+## A gaussian carries the joints its triangle carries
+
+The second half of reading a rigged asset: not the pose, but what moves it.
+`MeshStage` now resolves each mesh's skel binding -- `UsdSkelCache` over every
+`SkelRoot`, one `UsdSkelSkinningQuery` a skinnable prim -- and hands back, per
+mesh, the joints each of its points is held by and how much, its
+`geomBindTransform`, its skeleton's path and its skeleton's joint order.
+
+**In the skeleton's order, not the mesh's.** A mesh may name its own subset of
+the skeleton's joints with `skel:joints`, and the indices UsdSkel hands back
+are then into that subset. USD keeps a mapper for it, and the mapper runs the
+other way -- skeleton order to the mesh's -- so it is run over the identity to
+learn each mesh index's skeleton index, and the influences are written in the
+skeleton's order. One cloud then has one joint order whatever mixture of
+meshes it was converted from.
+
+**Posed, or carried, and never both.** `MeshStageOptions::skinned` reads the
+**bind** pose and skips `UsdSkelBakeSkinning` entirely, because that is where
+the skeleton's transforms expect to find the geometry; posing first would skin
+it twice.
+
+**The blend is the effect's.** `mesh_pack.slang` puts each triangle corner's
+four heaviest influences in a second picture of exactly the same shape as the
+mesh's, so the effect addresses the two alike and needs no second set of
+dimensions. The effect then blends the three corners by the barycentric
+coordinates of the cell the gaussian stands in, which is what interpolating
+the skin means: twelve `(joint, weight)` pairs go in and four come out -- a
+joint already there gains the weight, an empty slot takes it, otherwise it
+displaces the lightest -- and the four are renormalised, so a gaussian is
+carried entirely however its triangle was authored. It is the effect's because
+it is the effect that knows where inside the triangle the gaussian stands.
+
+The record grows to **eight entries**: four, six with the PBR channels, eight
+with the joints, and nothing in between. `writeInfluences` and the
+`Influences` clip are additive, so the bundle's ABI is untouched and
+`aofx_sdk_manifest` never moves.
+
+**`--skinned` forces `--no-bake`**, and says so. What the harmonics hold is
+this scene's environment and its bounce -- the ground under a paw is in them --
+and carrying that up with the leg when it lifts is the mistake of rotating a
+lightmap. A cloud a skeleton moves carries its material and is relit every
+frame, which is right by construction.
+
+**Measured**: a square bound entirely to one joint converts to 1056 gaussians
+that all name that joint with all of the weight; and through the effect, 272
+gaussians of a quad whose corners all name joint 3 come out on joint 3, with
+nothing in the other three slots and the weights summing to one
+(`tests/aofx/test_mesh2splat.cpp`, `tests/usd/test_usd.cpp`).
+
+**Not done here**: nothing yet deforms those gaussians. The cloud carries its
+joints and the file does not write them.

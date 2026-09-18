@@ -76,8 +76,13 @@ struct Mesh2SplatUniforms {
     uint32_t mrWidth = 0;
     uint32_t mrHeight = 0;
     uint32_t mrStride = 0;
+
+    uint32_t hasInfluences = 0;
+    uint32_t pad2 = 0;
+    uint32_t pad3 = 0;
+    uint32_t pad4 = 0;
 };
-static_assert(sizeof(Mesh2SplatUniforms) == 192, "must match M2sParams exactly");
+static_assert(sizeof(Mesh2SplatUniforms) == 208, "must match M2sParams exactly");
 
 class Mesh2Splat final : public aofx::Effect {
 public:
@@ -103,6 +108,9 @@ public:
         clip("Albedo", "Albedo", true);
         clip("Normal", "Normal map", true);
         clip("MetallicRoughness", "Metallic-roughness", true);
+        // Not a picture of colour: the joints each corner of each triangle is
+        // carried by, laid out exactly as the Mesh clip is.
+        clip("Influences", "Joint influences", true);
 
         aofx::ParamDesc triangles;
         triangles.name = "triangles";
@@ -240,6 +248,17 @@ public:
         pbr.defaults = {1.0};
         into.params.push_back(pbr);
 
+        aofx::ParamDesc joints;
+        joints.name = "writeInfluences";
+        joints.label = "Write joint influences";
+        joints.hint =
+            "Two entries more a record: the four joints the gaussian is carried by and how much, "
+            "blended from the corners of its triangle. What a cloud a skeleton deforms needs, and "
+            "it wants the Influences clip and the PBR entries with it.";
+        joints.type = aofx::ParamType::Boolean;
+        joints.defaults = {0.0};
+        into.params.push_back(joints);
+
         aofx::ParamDesc cells;
         cells.name = "maxCells";
         cells.label = "Most cells a triangle";
@@ -278,6 +297,15 @@ public:
         uniforms.meshWidth = static_cast<uint32_t>(meshPlane->buffer.width);
         uniforms.meshStride = static_cast<uint32_t>(meshPlane->buffer.stride);
         uniforms.recordPixels = request.number("writePbr", 1.0) >= 0.5 ? 6U : 4U;
+        // The joints a gaussian is carried by ride in two more entries, and
+        // they need the PBR ones ahead of them: 4, 6, 8 and nothing between.
+        const aofx::InputPlane* carried = request.input("Influences");
+        const bool withJoints = request.number("writeInfluences", 0.0) >= 0.5 && carried != nullptr &&
+                                carried->buffer.isValid();
+        if (withJoints) {
+            uniforms.recordPixels = 8U;
+            uniforms.hasInfluences = 1U;
+        }
         uniforms.dstWidth = static_cast<uint32_t>(target->buffer.width);
         uniforms.dstHeight = static_cast<uint32_t>(target->buffer.height);
         uniforms.dstStride = static_cast<uint32_t>(target->buffer.stride);
@@ -389,6 +417,7 @@ public:
             albedo != nullptr && albedo->buffer.isValid() ? albedo->buffer : meshPlane->buffer,
             normal != nullptr && normal->buffer.isValid() ? normal->buffer : meshPlane->buffer,
             mr != nullptr && mr->buffer.isValid() ? mr->buffer : meshPlane->buffer,
+            withJoints ? carried->buffer : meshPlane->buffer,
             counters,
             cellCounts,
             target->buffer};

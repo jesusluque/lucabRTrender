@@ -92,12 +92,18 @@ struct M2sParams {
     uint  mrWidth;
     uint  mrHeight;
     uint  mrStride;
+
+    uint  hasInfluences;  // the joints a corner is carried by, same shape as the mesh
+    uint  pad2;
+    uint  pad3;
+    uint  pad4;
 };
 
 StructuredBuffer<float4>   mesh;        // per triangle: (position, u) and (normal, v), three corners
 StructuredBuffer<float4>   albedo;
 StructuredBuffer<float4>   normalMap;
 StructuredBuffer<float4>   metallicRoughness;
+StructuredBuffer<float4>   influences;  // 2 entries a corner: (joint, weight) twice
 RWStructuredBuffer<uint>   counters;    // [wanted, written, degenerate, dropped]
 RWStructuredBuffer<uint>   cellCounts;  // a triangle's covered cells, then where they start
 RWStructuredBuffer<float4> records;     // the output plane
@@ -141,6 +147,66 @@ float4 meshEntry(uint index) {
     const uint x = index % params.meshWidth;
     const uint y = index / params.meshWidth;
     return mesh[y * params.meshStride + x];
+}
+
+/// The joints picture is the mesh picture's shape, entry for entry, which is
+/// what saves it a second set of dimensions.
+float4 influenceEntry(uint index) {
+    const uint x = index % params.meshWidth;
+    const uint y = index / params.meshWidth;
+    return influences[y * params.meshStride + x];
+}
+
+/// THE JOINTS A GAUSSIAN IS CARRIED BY: the barycentric blend of the three
+/// corners', which is what interpolating the skin means.
+///
+/// Twelve pairs go in and four come out, because four is what the cloud
+/// carries: a joint already there gains the weight, an empty slot takes it,
+/// and otherwise it displaces the lightest. The four are renormalised, so a
+/// gaussian is carried entirely however its triangle was authored.
+void blendInfluences(uint triangle, float3 bary, out float4 joints, out float4 weights) {
+    joints = float4(0.0);
+    weights = float4(0.0);
+    for (uint corner = 0; corner < 3; ++corner) {
+        const uint at = triangle * 6 + corner * 2;
+        const float4 low = influenceEntry(at);
+        const float4 high = influenceEntry(at + 1);
+        float2 pairs[4];
+        pairs[0] = low.xy;
+        pairs[1] = low.zw;
+        pairs[2] = high.xy;
+        pairs[3] = high.zw;
+        for (uint i = 0; i < 4; ++i) {
+            const float weight = pairs[i].y * bary[corner];
+            if (!(weight > 0.0)) {
+                continue;
+            }
+            const float joint = pairs[i].x;
+            bool placed = false;
+            for (uint slot = 0; slot < 4; ++slot) {
+                if (weights[slot] > 0.0 && joints[slot] == joint) {
+                    weights[slot] += weight;
+                    placed = true;
+                    break;
+                }
+            }
+            if (placed) {
+                continue;
+            }
+            uint lightest = 0;
+            for (uint slot = 1; slot < 4; ++slot) {
+                if (weights[slot] < weights[lightest]) {
+                    lightest = slot;
+                }
+            }
+            if (weight > weights[lightest]) {
+                joints[lightest] = joint;
+                weights[lightest] = weight;
+            }
+        }
+    }
+    const float sum = weights.x + weights.y + weights.z + weights.w;
+    weights = sum > 0.0 ? weights / sum : float4(1.0, 0.0, 0.0, 0.0);
 }
 
 /// A texture, wrapped, sampled as the four texels around the point. Row 0 is
@@ -533,6 +599,13 @@ void m2sEmit(uint3 tid: SV_DispatchThreadID) {
         if (params.recordPixels >= 6) {
             records[recordAt(slot, 4)] = float4(shading, metallic);
             records[recordAt(slot, 5)] = float4(roughness, params.transmission, uv.x, uv.y);
+        }
+        if (params.recordPixels >= 8 && params.hasInfluences != 0) {
+            float4 joints;
+            float4 weights;
+            blendInfluences(triangle, bary, joints, weights);
+            records[recordAt(slot, 6)] = float4(joints.x, weights.x, joints.y, weights.y);
+            records[recordAt(slot, 7)] = float4(joints.z, weights.z, joints.w, weights.w);
         }
         ++slot;
     }

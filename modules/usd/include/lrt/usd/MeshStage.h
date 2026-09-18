@@ -67,6 +67,31 @@ struct StageMaterial {
     StageTexture           roughnessMap;
 };
 
+/// WHAT CARRIES A MESH WHEN ITS SKELETON MOVES.
+///
+/// The joints each of its points is held by and how much, in the skeleton's
+/// own joint order, and the transform out of the mesh's space into the bind
+/// space those joints are measured from. It is the same thing
+/// `geom::SkinningInput` takes, read here out of USD rather than out of
+/// Hydra's ext computation, so that a conversion can give each gaussian the
+/// influences of the triangle it stands on.
+struct StageSkinning {
+    bool                  bound = false;
+    /// The Skeleton prim's path: what the cloud is written against.
+    std::string           skeleton;
+    /// Its joints, in order, which is the order the indices below are in.
+    std::vector<std::string> joints;
+    uint32_t              perPoint = 0;   ///< influences a point
+    /// `(joint, weight)`, `perPoint` of them a point, point major -- the
+    /// layout `geom::SkinningInput::influences` reads.
+    std::vector<float>    influences;
+    /// Mesh space to bind space, row major, four rows of four.
+    std::array<float, 16> geomBindTransform{1.0F, 0.0F, 0.0F, 0.0F, 0.0F, 1.0F, 0.0F, 0.0F,
+                                            0.0F, 0.0F, 1.0F, 0.0F, 0.0F, 0.0F, 0.0F, 1.0F};
+    /// Dual quaternion rather than linear blend, if the mesh asked for it.
+    bool                  dualQuaternion = false;
+};
+
 /// One mesh of the stage, already on the device.
 struct StageMesh {
     std::string           path;
@@ -77,6 +102,9 @@ struct StageMesh {
     std::array<float, 12> normalToWorld{1.0F, 0.0F, 0.0F, 0.0F, 0.0F, 1.0F, 0.0F,
                                         0.0F, 0.0F, 0.0F, 1.0F, 0.0F};
     StageMaterial         material;
+    /// Filled when `MeshStageOptions::skinned` asked for it and the mesh is
+    /// bound to a skeleton.
+    StageSkinning         skinning;
 };
 
 struct MeshStageOptions {
@@ -91,6 +119,11 @@ struct MeshStageOptions {
     /// it reads exactly as it did, because an attribute with no time samples
     /// answers with its default whatever time is asked for.
     double      time = 0.0;
+    /// Read the **bind** pose and each point's joint influences, rather than
+    /// the pose at `time`. What a cloud that is to be carried by a skeleton
+    /// needs: its gaussians stand where the skeleton's transforms expect
+    /// them, and posing the stage first would apply the skinning twice.
+    bool        skinned = false;
 };
 
 /// Opens `path` and reads its meshes. The stage stays open for as long as this

@@ -115,6 +115,9 @@ struct Options {
     /// look like one.
     uint32_t                 bakeDegree = 2;
     bool                     defaultLights = false;
+    /// Carry the skeleton: the gaussians are built in the bind pose and each
+    /// keeps the joints that move it.
+    bool                     skinned = false;
     double                   time = 0.0;
     std::vector<std::string> paths;
 };
@@ -164,6 +167,7 @@ public:
     [[nodiscard]] Result<void> packMeshes(std::vector<usd::StageMesh>& meshes) {
         gpu::Device& device = library_->device();
         streams_.resize(meshes.size());
+        skins_.resize(meshes.size());
         triangles_.resize(meshes.size());
         uint64_t chunkTotal = 0;
         std::vector<uint32_t> chunkFirst(meshes.size(), 0);
@@ -199,6 +203,28 @@ public:
             auto view = viewOf(*context_, streams_[k], "mesh2splat.stream");
             if (!view) return std::move(view).error();
 
+            // The joints each corner is carried by, in a second picture of
+            // exactly the same shape, so the two are addressed alike and the
+            // effect needs no second set of dimensions.
+            const usd::StageSkinning& skin = meshes[k].skinning;
+            gpu::Buffer influences;
+            std::optional<gpu::Buffer> skinView;
+            if (skin.bound && !skin.influences.empty()) {
+                gpu::BufferDesc held;
+                held.bytes = skin.influences.size() * 4;
+                held.elementBytes = 8;
+                held.label = "mesh2splat.influences";
+                auto made = gpu::Buffer::create(device, held, skin.influences.data());
+                if (!made) return std::move(made).error();
+                influences = std::move(*made);
+                auto second = image::Image::create(pictureFor(entries));
+                if (!second) return std::move(second).error();
+                skins_[k] = *second;
+                auto held2 = viewOf(*context_, skins_[k], "mesh2splat.skin");
+                if (!held2) return std::move(held2).error();
+                skinView = std::move(*held2);
+            }
+
             const geom::GpuPrimvar* normals = mesh.primvar("normals");
             const geom::GpuPrimvar* uvs = mesh.primvar("st");
             const uint32_t stride = static_cast<uint32_t>(streams_[k]->stride());
@@ -214,6 +240,9 @@ public:
                 cursor["normals"].setBinding(normals != nullptr ? normals->values.rhi()
                                                                 : mesh.positions.rhi());
                 cursor["uvs"].setBinding(uvs != nullptr ? uvs->values.rhi() : mesh.positions.rhi());
+                cursor["influences"].setBinding(influences.valid() ? influences.rhi()
+                                                                   : mesh.positions.rhi());
+                cursor["skinStream"].setBinding(skinView ? skinView->rhi() : view->rhi());
                 cursor["stream"].setBinding(view->rhi());
                 cursor["extents"].setBinding(extents->rhi());
                 cursor["pack"]["triangles"].setData(mesh.triangles);
@@ -230,6 +259,7 @@ public:
                 cursor["pack"]["destWidth"].setData(kRowEntries);
                 cursor["pack"]["destStride"].setData(stride);
                 cursor["pack"]["chunkFirst"].setData(uint32_t{0});
+                cursor["pack"]["perPoint"].setData(skinView ? skin.perPoint : 0U);
                 for (uint32_t r = 0; r < 3; ++r) {
                     const std::string world = "toWorld" + std::to_string(r);
                     const std::string normal = "normalTo" + std::to_string(r);
@@ -260,6 +290,11 @@ public:
         LRT_TRY(batch.submit(true));
         for (const image::ImagePtr& stream : streams_) {
             stream->deviceWrote();
+        }
+        for (const image::ImagePtr& skin : skins_) {
+            if (skin) {
+                skin->deviceWrote();
+            }
         }
         auto box = bounds->readAll<float>(device);
         if (!box) return std::move(box).error();
@@ -435,9 +470,13 @@ public:
             degenerate += out->degenerate;
             raw.records.insert(raw.records.end(), out->records.begin(), out->records.end());
             normals_.insert(normals_.end(), out->normals.begin(), out->normals.end());
-            std::printf("mesh2splat: %s -> %llu splats of %llu wanted (%u triangles)\n",
+            influences_.insert(influences_.end(), out->influences.begin(), out->influences.end());
+            std::printf("mesh2splat: %s -> %llu splats of %llu wanted (%u triangles)%s\n",
                         meshes[k].path.c_str(), static_cast<unsigned long long>(out->written),
-                        static_cast<unsigned long long>(out->wanted), triangles_[k]);
+                        static_cast<unsigned long long>(out->wanted), triangles_[k],
+                        out->influences.empty()
+                            ? ""
+                            : (", carried by " + meshes[k].skinning.skeleton).c_str());
         }
         if (written == 0) {
             return Error(ErrorCode::InvalidArgument, "the conversion produced no splats");
@@ -472,6 +511,10 @@ private:
         uint64_t           degenerate = 0;
         std::vector<float> records;
         std::vector<float> normals;   ///< xyz a splat, for the bake
+        /// The joints a gaussian is carried by: (joint, weight) four times a
+        /// splat. Beside the record rather than in it, as the normals are --
+        /// `io::SplatEncoding` has no field for a skeleton.
+        std::vector<float> influences;
     };
 
     [[nodiscard]] Result<OneMesh> runOne(aofx::Effect& effect, const usd::StageMesh& mesh, size_t at,
@@ -494,7 +537,10 @@ private:
         // The records the effect writes go into a picture of their own, four
         // entries a splat: position and opacity, the three sizes, the rotation,
         // the colour.
-        constexpr uint32_t kRecordEntries = 6;
+        // Four entries a record, six with the PBR channels, eight when the
+        // gaussian carries the joints that move it.
+        const bool carried = mesh.skinning.bound && skins_[at];
+        const uint32_t kRecordEntries = carried ? 8U : 6U;
         const uint64_t budget = std::min<uint64_t>(room, 1ull << 23);
         const image::PixelRect bounds = pictureFor(budget * kRecordEntries);
 
@@ -507,6 +553,7 @@ private:
         if (*albedo) job.inputs.push_back({"Albedo", *albedo});
         if (*normal) job.inputs.push_back({"Normal", *normal});
         if (*mr) job.inputs.push_back({"MetallicRoughness", *mr});
+        if (carried) job.inputs.push_back({"Influences", skins_[at]});
 
         const auto number = [&job](const char* name, double value) {
             job.params.push_back(aofx::ParamValue{name, {value}, {}});
@@ -522,6 +569,7 @@ private:
         // Six entries a splat: the four a gaussian is, and the two that say
         // what it reflects with.
         number("writePbr", 1.0);
+        number("writeInfluences", carried ? 1.0 : 0.0);
         number("transmission", static_cast<double>(material.transmission));
         number("metallic", static_cast<double>(material.metallic));
         number("roughness", static_cast<double>(material.roughness));
@@ -587,15 +635,28 @@ private:
             answer.normals.push_back(shading[0]);
             answer.normals.push_back(shading[1]);
             answer.normals.push_back(shading[2]);
+            if (carried) {
+                const float* low = entry(6);
+                const float* high = entry(7);
+                for (uint32_t k = 0; k < 4; ++k) {
+                    answer.influences.push_back(low[k]);
+                }
+                for (uint32_t k = 0; k < 4; ++k) {
+                    answer.influences.push_back(high[k]);
+                }
+            }
         }
         return answer;
     }
 
     /// Every splat's shading normal, xyz, in the order the records are in.
     std::vector<float>                       normals_;
+    std::vector<float>                       influences_;
 
 public:
     [[nodiscard]] const std::vector<float>& normals() const noexcept { return normals_; }
+    /// (joint, weight) four times a gaussian, empty when nothing carries it.
+    [[nodiscard]] const std::vector<float>& influences() const noexcept { return influences_; }
 
 private:
     gpu_host::Context*                       context_ = nullptr;
@@ -606,6 +667,7 @@ private:
     std::map<std::string, uint32_t>          ids_;
     std::map<MapKey, image::ImagePtr>        maps_;
     std::vector<image::ImagePtr>             streams_;
+    std::vector<image::ImagePtr>             skins_;
     std::vector<uint32_t>                    triangles_;
     uint32_t                                 sampler_ = 0;
     std::array<float, 3>                     boundsMin_{0.0F, 0.0F, 0.0F};
@@ -753,6 +815,10 @@ void addMesh2Splat(CLI::App& app) {
     cmd->add_option("--bake-degree", o->bakeDegree,
                     "harmonics the bake fits, 0 to 3: 0 is one colour a gaussian and cannot hold a "
                     "reflection, and each degree costs a pass over the paths");
+    cmd->add_flag("--skinned", o->skinned,
+                  "carry the skeleton: the gaussians are built in the bind pose and each keeps the "
+                  "four joints that move it, so the cloud deforms with the rig instead of being one "
+                  "pose. Forces --no-bake: a baked radiance does not turn with a limb");
     cmd->add_flag("--default-lights", o->defaultLights,
                   "bake under a dome and a sun in the session layer, for a stage that brings no "
                   "lights of its own (what lrt view offers)");
@@ -802,6 +868,16 @@ void addMesh2Splat(CLI::App& app) {
         // read the stage at its default time whatever `--time` said, and a
         // bake at any other instant put its rays where the mesh used to be.
         read.time = o->time;
+        read.skinned = o->skinned;
+        if (o->skinned && o->bake) {
+            // A BAKED RADIANCE DOES NOT TURN WITH A LIMB. What the harmonics
+            // hold is the environment and the bounce -- the ground under a
+            // paw is in them -- and carrying that up with the leg is the
+            // mistake of rotating a lightmap. A cloud a skeleton moves is
+            // relit every frame instead, which is right by construction.
+            std::printf("mesh2splat: --skinned carries the material, not a bake\n");
+            o->bake = false;
+        }
             auto meshes = stage->read(*builder, read);
             if (!meshes) return std::move(meshes).error();
 

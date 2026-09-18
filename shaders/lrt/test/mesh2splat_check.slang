@@ -33,6 +33,9 @@ struct CheckParams {
     uint  albedoHeight;
     uint  albedoStride;
     uint  checker;        ///< cells across the checker, 0 for none
+    float joint;          ///< the joint every gaussian should be carried by
+    uint  pad0;
+    uint  pad1;
 };
 
 RWStructuredBuffer<float4> mesh;      ///< the stream, written by `m2sQuad`
@@ -155,5 +158,55 @@ void m2sCheckColour(uint3 tid: SV_DispatchThreadID) {
     const bool wellInside = all(inCell > 0.15) && all(inCell < 0.85);
     if (wellInside && any(abs(colour.xyz - want) > params.tolerance)) {
         InterlockedAdd(counts[3], 1u);
+    }
+}
+
+
+/// The joints picture for the quad: every corner carried entirely by one
+/// joint. Written by a kernel like the quad itself, so the test makes its
+/// inputs the way it checks its outputs.
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void m2sInfluences(uint3 tid: SV_DispatchThreadID) {
+    if (tid.x != 0) {
+        return;
+    }
+    for (uint triangle = 0; triangle < 2; ++triangle) {
+        for (uint corner = 0; corner < 3; ++corner) {
+            const uint at = triangle * 6 + corner * 2;
+            mesh[meshAt(at)] = float4(params.joint, 1.0, 0.0, 0.0);
+            mesh[meshAt(at + 1)] = float4(0.0, 0.0, 0.0, 0.0);
+        }
+    }
+}
+
+/// THE JOINTS A GAUSSIAN CAME OUT CARRIED BY.
+///
+/// The conversion blends the three corners' influences by the barycentric
+/// coordinates of the cell the gaussian stands in. Where every corner names
+/// the same joint with all of its weight, every blend is that joint with all
+/// of its weight whatever the coordinates are -- which is the case this
+/// pins, because it is the one that catches the plumbing: a picture that did
+/// not arrive, an entry addressed wrong, a weight left unnormalised.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void m2sCheckInfluences(uint3 tid: SV_DispatchThreadID) {
+    const uint splat = tid.x;
+    if (splat >= params.splats) {
+        return;
+    }
+    const float4 low = records[recordAt(splat, 6)];
+    const float4 high = records[recordAt(splat, 7)];
+    // The first slot carries it all, and the other three carry nothing.
+    if (abs(low.x - params.joint) > 1.0e-6 || abs(low.y - 1.0) > params.tolerance) {
+        InterlockedAdd(counts[0], 1u);
+    }
+    if (low.w != 0.0 || high.y != 0.0 || high.w != 0.0) {
+        InterlockedAdd(counts[1], 1u);
+    }
+    // And whatever the split, the weights are a whole.
+    const float sum = low.y + low.w + high.y + high.w;
+    if (abs(sum - 1.0) > params.tolerance) {
+        InterlockedAdd(counts[2], 1u);
     }
 }

@@ -6231,4 +6231,33 @@ TEST_CASE("a skinned stage is read in the pose it holds at the time asked for", 
     CHECK(posed.max[1] == Catch::Approx(0.9).margin(1e-3));
     // The plane it stands in does not move: the joint slides in x and y.
     CHECK(posed.min[2] == Catch::Approx(rest.min[2]).margin(1e-4));
+
+    // AND ASKED FOR ITS JOINTS INSTEAD, it comes back in the bind pose with
+    // the influences on it -- because a cloud that keeps its joints is built
+    // where the skeleton's transforms expect to find it, and posing it first
+    // would skin it twice.
+    {
+        auto stage = usd::MeshStage::open(path);
+        if (!stage) FAIL(stage.error().toString());
+        usd::MeshStageOptions options;
+        options.time = 1.0;        // the pose it would otherwise be read in
+        options.skinned = true;
+        auto meshes = stage->read(*builder, options);
+        if (!meshes) FAIL(meshes.error().toString());
+        REQUIRE(meshes->size() == 1);
+        const usd::StageMesh& mesh = (*meshes)[0];
+        CHECK(mesh.mesh.bounds.min[0] == Catch::Approx(-0.5).margin(1e-4));
+        CHECK(mesh.mesh.bounds.max[0] == Catch::Approx(0.5).margin(1e-4));
+
+        const usd::StageSkinning& skin = mesh.skinning;
+        CHECK(skin.bound);
+        CHECK(skin.skeleton == "/Root/Skel");
+        CHECK(skin.joints.size() == 2);
+        CHECK(skin.perPoint == 1);
+        REQUIRE(skin.influences.size() == 4 * 2);
+        for (size_t point = 0; point < 4; ++point) {
+            CHECK(skin.influences[point * 2] == 1.0F);       // the arm, the skeleton's joint 1
+            CHECK(skin.influences[point * 2 + 1] == 1.0F);   // and all of it
+        }
+    }
 }

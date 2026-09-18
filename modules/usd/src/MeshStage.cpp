@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <map>
 #include <optional>
 
 #include <pxr/base/gf/matrix4d.h>
@@ -19,7 +20,13 @@
 #include <pxr/usd/usdGeom/tokens.h>
 #include <pxr/usd/usdGeom/xformCache.h>
 #include <pxr/usd/usdShade/connectableAPI.h>
+#include <pxr/usd/usdSkel/animMapper.h>
 #include <pxr/usd/usdSkel/bakeSkinning.h>
+#include <pxr/usd/usdSkel/binding.h>
+#include <pxr/usd/usdSkel/cache.h>
+#include <pxr/usd/usdSkel/root.h>
+#include <pxr/usd/usdSkel/skeleton.h>
+#include <pxr/usd/usdSkel/skinningQuery.h>
 #include <pxr/usd/usdShade/material.h>
 #include <pxr/usd/usdShade/materialBindingAPI.h>
 #include <pxr/usd/usdShade/shader.h>
@@ -284,6 +291,107 @@ std::string MeshStage::source() const {
     return impl_ == nullptr ? std::string{} : impl_->source;
 }
 
+/// The joints a stage's meshes are carried by, resolved once for the whole
+/// stage: one skinning query a skinnable prim, and the skeleton each is bound
+/// to. Inherited bindings are UsdSkel's business, not ours.
+struct SkelBindings {
+    UsdSkelCache                                cache;
+    std::map<SdfPath, UsdSkelSkinningQuery>     queries;
+    std::map<SdfPath, UsdSkelSkeleton>          skeletons;
+};
+
+SkelBindings resolveSkinning(const UsdStageRefPtr& stage) {
+    SkelBindings out;
+    for (const UsdPrim& prim : stage->Traverse()) {
+        if (!prim.IsA<UsdSkelRoot>()) {
+            continue;
+        }
+        const UsdSkelRoot root(prim);
+        if (!out.cache.Populate(root, UsdTraverseInstanceProxies())) {
+            continue;
+        }
+        std::vector<UsdSkelBinding> bindings;
+        if (!out.cache.ComputeSkelBindings(root, &bindings, UsdTraverseInstanceProxies())) {
+            continue;
+        }
+        for (const UsdSkelBinding& binding : bindings) {
+            for (const UsdSkelSkinningQuery& query : binding.GetSkinningTargets()) {
+                const SdfPath at = query.GetPrim().GetPath();
+                out.queries.emplace(at, query);
+                out.skeletons.emplace(at, binding.GetSkeleton());
+            }
+        }
+    }
+    return out;
+}
+
+/// One mesh's influences, in the SKELETON'S joint order.
+///
+/// A mesh may name its own subset of the skeleton's joints (`skel:joints`),
+/// and then the indices UsdSkel hands back are into that subset. The mapper
+/// that USD keeps for it goes the other way -- skeleton order to the mesh's --
+/// so it is run over the identity to get the mesh index's skeleton index, and
+/// the influences are written in the skeleton's order. One cloud then has one
+/// joint order whatever mixture of meshes it came from.
+StageSkinning skinningOf(const UsdSkelSkinningQuery& query, const UsdSkelSkeleton& skeleton,
+                         size_t points, double time) {
+    StageSkinning out;
+    if (!query.HasJointInfluences()) {
+        return out;
+    }
+    VtIntArray   indices;
+    VtFloatArray weights;
+    if (!query.ComputeVaryingJointInfluences(points, &indices, &weights)) {
+        return out;
+    }
+    const int perPoint = query.GetNumInfluencesPerComponent();
+    if (perPoint <= 0 || indices.size() != weights.size() ||
+        indices.size() != points * static_cast<size_t>(perPoint)) {
+        return out;
+    }
+    VtTokenArray joints;
+    skeleton.GetJointsAttr().Get(&joints);
+
+    // The mesh's joint index to the skeleton's.
+    std::vector<int> toSkeleton;
+    if (const UsdSkelAnimMapperRefPtr& mapper = query.GetJointMapper()) {
+        VtIntArray identity(joints.size());
+        for (size_t k = 0; k < joints.size(); ++k) {
+            identity[k] = static_cast<int>(k);
+        }
+        VtIntArray mapped;
+        if (mapper->Remap(identity, &mapped)) {
+            toSkeleton.assign(mapped.begin(), mapped.end());
+        }
+    }
+
+    out.bound = true;
+    out.skeleton = skeleton.GetPrim().GetPath().GetString();
+    out.joints.reserve(joints.size());
+    for (const TfToken& joint : joints) {
+        out.joints.push_back(joint.GetString());
+    }
+    out.perPoint = static_cast<uint32_t>(perPoint);
+    out.influences.resize(indices.size() * 2);
+    for (size_t k = 0; k < indices.size(); ++k) {
+        int joint = indices[k];
+        if (!toSkeleton.empty()) {
+            joint = joint >= 0 && static_cast<size_t>(joint) < toSkeleton.size() ? toSkeleton[joint] : 0;
+        }
+        out.influences[k * 2] = static_cast<float>(std::max(joint, 0));
+        out.influences[k * 2 + 1] = weights[k];
+    }
+    const GfMatrix4d bind = query.GetGeomBindTransform(UsdTimeCode(time));
+    for (int row = 0; row < 4; ++row) {
+        for (int column = 0; column < 4; ++column) {
+            out.geomBindTransform[static_cast<size_t>(row) * 4 + static_cast<size_t>(column)] =
+                static_cast<float>(bind[row][column]);
+        }
+    }
+    out.dualQuaternion = query.GetSkinningMethod() == UsdSkelTokens->dualQuaternion;
+    return out;
+}
+
 Result<std::vector<StageMesh>> MeshStage::read(geom::MeshBuilder& builder, const MeshStageOptions& options) {
     if (impl_ == nullptr) {
         return Error(ErrorCode::InvalidArgument, "no stage");
@@ -293,10 +401,14 @@ Result<std::vector<StageMesh>> MeshStage::read(geom::MeshBuilder& builder, const
         return Error::make(ErrorCode::InvalidArgument, "'{}': not an absolute prim path", options.prim);
     }
     const UsdTimeCode at(options.time);
-    if (!impl_->posedAt.has_value() || *impl_->posedAt != options.time) {
+    // POSED, OR CARRIED, AND NEVER BOTH. A cloud that keeps its joints is
+    // built in the bind pose, because that is where the skeleton's transforms
+    // expect to find it; posing the stage first would skin it twice.
+    if (!options.skinned && (!impl_->posedAt.has_value() || *impl_->posedAt != options.time)) {
         LRT_TRY(poseStage(impl_->stage, options.time));
         impl_->posedAt = options.time;
     }
+    const SkelBindings bindings = options.skinned ? resolveSkinning(impl_->stage) : SkelBindings{};
     UsdGeomXformCache transforms(at);
     std::vector<StageMesh> meshes;
     for (const UsdPrim& prim : impl_->stage->Traverse()) {
@@ -400,6 +512,13 @@ Result<std::vector<StageMesh>> MeshStage::read(geom::MeshBuilder& builder, const
         out.toWorld = rowsOf(toWorld);
         out.normalToWorld = normalRowsOf(toWorld);
         out.material = materialOf(prim);
+        if (options.skinned) {
+            const auto query = bindings.queries.find(prim.GetPath());
+            const auto skeleton = bindings.skeletons.find(prim.GetPath());
+            if (query != bindings.queries.end() && skeleton != bindings.skeletons.end()) {
+                out.skinning = skinningOf(query->second, skeleton->second, points.size(), options.time);
+            }
+        }
         meshes.push_back(std::move(out));
     }
     if (meshes.empty()) {
