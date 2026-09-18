@@ -394,6 +394,38 @@ const char* kBake = R"(
 static const bool kBake = true;
 StructuredBuffer<float4> bakeRays;   // two entries a point: where it is and how far off to start, then its normal
 
+/// The material a bake shades its first vertex with: its body, not its polish.
+///
+/// A gaussian carries one colour, and a reflection is exactly the part of a
+/// surface that one colour cannot hold: baked in, it is the same from every
+/// direction, and the chess set's marble came back as smooth grey plastic
+/// with its veining gone -- the texture was there, at three percent of a
+/// specular that covered it.
+///
+/// So the bake keeps what a colour *can* hold and what the renderer cannot
+/// work out for itself: the diffuse lobes, which carry the texture and the
+/// light that reached it, what a material transmits, and a conductor's
+/// reflection -- a metal has no body but that, and dropping it would leave
+/// gold black. What it drops is the dielectric polish and the sheen, which
+/// `splat_relight` puts back at render time, from the metallic and roughness
+/// the gaussian carries, and puts back *with a direction in it*.
+LobeStack bakeBody(LobeStack stack) {
+    LobeStack body = stack;
+    body.count = 0;
+    for (uint k = 0; k < stack.count; ++k) {
+        const Lobe lobe = stack.lobes[k];
+        const bool diffuse = lobe.kind == kLobeOrenNayar || lobe.kind == kLobeBurley ||
+                             lobe.kind == kLobeTranslucent || lobe.kind == kLobeHair;
+        const bool metal = lobe.kind == kLobeConductor;
+        const bool through = lobe.scatter == kScatterTransmit;
+        if (diffuse || metal || through) {
+            body.lobes[body.count] = lobe;
+            body.count += 1;
+        }
+    }
+    return body;
+}
+
 /// The point seen from one direction of the hemisphere it faces.
 ///
 /// A colour that is one number cannot be view-dependent, so what a bake stores
@@ -444,6 +476,7 @@ Found foundBaked(uint at, uint sample, uint mask) {
 const char* kNoBake = R"(
 static const bool kBake = false;
 Found foundBaked(uint at, uint sample, uint mask) { return foundNothing(); }
+LobeStack bakeBody(LobeStack stack) { return stack; }
 )";
 
 const char* kNoAux = R"(
@@ -1296,6 +1329,11 @@ void tracePathsAt(uint2 group, uint index) {
                 lightStep = false;
             } else {
                 cur = shaded;
+                if (kBake && bounce == 0) {
+                    // The first vertex is the gaussian's own surface, and what
+                    // it is asked for is the light on it (bakeBody says why).
+                    cur.stack = bakeBody(cur.stack);
+                }
                 if (kAux && bounce == 0 && path.writeAux != 0 && !auxWritten) {
                     writeAuxAt(at, pixels, float4(stackAlbedo(cur.stack, cur.toEye), 1.0),
                                float4(cur.inputs.normalWorld, 1.0));

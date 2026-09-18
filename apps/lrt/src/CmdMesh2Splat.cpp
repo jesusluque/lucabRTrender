@@ -761,9 +761,12 @@ void addMesh2Splat(CLI::App& app) {
             usd::ExportOptions options;
             options.maxDegree = 0;
             options.addCamera = o->addCamera;
-            // A baked cloud carries light and is shown as it is; a converted
-            // one that was not baked carries an albedo the scene is to light.
-            options.relight = !o->bake;
+            // Both baked and not, the cloud is relit -- what differs is what
+            // its colours are. Baked, they are the light on the material's
+            // body and the frame adds the polish; not baked, they are an
+            // albedo and the frame lights them whole.
+            options.relight = true;
+            options.litBody = o->bake;
             return usd::writeParticleFieldStage(library, *raw, o->output, options);
         };
         auto ran = context->run([&] { inside = work(); });

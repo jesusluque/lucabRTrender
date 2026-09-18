@@ -77,6 +77,9 @@ struct SplatEntry {
     /// LrtSplatLightingAPI: relit by the scene's lights rather than shown as
     /// it was baked.
     bool                                relight = false;
+    /// `primvars:lrt:splat:litBody`: its colours are light already, so what
+    /// relighting adds is the polish alone (`lrt mesh2splat --bake`).
+    bool                                litBody = false;
     std::vector<pxr::TfToken>           categories;   ///< what a light's link is tested against
     std::optional<StreamedAsset>        assetPending;
     StreamedAsset                       asset;
@@ -219,7 +222,8 @@ public:
                    std::optional<render::SplatEdit> edit = std::nullopt,
                    std::optional<StreamedAsset> asset = std::nullopt,
                    std::optional<bool> relight = std::nullopt,
-                   std::optional<std::vector<pxr::TfToken>> categories = std::nullopt);
+                   std::optional<std::vector<pxr::TfToken>> categories = std::nullopt,
+                   std::optional<bool> litBody = std::nullopt);
     void setPoints(const pxr::SdfPath& id, std::optional<PointsArrays> raw,
                    const render::Mat4* transform, std::optional<bool> visible,
                    std::optional<render::PointStyle> style);

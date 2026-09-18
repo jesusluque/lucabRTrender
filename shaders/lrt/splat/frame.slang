@@ -69,6 +69,7 @@ public struct FrameParams {
     public float shadowOffset;   // where its shadow ray starts, in the splat's own sigmas
     public float shadowCut;      // and where the ray gives up
     public uint  hasPbr;         // 1: `pbr` holds this cloud's metallic and roughness
+    public uint  litBody;        // 1: the colours are light already, and only the polish is added
     // Relighting happens in the world, where the lights are: the cloud to
     // world rows, and the eye there. The colour from the harmonics is still
     // the cloud's own business, which is why the eye above stays as it is.

@@ -56,6 +56,11 @@ struct SplatInstance {
     /// LrtSplatLightingAPI: relight these splats from the scene's lights
     /// instead of showing the radiance they were baked with.
     bool                    relight = false;
+    /// `primvars:lrt:splat:litBody`: the colours are light already -- the body
+    /// of the material with this scene's light on it, which is what
+    /// `lrt mesh2splat` bakes -- so relighting adds the polish and nothing
+    /// else. Without it the colours are an albedo and relighting lights them.
+    bool                    litBody = false;
     /// The categories this cloud belongs to, one bit each, as a mesh instance
     /// carries them: a light reaches it only where its link says so.
     uint64_t                categories = 0;

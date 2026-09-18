@@ -423,6 +423,7 @@ Result<void> GaussianRayTracer::prepareFrame(std::span<const SplatInstance> inst
         // What relighting needs: whether this instance asked for it, where it
         // stands in the world and which lights reach it.
         bool                    relight = false;
+        bool                    litBody = false;
         std::array<float, 12>   toWorld{};
         uint64_t                categories = 0;
     };
@@ -441,7 +442,8 @@ Result<void> GaussianRayTracer::prepareFrame(std::span<const SplatInstance> inst
         const std::array<float, 12> toCloudRows = toCloud.rows3x4();
         const auto colourStart = static_cast<uint32_t>(colours);
         shades.push_back({instance.splats, colourStart, toCloud.point(eyeWorld), instance.edit,
-                          instance.relight && lights != nullptr && lights->any(), rows, instance.categories});
+                          instance.relight && lights != nullptr && lights->any(), instance.litBody, rows,
+                          instance.categories});
         colours += instance.splats->count;
         if (!hardware) {
             data.insert(data.end(), toCloudRows.begin(), toCloudRows.end());
@@ -548,6 +550,7 @@ Result<void> GaussianRayTracer::prepareFrame(std::span<const SplatInstance> inst
             p["categoriesLo"].setData(static_cast<uint32_t>(shade.categories & 0xFFFFFFFFu));
             p["categoriesHi"].setData(static_cast<uint32_t>(shade.categories >> 32));
             p["hasPbr"].setData(uint32_t{shade.cloud->hasPbr() ? 1u : 0u});
+            p["litBody"].setData(uint32_t{shade.litBody ? 1u : 0u});
             static const char* kWorldRow[12] = {"w00", "w01", "w02", "w03", "w10", "w11",
                                                 "w12", "w13", "w20", "w21", "w22", "w23"};
             for (int k = 0; k < 12; ++k) {

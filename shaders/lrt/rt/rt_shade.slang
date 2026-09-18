@@ -71,6 +71,7 @@ void rtShade(uint3 tid: SV_DispatchThreadID) {
         surface.metallic = params.hasPbr != 0 ? pbrMetallic(pbr[i]) : 0.0;
         surface.roughness = params.hasPbr != 0 ? pbrRoughness(pbr[i]) : 1.0;
         surface.transmission = params.hasPbr != 0 ? pbrTransmission(pbr[i]) : 0.0;
+        surface.lit = params.litBody != 0;
         // No shadow factors on this route: the rasteriser measures them in a
         // pass of its own before it projects, and a traced frame has no such
         // pass. Every light is taken whole.

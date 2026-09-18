@@ -328,6 +328,7 @@ Result<FrameStats> TileRasterizer::render(const Projection& projection,
             // conversion from a mesh does, a capture does not). Bound either
             // way, and `hasPbr` is what says whether it is read.
             cursor["params"]["hasPbr"].setData(uint32_t{cloud->hasPbr() ? 1u : 0u});
+            cursor["params"]["litBody"].setData(uint32_t{instance.litBody ? 1u : 0u});
             cursor["pbr"].setBinding(cloud->hasPbr() ? cloud->pbr.rhi() : cloud->shape.rhi());
             // Relighting happens in the world: the rows take this cloud there
             // and the eye is already there.

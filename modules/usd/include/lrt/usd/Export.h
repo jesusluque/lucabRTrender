@@ -23,6 +23,10 @@ struct ExportOptions {
     /// somebody captured. True for a cloud converted from a mesh, false for a
     /// capture, which carries the light it was shot under.
     bool     relight = false;
+    /// Writes `primvars:lrt:splat:litBody = 1`: the colours are the light on
+    /// the material's body, not an albedo, so a frame that relights this
+    /// cloud adds the polish and nothing else. What `lrt mesh2splat` bakes.
+    bool     litBody = false;
 };
 
 /// Writes `raw` as a UsdVolParticleField3DGaussianSplat at /World/Splats in a

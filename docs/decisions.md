@@ -4485,3 +4485,41 @@ shiny, because the average over the hemisphere has the specular everywhere
 while a view has it in one place. That is the limit of a colour with no
 direction in it, and what answers it is spherical harmonics -- which the
 clouds already carry to degree 3 and the bake does not write yet.
+
+## What one colour a gaussian cannot do, measured
+
+The baked pawn had the right light in it and still did not look like the mesh:
+its marble came out smooth. Three arrangements were tried and measured over
+the same 60 by 60 patch of the body, against the mesh's **min 0.024, mean
+0.085, max 5.55**:
+
+| what the gaussian carries | min | mean |
+|---|---|---|
+| the whole material, baked | 0.066 | 0.137 |
+| its body baked, the polish added by the frame | 0.071 | 0.110 |
+| the material, relit every frame | 0.004 | 0.044 |
+
+The means can be made to match. The **minimum cannot**: every bake floors at
+0.066 where the mesh reaches 0.024. That is not a bug to find -- it is what a
+colour with no direction in it means. A surface looks dark from the directions
+where it reflects nothing bright, and an average over the hemisphere has none
+of that: it puts the sky's reflection on every gaussian from every side, which
+lifts the darks and, with them, buries a texture whose contrast is smaller
+than the lift.
+
+So the split that was built -- the body baked (`bakeBody`: the diffuse, what
+the material transmits, and a conductor's reflection, which is all a metal
+has) and the polish added at render time from the metallic and roughness the
+gaussian carries (`primvars:lrt:splat:litBody`) -- is worth having and is not
+enough. It gets the texture's own light right, with its shadows and its
+bounces, and leaves the reflection to a lobe that knows where the eye is. What
+it does not have is the dome's *visibility* per gaussian, so the added
+reflection lifts exactly the places the mesh leaves dark.
+
+**What ends it is spherical harmonics**, which is what a trained cloud carries
+and what this engine already reads to degree 3: the bake would run once per
+coefficient, projecting the radiance it already samples over the hemisphere
+onto the basis, and the renderer would need nothing added at all. Apple's
+LiTo calls the same thing a surface light field and learns a latent for it;
+the classical version is four to sixteen numbers a gaussian, and the format
+has room for them.

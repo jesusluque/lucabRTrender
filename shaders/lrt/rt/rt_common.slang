@@ -61,7 +61,9 @@ public struct RtParams {
     public uint  relight;        // 1: light these splats rather than show them as baked
     public uint  lightCount;
     public uint  categoriesLo; public uint categoriesHi;
-    public uint  hasPbr; public uint pad3; public uint pad4; public uint pad5;
+    public uint  hasPbr;         // 1: `pbr` holds this cloud's metallic and roughness
+    public uint  litBody;        // 1: the colours are light already, and only the polish is added
+    public uint  pad4; public uint pad5;
     public float w00; public float w01; public float w02; public float w03;
     public float w10; public float w11; public float w12; public float w13;
     public float w20; public float w21; public float w22; public float w23;

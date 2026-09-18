@@ -61,6 +61,12 @@ public struct SplatSurface {
     /// splat is seen through its own opacity, which the conversion lowers for
     /// the same reason.
     public float  transmission;
+    /// True where `albedo` is not an albedo at all but light: a cloud whose
+    /// body was baked (`lrt mesh2splat`, which asks the path tracer for the
+    /// light on every gaussian). What is left for a frame to add is the
+    /// polish -- the reflection, which is the part of a surface that one
+    /// colour cannot hold and which a bake therefore left out.
+    public bool   lit;
 };
 
 /// GGX, as the surface lobes write it: D, Smith's height-correlated V, and
@@ -84,8 +90,10 @@ float3 specularLobe(SplatSurface s, float3 wo, float3 wi) {
     const float lambdaV = nDotL * sqrt(nDotV * nDotV * (1.0 - a2) + a2);
     const float lambdaL = nDotV * sqrt(nDotL * nDotL * (1.0 - a2) + a2);
     const float visibility = 0.5 / max(lambdaV + lambdaL, 1.0e-9);
-    // A dielectric reflects 4% head on; a metal reflects its own colour.
-    const float3 f0 = lerp(float3(0.04), s.albedo, s.metallic);
+    // A dielectric reflects 4% head on; a metal reflects its own colour --
+    // except where the metal is already baked, and then there is nothing of
+    // it left to add.
+    const float3 f0 = s.lit ? float3(0.04 * (1.0 - s.metallic)) : lerp(float3(0.04), s.albedo, s.metallic);
     const float3 fresnel = f0 + (float3(1.0) - f0) * pow(1.0 - vDotH, 5.0);
     return distribution * visibility * fresnel;
 }
@@ -117,12 +125,12 @@ float3 relitByDome(SplatSurface s, float3 wo, LightRecord light) {
     const float3 mirror = reflect(-wo, s.normal);
     const LightHit above = lightHit(light, s.position, s.normal);
     const LightHit reflected = lightHit(light, s.position, mirror);
-    const float3 f0 = lerp(float3(0.04), s.albedo, s.metallic);
+    const float3 f0 = s.lit ? float3(0.04 * (1.0 - s.metallic)) : lerp(float3(0.04), s.albedo, s.metallic);
     // A dome is on both sides of a splat at once, so the translucent half
     // sees exactly what the facing half sees and the two sum to the whole
     // body: a glass ball under a sky is its own colour, not a dark shell.
     const LightHit behind = lightHit(light, s.position, -s.normal);
-    const float3 body = s.albedo * (1.0 - s.metallic);
+    const float3 body = s.lit ? float3(0.0) : s.albedo * (1.0 - s.metallic);
     return body * ((1.0 - s.transmission) * above.radiance + s.transmission * behind.radiance) +
            environmentBrdf(f0, s.roughness, nDotV) * reflected.radiance;
 }
@@ -141,7 +149,9 @@ public float3 relitByOne(SplatSurface s, float3 wo, LightSample ls, float throug
     const float nDotL = dot(s.normal, ls.wi);
     const float front = max(nDotL, 0.0);
     const float back = -nDotL;   // negative in front of the surface; the wrap below clamps it
-    const float3 body = s.albedo * (1.0 - s.metallic) * (1.0 / 3.14159265358979);
+    // Nothing to gather where the body is already lit: what was baked is the
+    // light on it, and lighting it again would be that light twice.
+    const float3 body = s.lit ? float3(0.0) : s.albedo * (1.0 - s.metallic) * (1.0 / 3.14159265358979);
     // Translucency is not transparency. What comes through a translucent
     // material has been scattered on the way, so it does not stop at the
     // terminator the way a reflection does and it does not draw what stands
@@ -163,7 +173,9 @@ public float3 relitByOne(SplatSurface s, float3 wo, LightSample ls, float throug
 public float3 relitSplat(SplatSurface s, float3 wo, StructuredBuffer<LightRecord> lights, uint lightCount,
                          uint categoriesLo, uint categoriesHi, StructuredBuffer<float> shadowFactors,
                          uint shadowBase, uint shadowLights) {
-    float3 lit = float3(0.0);
+    // A baked body starts from the light it already carries; an albedo starts
+    // from nothing and gathers.
+    float3 lit = s.lit ? s.albedo : float3(0.0);
     for (uint k = 0; k < lightCount; ++k) {
         const LightRecord light = lights[k];
         // Light linking reaches a cloud as it reaches a mesh: by one bit.

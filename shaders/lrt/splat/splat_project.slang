@@ -189,6 +189,7 @@ void splatProject(uint3 tid: SV_DispatchThreadID) {
         surface.metallic = params.hasPbr != 0 ? pbrMetallic(pbr[i]) : 0.0;
         surface.roughness = params.hasPbr != 0 ? pbrRoughness(pbr[i]) : 1.0;
         surface.transmission = params.hasPbr != 0 ? pbrTransmission(pbr[i]) : 0.0;
+        surface.lit = params.litBody != 0;
         const uint shadowLights = params.shadowRays != 0 ? params.shadowLights : 0;
         colour = relitForBlend(relitSplat(surface, normalize(eye - surface.position), lights,
                                           params.lightCount, params.categoriesLo, params.categoriesHi,

@@ -59,7 +59,7 @@ void Engine::setSplats(const pxr::SdfPath& id, std::optional<ParticleFieldArrays
                        const render::Mat4* transform, std::optional<bool> visible,
                        std::optional<render::SplatEdit> edit, std::optional<StreamedAsset> asset,
                        std::optional<bool> relight,
-                       std::optional<std::vector<pxr::TfToken>> categories) {
+                       std::optional<std::vector<pxr::TfToken>> categories, std::optional<bool> litBody) {
     const std::lock_guard<std::mutex> held(guard_);
     SplatEntry& entry = splats_[id];
     if (asset.has_value()) {
@@ -70,6 +70,9 @@ void Engine::setSplats(const pxr::SdfPath& id, std::optional<ParticleFieldArrays
     }
     if (relight) {
         entry.relight = *relight;
+    }
+    if (litBody) {
+        entry.litBody = *litBody;
     }
     if (categories) {
         entry.categories = std::move(*categories);
@@ -1244,7 +1247,7 @@ Result<void> Engine::render(const render::Projection& projection, const render::
             }
             if (entry.gpu != nullptr) {
                 splats.push_back({entry.gpu.get(), entry.objectToWorld, entry.edit, entry.relight,
-                                  categoryMask(entry.categories)});
+                                  entry.litBody, categoryMask(entry.categories)});
             }
             const lod::LodCloud* cloud = entry.pool != nullptr ? &entry.pool->cloud() : entry.lodCloud.get();
             if (cloud == nullptr) {
@@ -1255,7 +1258,7 @@ Result<void> Engine::render(const render::Projection& projection, const render::
                 // every frame: it draws the whole cloud, when it is whole.
                 if (entry.lodCloud != nullptr) {
                     splats.push_back({&entry.lodCloud->splats, entry.objectToWorld, entry.edit, entry.relight,
-                                      categoryMask(entry.categories)});
+                                      entry.litBody, categoryMask(entry.categories)});
                 } else {
                     log::warn("hdLrt: {}: a streamed asset is drawn by the rasteriser only", id.GetString());
                 }

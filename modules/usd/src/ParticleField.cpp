@@ -118,6 +118,13 @@ bool relightOf(HdSceneDelegate* delegate, SdfPath const& id) {
     return boolOf(delegate->Get(id, kRelight), false);
 }
 
+/// Whether its colours are light already: what a conversion bakes into them
+/// (`lrt mesh2splat`), so that relighting adds the polish and nothing else.
+bool litBodyOf(HdSceneDelegate* delegate, SdfPath const& id) {
+    static const TfToken kLit("lrt:splat:litBody");
+    return boolOf(delegate->Get(id, kLit), false);
+}
+
 lrt::usd::StreamedAsset assetOf(HdSceneDelegate* delegate, SdfPath const& id) {
     lrt::usd::StreamedAsset asset;
     VtValue value = delegate->Get(id, _assetTokens->asset);
@@ -207,10 +214,12 @@ void HdLrtParticleField::Sync(HdSceneDelegate* delegate, HdRenderParam* renderPa
         visible = IsVisible();
     }
     engine->setSplats(id, std::move(raw), transformDirty ? &transform : nullptr, visible, edit, std::move(asset),
-                      relightOf(delegate, id), [&] {
+                      relightOf(delegate, id),
+                      [&] {
                           const VtArray<TfToken> cats = delegate->GetCategories(id);
                           return std::vector<TfToken>(cats.begin(), cats.end());
-                      }());
+                      }(),
+                      litBodyOf(delegate, id));
     *dirtyBits &= ~HdChangeTracker::AllSceneDirtyBits;
 }
 
