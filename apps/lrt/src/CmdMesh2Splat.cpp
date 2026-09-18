@@ -802,19 +802,15 @@ void addMesh2Splat(CLI::App& app) {
             // room for a reflection, so it keeps the material's body and the
             // frame puts the polish back. Not baked at all, the colours are an
             // albedo and the frame lights them.
-            // What the cloud is asked to hold, and what is left to the frame:
-            //
-            // - baked with harmonics: the body's light and how it changes with
-            //   the direction, which is what they are for. Nothing is added --
-            //   measured, the frame's own reflection has no occlusion in it
-            //   and lifts the pawn from 0.096 to 0.135 against the mesh's
-            //   0.085, washing the marble out again.
-            // - baked to one colour: the body alone, and the frame puts the
-            //   polish back, since one colour cannot hold a reflection.
-            // - not baked: an albedo, and the frame lights it whole.
-            const bool harmonics = o->bake && std::min(o->bakeDegree, 3u) > 0;
-            options.relight = !harmonics;
-            options.litBody = o->bake && !harmonics;
+            // What the cloud holds and what the frame adds. Baked, the cloud
+            // carries the light on the material's body -- its harmonics say
+            // how that light changes with the direction -- and the frame puts
+            // the polish back, which is the one thing neither a colour nor
+            // sixteen coefficients can hold: a reflection off a surface of
+            // roughness 0.1 is far sharper than that. Not baked, the colours
+            // are an albedo and the frame lights them whole.
+            options.relight = true;
+            options.litBody = o->bake;
             return usd::writeParticleFieldStage(library, *raw, o->output, options);
         };
         auto ran = context->run([&] { inside = work(); });

@@ -31,8 +31,22 @@ float2 planeBarycentrics(float3 origin, float3 direction, float3 a, float3 b, fl
     return float2(dot(s, p) * inverse, dot(direction, q) * inverse);
 }
 
+/// `cameraFootprint` is how wide a texture lookup here is: the pixel's own,
+/// which is what a frame wants. A bake has no camera -- its neighbouring
+/// threads are gaussians somewhere else on the model -- and taking the
+/// footprint from one reads every texture at whatever mip that nonsense asks
+/// for. Measured: the chess set's marble came back as its own average, its
+/// veining gone and the gold ring on the pawn's collar grey, from a
+/// conversion that had sampled the right texture all along. A bake asks for
+/// no footprint and reads the top level, which is what the conversion's own
+/// sampling does.
 public MaterialInputs materialInputsAt(CameraParams camera, ViewToWorld toWorld, uint px, uint py, Surface s,
                                       float time) {
+    return materialInputsAt(camera, toWorld, px, py, s, time, true);
+}
+
+public MaterialInputs materialInputsAt(CameraParams camera, ViewToWorld toWorld, uint px, uint py, Surface s,
+                                      float time, bool cameraFootprint) {
     MaterialInputs inputs;
     const InstanceRecord r = s.instance;
     const uint base = s.mesh.firstPoint + s.instance.pointsOffset;
@@ -67,8 +81,8 @@ public MaterialInputs materialInputsAt(CameraParams camera, ViewToWorld toWorld,
     const float2 here = s.weights.yz;
     const float2 dstdb1 = stB - stA;
     const float2 dstdb2 = stC - stA;
-    inputs.uvDx = dstdb1 * (bx.x - here.x) + dstdb2 * (bx.y - here.y);
-    inputs.uvDy = dstdb1 * (by.x - here.x) + dstdb2 * (by.y - here.y);
+    inputs.uvDx = cameraFootprint ? dstdb1 * (bx.x - here.x) + dstdb2 * (bx.y - here.y) : float2(0.0);
+    inputs.uvDy = cameraFootprint ? dstdb1 * (by.x - here.x) + dstdb2 * (by.y - here.y) : float2(0.0);
 
     // dP/du and dP/dv in world space, orthonormalised against the normal.
     const float3 wa = applyRows(toWorld, va, 1.0);

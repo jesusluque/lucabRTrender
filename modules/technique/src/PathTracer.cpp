@@ -680,7 +680,8 @@ Shaded shadeSurface(uint2 pixel, Surface s) {
     Shaded out;
     out.categoriesLo = s.instance.categoriesLo;
     out.categoriesHi = s.instance.categoriesHi;
-    out.inputs = materialInputsAt(camera, toWorld, pixel.x, pixel.y, s, lookup.time);
+    // A bake takes no footprint from the camera it does not have.
+    out.inputs = materialInputsAt(camera, toWorld, pixel.x, pixel.y, s, lookup.time, !kBake);
     const MaterialRecord m = materials[materialRowOf(s)];
     evaluateMaterial(m.function, out.inputs, m.blob);
     out.stack = gLrtResult;
