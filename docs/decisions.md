@@ -5015,3 +5015,50 @@ the time samples and the stage's range back off the file.
 
 **Not done here**: nothing reads them yet. `ParticleField::Sync` does not look
 for the new primvars and no frame is deformed by them.
+
+## And the engine puts the cloud where the skeleton is
+
+The reading side, which closes it. `ParticleField::Sync` looks for the rig's
+primvars beside the ones it already reads, and a time code change dirties the
+one of them that is time sampled -- so the frame that follows has the
+skeleton's transforms at that instant and nothing else has moved.
+
+`Engine::carryCloud` then does three things. It pairs the file's two arrays
+into the `(joint, weight)` layout every skinner here reads, and transposes the
+joints' matrices the way `geom::Skinner` does, because USD puts vectors on the
+left and the kernel multiplies rows by a column. It keeps the uploaded cloud
+as the **bind pose** and writes the posed one into buffers of its own -- a
+`GpuSplats` that shares the harmonics and the PBR channels, since the skinner
+writes neither -- so what a renderer holds never changes identity between
+frames. And it runs `scene::SplatSkinner` over the cloud.
+
+**Two things the measurement turned up**, both of which would have been wrong
+in any route that posed a cloud:
+
+- The posed cloud's **extent** is not the bind pose's. A skeleton moves a
+  cloud out from under its own box, and everything that culls, frames or sorts
+  by it would have been looking in the wrong place. It is folded again on the
+  device after the skinning.
+- `Engine::bounds()` folded `entry.gpu->bounds` -- the cloud as uploaded --
+  rather than the cloud as drawn. It now folds what is drawn.
+
+**Where the spaces meet.** The conversion packs its triangles in world space,
+so the gaussians stand there and not in the mesh's own space, while UsdSkel's
+bind transform starts from the mesh's. The two are composed once, at
+conversion, so what the file carries is the one matrix a renderer needs: the
+cloud's own space into the space the joints are measured from. **Not done**: a
+stage with several skinned meshes at different transforms keeps only the
+first's, and a skeleton with an animated transform of its own is not folded in.
+
+**Measured** (`tests/usd/test_usd.cpp`): a cloud of 512 gaussians whose file
+says one joint carries all of them, sliding a unit in x a frame, is drawn two
+time codes on with its bounds slid exactly two units in x and not a thousandth
+in y or z. And end to end, the rigged square converts and draws from one fixed
+camera at two instants with the gaussians where the `SkelAnimation` put them.
+
+**Still not done**: the whole cloud is re-uploaded at every time step before
+it is posed, because `ParticleField::Sync` re-reads every array on any
+`DirtyPrimvar` and `CloudLoader::upload` has no in-place counterpart. The
+skinning adds one cheap pass to that; what it does not do is make the frame
+cheap. That is the next change, and it is on the other side of the boundary
+from this one.

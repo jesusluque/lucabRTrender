@@ -776,6 +776,17 @@ Result<size_t> Engine::commit() {
                 entry.gpu = std::make_unique<scene::GpuSplats>(std::move(*splats));
             }
         }
+        // THE RIG, IF A SKELETON CARRIES THIS CLOUD.
+        //
+        // The cloud that was just uploaded is the bind pose, and it stays
+        // that way: what a frame draws is `posed`, which the skinner writes
+        // into buffers of its own. The joints and their weights are the same
+        // at every instant and are uploaded with the cloud; only the
+        // skeleton's transforms are taken again, and for sixty joints that is
+        // four kilobytes.
+        if (entry.gpu != nullptr) {
+            LRT_TRY(carryCloud(id, entry));
+        }
         entry.pending.reset();
         ++uploaded;
     }
@@ -840,7 +851,10 @@ Result<std::optional<scene::Bounds>> Engine::bounds() {
                 continue;
             }
             if (entry.gpu != nullptr) {
-                grow(entry.gpu->bounds, entry.objectToWorld);
+                // Where it is drawn, which for a cloud a skeleton carries is
+                // not where its bind pose stands.
+                grow(entry.posed != nullptr ? entry.posed->bounds : entry.gpu->bounds,
+                     entry.objectToWorld);
             } else if (entry.lodCloud != nullptr) {
                 grow(entry.lodCloud->splats.bounds, entry.objectToWorld);
             } else if (entry.pool != nullptr) {
@@ -1246,7 +1260,10 @@ Result<void> Engine::render(const render::Projection& projection, const render::
                 continue;
             }
             if (entry.gpu != nullptr) {
-                splats.push_back({entry.gpu.get(), entry.objectToWorld, entry.edit, entry.relight,
+                // The posed cloud where a skeleton carries it, and the cloud
+                // itself where nothing does.
+                const scene::GpuSplats* drawn = entry.posed != nullptr ? entry.posed.get() : entry.gpu.get();
+                splats.push_back({drawn, entry.objectToWorld, entry.edit, entry.relight,
                                   entry.litBody, categoryMask(entry.categories)});
             }
             const lod::LodCloud* cloud = entry.pool != nullptr ? &entry.pool->cloud() : entry.lodCloud.get();
@@ -2069,6 +2086,112 @@ Result<void> Engine::applyExposure(double stops, uint32_t width, uint32_t height
         });
     }
     return batch.submit(true);
+}
+
+Result<void> Engine::carryCloud(const pxr::SdfPath& id, SplatEntry& entry) {
+    const ParticleFieldArrays& arrays = *entry.pending;
+    const auto* indices = arrays.jointIndices.IsHolding<pxr::VtIntArray>()
+                              ? &arrays.jointIndices.UncheckedGet<pxr::VtIntArray>()
+                              : nullptr;
+    const auto* weights = arrays.jointWeights.IsHolding<pxr::VtFloatArray>()
+                              ? &arrays.jointWeights.UncheckedGet<pxr::VtFloatArray>()
+                              : nullptr;
+    // The joints, whichever precision the file kept them in.
+    std::vector<float> joints;
+    const auto readJoints = [&](const auto& held) {
+        joints.resize(held.size() * 16);
+        for (size_t j = 0; j < held.size(); ++j) {
+            // Transposed, as geom::Skinner sends a mesh's: USD puts vectors
+            // on the left and the kernel multiplies rows by a column.
+            for (int row = 0; row < 4; ++row) {
+                for (int column = 0; column < 4; ++column) {
+                    joints[j * 16 + static_cast<size_t>(row) * 4 + static_cast<size_t>(column)] =
+                        static_cast<float>(held[j][column][row]);
+                }
+            }
+        }
+    };
+    if (arrays.skinningXforms.IsHolding<pxr::VtMatrix4dArray>()) {
+        readJoints(arrays.skinningXforms.UncheckedGet<pxr::VtMatrix4dArray>());
+    } else if (arrays.skinningXforms.IsHolding<pxr::VtMatrix4fArray>()) {
+        readJoints(arrays.skinningXforms.UncheckedGet<pxr::VtMatrix4fArray>());
+    }
+    const uint32_t count = entry.gpu->count;
+    if (indices == nullptr || weights == nullptr || joints.empty() ||
+        indices->size() < size_t{count} * 4 || weights->size() < size_t{count} * 4) {
+        entry.posed.reset();
+        entry.influences = gpu::Buffer{};
+        entry.xforms = gpu::Buffer{};
+        entry.joints = 0;
+        return ok();
+    }
+    if (!splatSkinner_.has_value()) {
+        auto made = scene::SplatSkinner::create(*library_);
+        if (!made) return std::move(made).error();
+        splatSkinner_.emplace(std::move(*made));
+    }
+    // The joints and their weights do not change over time, so they are
+    // uploaded with the cloud; `(joint, weight)` pairs is the layout every
+    // skinner here reads, and pairing them is a rearrangement of values the
+    // file holds.
+    std::vector<float> pairs(size_t{count} * 4 * 2);
+    for (size_t k = 0; k < size_t{count} * 4; ++k) {
+        pairs[k * 2] = static_cast<float>(std::max((*indices)[k], 0));
+        pairs[k * 2 + 1] = (*weights)[k];
+    }
+    auto influences = gpu::Buffer::fromSpan<float>(*device_, pairs, "splat.influences");
+    if (!influences) return std::move(influences).error();
+    entry.influences = std::move(*influences);
+    auto xforms = gpu::Buffer::fromSpan<float>(*device_, joints, "splat.skinningXforms");
+    if (!xforms) return std::move(xforms).error();
+    entry.xforms = std::move(*xforms);
+    entry.joints = static_cast<uint32_t>(joints.size() / 16);
+    if (arrays.geomBindTransform.IsHolding<pxr::GfMatrix4d>()) {
+        const pxr::GfMatrix4d& bind = arrays.geomBindTransform.UncheckedGet<pxr::GfMatrix4d>();
+        for (int row = 0; row < 4; ++row) {
+            for (int column = 0; column < 4; ++column) {
+                entry.geomBind[static_cast<size_t>(row) * 4 + static_cast<size_t>(column)] =
+                    static_cast<float>(bind[row][column]);
+            }
+        }
+    }
+
+    // The posed cloud shares everything the skinner does not write -- the
+    // harmonics, the PBR channels -- and owns the two buffers it does.
+    if (entry.posed == nullptr || entry.posed->count != count) {
+        scene::GpuSplats posed = *entry.gpu;
+        gpu::BufferDesc desc;
+        desc.bytes = uint64_t{count} * 16;
+        desc.elementBytes = 16;
+        desc.label = "splat.posed.positions";
+        auto positions = gpu::Buffer::create(*device_, desc);
+        if (!positions) return std::move(positions).error();
+        desc.bytes = uint64_t{count} * 4 * 4;
+        desc.elementBytes = 4;
+        desc.label = "splat.posed.shape";
+        auto shape = gpu::Buffer::create(*device_, desc);
+        if (!shape) return std::move(shape).error();
+        posed.positions = std::move(*positions);
+        posed.shape = std::move(*shape);
+        posed.source = id.GetString() + " (posed)";
+        entry.posed = std::make_unique<scene::GpuSplats>(std::move(posed));
+    }
+    gpu::CommandBatch batch(*device_);
+    scene::SplatSkinInput input;
+    input.rest = entry.gpu.get();
+    input.influences = &entry.influences;
+    input.perSplat = 4;
+    input.skinningXforms = &entry.xforms;
+    input.geomBindTransform = entry.geomBind;
+    LRT_TRY(splatSkinner_->skin(batch, input, entry.posed->positions, entry.posed->shape));
+    LRT_TRY(batch.submit(true));
+    // The box the cloud now fills. It is not the bind pose's: a skeleton
+    // moves a cloud out from under its own extent, and everything that culls,
+    // frames or sorts by it would be looking in the wrong place.
+    auto box = loader_->boundsOf(entry.posed->positions, count);
+    if (!box) return std::move(box).error();
+    entry.posed->bounds = *box;
+    return ok();
 }
 
 Result<void> Engine::paintDomes(const render::Projection& projection, uint32_t width, uint32_t height,

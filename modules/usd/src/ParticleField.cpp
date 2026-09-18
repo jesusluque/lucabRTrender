@@ -194,6 +194,18 @@ void HdLrtParticleField::Sync(HdSceneDelegate* delegate, HdRenderParam* renderPa
         arrays.metallic = delegate->Get(id, kMetallic);
         arrays.roughness = delegate->Get(id, kRoughness);
         arrays.transmission = delegate->Get(id, kTransmission);
+        // LrtSplatSkinningAPI: the rig, if a skeleton carries this cloud. The
+        // first three do not change over time and the fourth is the only
+        // thing that does, which is what makes an animated cloud cost four
+        // kilobytes a frame instead of tens of megabytes.
+        static const TfToken kJointIndices("lrt:splat:jointIndices");
+        static const TfToken kJointWeights("lrt:splat:jointWeights");
+        static const TfToken kGeomBind("lrt:splat:geomBindTransform");
+        static const TfToken kXforms("lrt:splat:skinningXforms");
+        arrays.jointIndices = delegate->Get(id, kJointIndices);
+        arrays.jointWeights = delegate->Get(id, kJointWeights);
+        arrays.geomBindTransform = delegate->Get(id, kGeomBind);
+        arrays.skinningXforms = delegate->Get(id, kXforms);
         raw = std::move(arrays);
     }
     std::optional<lrt::render::SplatEdit> edit;

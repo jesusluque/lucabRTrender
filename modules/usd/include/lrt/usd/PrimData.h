@@ -35,6 +35,14 @@ struct ParticleFieldArrays {
     pxr::VtValue metallic;         ///< VtFloatArray or VtHalfArray
     pxr::VtValue roughness;
     pxr::VtValue transmission;
+    /// LrtSplatSkinningAPI: the rig that carries the cloud. `jointIndices`
+    /// and `jointWeights` are four a gaussian and do not change over time;
+    /// `skinningXforms` is one matrix a joint and is the only thing that
+    /// does. Empty for a cloud nothing moves.
+    pxr::VtValue jointIndices;     ///< VtIntArray, 4 a gaussian
+    pxr::VtValue jointWeights;     ///< VtFloatArray, 4 a gaussian
+    pxr::VtValue skinningXforms;   ///< VtMatrix4dArray or VtMatrix4fArray, one a joint
+    pxr::VtValue geomBindTransform;///< GfMatrix4d
 };
 
 /// A volume's field asset, as UsdVolOpenVDBAsset names it.

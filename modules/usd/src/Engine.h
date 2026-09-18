@@ -40,6 +40,7 @@
 #include "lrt/technique/Visibility.h"
 #include "lrt/io/Vdb.h"
 #include "lrt/world/VolumeSet.h"
+#include "lrt/scene/SplatSkinner.h"
 #include "lrt/world/GpuScene.h"
 #include "lrt/world/Instancing.h"
 #include "lrt/lod/Lrtc.h"
@@ -85,6 +86,16 @@ struct SplatEntry {
     StreamedAsset                       asset;
     std::unique_ptr<lod::LodCloud>      lodCloud;   ///< the asset read whole
     std::unique_ptr<lod::StreamingPool> pool;       ///< or streamed
+    /// LrtSplatSkinningAPI. The cloud on the device is the bind pose; `posed`
+    /// is the same cloud with the skeleton's transforms in it, and is what a
+    /// frame draws. Its buffers outlive the frame, so the cloud a renderer
+    /// holds never changes identity between them.
+    std::unique_ptr<scene::GpuSplats>   posed;
+    gpu::Buffer                         influences;   ///< float2 (joint, weight), four a gaussian
+    gpu::Buffer                         xforms;       ///< four float4 a joint, this frame's
+    uint32_t                            joints = 0;
+    std::array<float, 16>               geomBind{1.0F, 0.0F, 0.0F, 0.0F, 0.0F, 1.0F, 0.0F, 0.0F,
+                                                 0.0F, 0.0F, 1.0F, 0.0F, 0.0F, 0.0F, 0.0F, 1.0F};
 };
 
 struct InstancerEntry {
@@ -378,6 +389,7 @@ private:
     std::optional<geom::CurveBuilder>         curveBuilder_;
     std::optional<geom::Subdivider>           subdivider_;   ///< made on first use
     std::optional<world::GpuScene>            scene_;
+    std::optional<scene::SplatSkinner>        splatSkinner_;
     std::optional<technique::VisibilityRaster> visibilityRaster_;   ///< each made on first use
     std::optional<world::RayTracingScene>      rayTracingScene_;
     std::optional<technique::VisibilityTrace>  visibilityTrace_;
@@ -562,6 +574,11 @@ private:
     /// tracer's means copied out of its accumulation (the raster writes
     /// there itself), so the domes and the exposure change a copy.
     [[nodiscard]] Result<void> gatherLightGroups(bool traced, uint32_t width, uint32_t height);
+    /// Puts a cloud a skeleton carries where the skeleton is. The uploaded
+    /// cloud stays the bind pose and `entry.posed` is what a frame draws, so
+    /// what a renderer holds never changes identity between frames.
+    [[nodiscard]] Result<void> carryCloud(const pxr::SdfPath& id, SplatEntry& entry);
+
     [[nodiscard]] Result<void> paintDomes(const render::Projection& projection, uint32_t width, uint32_t height,
                                           render::RenderTargets& targets);
     technique::VisibilityTargets              visibility_;

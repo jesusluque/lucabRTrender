@@ -6346,3 +6346,66 @@ TEST_CASE("a cloud writes the skeleton that carries it, and its joints over time
     REQUIRE(splats.GetPositionsAttr().Get(&positions));
     CHECK(positions.size() == raw.count);
 }
+
+// AND THE ENGINE PUTS IT WHERE THE SKELETON IS.
+//
+// The whole reading path in one measurement: Sync finds the rig's primvars, a
+// time change dirties the one of them that is time sampled, the engine skins
+// the bind-pose cloud into a posed one, and that is what the frame draws. One
+// joint carries every gaussian and slides a unit in x a frame, so the cloud's
+// bounds -- folded on the device -- must slide exactly that.
+TEST_CASE("a cloud its file says a skeleton carries moves with it", "[usd][gpu][skinning]") {
+    LRT_REQUIRE_GPU(gpu);
+    const io::RawSplats raw = cloud(512);
+
+    usd::SplatSkinning rig;
+    rig.skeleton = "/Root/Skel";
+    rig.joints = 1;
+    rig.influences.resize(size_t{raw.count} * 8, 0.0F);
+    for (uint32_t k = 0; k < raw.count; ++k) {
+        float* one = rig.influences.data() + size_t{k} * 8;
+        one[0] = 0.0F;   // the one joint
+        one[1] = 1.0F;   // carrying all of it
+    }
+    rig.times = {0.0, 1.0, 2.0};
+    rig.xforms.resize(rig.times.size() * 16, 0.0F);
+    for (size_t frame = 0; frame < rig.times.size(); ++frame) {
+        float* m = rig.xforms.data() + frame * 16;
+        m[0] = m[5] = m[10] = m[15] = 1.0F;
+        m[12] = static_cast<float>(frame);   // the slide, in GfMatrix4f's last row
+    }
+    REQUIRE(rig.valid());
+
+    const fs::path path = scratch("cloud-carried.usda");
+    fs::remove(path);
+    usd::ExportOptions options;
+    options.addCamera = false;
+    options.skinning = &rig;
+    REQUIRE(usd::writeParticleFieldStage(*gpu->library, raw, path, options));
+
+    auto renderer = usd::StageRenderer::open(path);
+    if (!renderer) FAIL(renderer.error().toString());
+    const auto boundsAt = [&](double time) {
+        // A frame of its own puts the stage on the device at that instant.
+        auto camera = (*renderer)->framingCamera(time, 35.0, "raster");
+        if (!camera) FAIL(camera.error().toString());
+        if (auto drawn = (*renderer)->draw(*camera, time, 32, 32, "raster"); !drawn) {
+            FAIL(drawn.error().toString());
+        }
+        auto box = (*renderer)->bounds();
+        if (!box) FAIL(box.error().toString());
+        REQUIRE(box->has_value());
+        return **box;
+    };
+    const scene::Bounds first = boundsAt(0.0);
+    const scene::Bounds later = boundsAt(2.0);
+    std::printf("  x from %.3f..%.3f to %.3f..%.3f\n", double(first.min[0]), double(first.max[0]),
+                double(later.min[0]), double(later.max[0]));
+
+    // Two time codes on, the one joint has slid two units in x and nothing
+    // else has moved at all.
+    CHECK(later.min[0] - first.min[0] == Catch::Approx(2.0).margin(1e-3));
+    CHECK(later.max[0] - first.max[0] == Catch::Approx(2.0).margin(1e-3));
+    CHECK(later.min[1] == Catch::Approx(first.min[1]).margin(1e-3));
+    CHECK(later.min[2] == Catch::Approx(first.min[2]).margin(1e-3));
+}

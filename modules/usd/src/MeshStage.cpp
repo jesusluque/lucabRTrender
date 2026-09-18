@@ -378,7 +378,7 @@ SkelBindings resolveSkinning(const UsdStageRefPtr& stage) {
 /// the influences are written in the skeleton's order. One cloud then has one
 /// joint order whatever mixture of meshes it came from.
 StageSkinning skinningOf(const UsdSkelSkinningQuery& query, const UsdSkelSkeleton& skeleton,
-                         size_t points, double time) {
+                         size_t points, double time, const GfMatrix4d& toWorld) {
     StageSkinning out;
     if (!query.HasJointInfluences()) {
         return out;
@@ -425,7 +425,14 @@ StageSkinning skinningOf(const UsdSkelSkinningQuery& query, const UsdSkelSkeleto
         out.influences[k * 2] = static_cast<float>(std::max(joint, 0));
         out.influences[k * 2 + 1] = weights[k];
     }
-    const GfMatrix4d bind = query.GetGeomBindTransform(UsdTimeCode(time));
+    // OUT OF THE CLOUD'S SPACE, NOT OUT OF THE MESH'S.
+    //
+    // The conversion packs its triangles in world space, so the gaussians
+    // stand there and not in the mesh's own space, while UsdSkel's bind
+    // transform starts from the mesh's. The two are composed here, once, so
+    // that what the file carries is the one matrix a renderer needs: the
+    // cloud's own space into the space the joints are measured from.
+    const GfMatrix4d bind = toWorld.GetInverse() * query.GetGeomBindTransform(UsdTimeCode(time));
     for (int row = 0; row < 4; ++row) {
         for (int column = 0; column < 4; ++column) {
             out.geomBindTransform[static_cast<size_t>(row) * 4 + static_cast<size_t>(column)] =
@@ -560,7 +567,8 @@ Result<std::vector<StageMesh>> MeshStage::read(geom::MeshBuilder& builder, const
             const auto query = bindings.queries.find(prim.GetPath());
             const auto skeleton = bindings.skeletons.find(prim.GetPath());
             if (query != bindings.queries.end() && skeleton != bindings.skeletons.end()) {
-                out.skinning = skinningOf(query->second, skeleton->second, points.size(), options.time);
+                out.skinning = skinningOf(query->second, skeleton->second, points.size(), options.time,
+                                          toWorld);
             }
         }
         meshes.push_back(std::move(out));
