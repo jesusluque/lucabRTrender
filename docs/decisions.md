@@ -4831,3 +4831,44 @@ surface under them, and the file now carries 729073 where it carried 729063.
 and counts, in a kernel, the entries that differ bitwise (0 of 1024); and
 `tests/usd/test_usd.cpp` writes a cloud with three records that decode to
 nothing and reads back the array lengths, which are the conversion's.
+
+## The conversion reads a pose, not a rest
+
+`lrt mesh2splat` had a `--time`, and it reached the bake's ray tracing and
+nothing else. The gaussians came from `MeshStage`, which read every attribute
+at the stage's **default** time (`UsdGeomXformCache` default-constructed, every
+`Get` with no time argument), so at any other instant the rays stood where the
+mesh used to be while the scene they traced was somewhere else. On a static
+stage nobody could see it; on an animated one it is the whole of the answer.
+
+`MeshStageOptions` carries a `time` now, and the geometry reads and the xform
+cache take it. For a stage with no animation in it **nothing changes**: an
+attribute with no time samples answers with its default whatever time is asked
+for, and the chess pawn converts to a file identical byte for byte to the one
+it converted to before.
+
+**A skinned mesh's `points` attribute does not animate**, though, because the
+deformation belongs to the skeleton and USD resolves it through UsdSkel. A
+conversion that reads `UsdGeomMesh` directly would see the rest pose at every
+time. The renderer does not have this problem -- usdSkelImaging hands Hydra an
+ext computation and `geom::Skinner` runs it on the device (M7) -- but the
+conversion goes round Hydra on purpose: it wants none of a render index, and
+the whole material side is built on `MeshStage`'s own narrowing.
+
+So the stage is **posed** before it is read, with `UsdSkelBakeSkinning`, which
+writes the posed points as time samples onto the meshes themselves. Two things
+make it cheap and safe: it is baked into the **session layer**, so the file on
+disk is untouched, and over `GfInterval(time, time)`, so it costs one pose and
+not a range. A stage with no `SkelRoot` comes back unchanged. The reads below
+then need to know nothing about skinning, and there is no second
+implementation of UsdSkel in this repository.
+
+What it leaves out, and what going round Hydra costs: instancing, velocities,
+visibility and purposes. A point instancer's copies are not converted, and a
+stage whose motion is authored as velocities rather than samples is read at
+the sample.
+
+**Measured** (`tests/usd/test_usd.cpp`): a square carried entirely by one joint
+that slides (1.2, 0.4, 0) between time 0 and time 1 converts to a mesh whose
+bounds -- folded on the device, not on the host -- are the square as authored
+at time 0 and exactly that slide away at time 1.

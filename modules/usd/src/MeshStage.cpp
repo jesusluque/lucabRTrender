@@ -3,11 +3,14 @@
 
 #include <algorithm>
 #include <cstring>
+#include <optional>
 
 #include <pxr/base/gf/matrix4d.h>
 #include <pxr/base/gf/vec2f.h>
 #include <pxr/base/gf/vec3f.h>
 #include <pxr/usd/sdf/assetPath.h>
+#include <pxr/base/gf/interval.h>
+#include <pxr/usd/usd/editContext.h>
 #include <pxr/usd/usd/prim.h>
 #include <pxr/usd/usd/primRange.h>
 #include <pxr/usd/usd/stage.h>
@@ -16,6 +19,7 @@
 #include <pxr/usd/usdGeom/tokens.h>
 #include <pxr/usd/usdGeom/xformCache.h>
 #include <pxr/usd/usdShade/connectableAPI.h>
+#include <pxr/usd/usdSkel/bakeSkinning.h>
 #include <pxr/usd/usdShade/material.h>
 #include <pxr/usd/usdShade/materialBindingAPI.h>
 #include <pxr/usd/usdShade/shader.h>
@@ -234,9 +238,31 @@ void takeColour(const Resolved& resolved, std::array<float, 3>& into) {
 }   // namespace
 
 struct MeshStage::Impl {
-    UsdStageRefPtr stage;
-    std::string    source;
+    UsdStageRefPtr        stage;
+    std::string           source;
+    std::optional<double> posedAt;   ///< the time the skinning was baked for
 };
+
+/// Puts a skinned stage in the pose it holds at `time`.
+///
+/// A conversion reads `UsdGeomMesh` directly, and a skinned mesh's `points`
+/// attribute does not animate: the deformation is the skeleton's, and USD
+/// resolves it through UsdSkel. `UsdSkelBakeSkinning` writes the posed points
+/// as time samples on the meshes themselves, so the reads below need to know
+/// nothing about skinning -- which is what keeps this away from Hydra and from
+/// a second implementation of UsdSkel.
+///
+/// It is baked into the **session layer** and for one instant only, so the
+/// file on disk is untouched and the cost is one pose and not a range. A stage
+/// with no SkelRoot in it comes back unchanged.
+Result<void> poseStage(const UsdStageRefPtr& stage, double time) {
+    UsdEditContext edit(stage, stage->GetSessionLayer());
+    if (!UsdSkelBakeSkinning(stage->Traverse(), GfInterval(time, time))) {
+        return Error::make(ErrorCode::InvalidArgument, "cannot pose the stage's skinning at time {}",
+                           time);
+    }
+    return ok();
+}
 
 Result<MeshStage> MeshStage::open(const std::filesystem::path& path) {
     UsdStageRefPtr stage = UsdStage::Open(path.string());
@@ -266,7 +292,12 @@ Result<std::vector<StageMesh>> MeshStage::read(geom::MeshBuilder& builder, const
     if (!options.prim.empty() && !under.IsAbsolutePath()) {
         return Error::make(ErrorCode::InvalidArgument, "'{}': not an absolute prim path", options.prim);
     }
-    UsdGeomXformCache transforms;
+    const UsdTimeCode at(options.time);
+    if (!impl_->posedAt.has_value() || *impl_->posedAt != options.time) {
+        LRT_TRY(poseStage(impl_->stage, options.time));
+        impl_->posedAt = options.time;
+    }
+    UsdGeomXformCache transforms(at);
     std::vector<StageMesh> meshes;
     for (const UsdPrim& prim : impl_->stage->Traverse()) {
         if (!prim.IsA<UsdGeomMesh>() || !prim.GetPath().HasPrefix(under)) {
@@ -279,10 +310,10 @@ Result<std::vector<StageMesh>> MeshStage::read(geom::MeshBuilder& builder, const
         VtIntArray   counts;
         VtIntArray   indices;
         VtIntArray   holes;
-        mesh.GetPointsAttr().Get(&points);
-        mesh.GetFaceVertexCountsAttr().Get(&counts);
-        mesh.GetFaceVertexIndicesAttr().Get(&indices);
-        mesh.GetHoleIndicesAttr().Get(&holes);
+        mesh.GetPointsAttr().Get(&points, at);
+        mesh.GetFaceVertexCountsAttr().Get(&counts, at);
+        mesh.GetFaceVertexIndicesAttr().Get(&indices, at);
+        mesh.GetHoleIndicesAttr().Get(&holes, at);
         if (points.empty() || counts.empty() || indices.empty()) {
             lrt::log::info("mesh2splat: '{}' has no geometry, skipped", prim.GetPath().GetString());
             continue;
@@ -294,7 +325,7 @@ Result<std::vector<StageMesh>> MeshStage::read(geom::MeshBuilder& builder, const
 
         VtVec3fArray normals;
         TfToken      normalsInterpolation = UsdGeomTokens->vertex;
-        const bool   hasNormals = mesh.GetNormalsAttr().Get(&normals) && !normals.empty();
+        const bool   hasNormals = mesh.GetNormalsAttr().Get(&normals, at) && !normals.empty();
         if (hasNormals) {
             normalsInterpolation = mesh.GetNormalsInterpolation();
         }
@@ -305,7 +336,7 @@ Result<std::vector<StageMesh>> MeshStage::read(geom::MeshBuilder& builder, const
         bool         hasUvs = false;
         for (const char* name : {"st", "st0", "uv", "UVMap"}) {
             const UsdGeomPrimvar primvar = primvars.GetPrimvar(TfToken(name));
-            if (primvar && primvar.Get(&uvs) && !uvs.empty()) {
+            if (primvar && primvar.Get(&uvs, at) && !uvs.empty()) {
                 uvInterpolation = primvar.GetInterpolation();
                 primvar.GetIndices(&uvIndices);
                 hasUvs = true;

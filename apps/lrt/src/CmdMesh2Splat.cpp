@@ -756,7 +756,9 @@ void addMesh2Splat(CLI::App& app) {
     cmd->add_flag("--default-lights", o->defaultLights,
                   "bake under a dome and a sun in the session layer, for a stage that brings no "
                   "lights of its own (what lrt view offers)");
-    cmd->add_option("--time", o->time, "USD time code the bake reads the stage at");
+    cmd->add_option("--time", o->time,
+                    "the USD time code the stage is read at: the pose that becomes gaussians, "
+                    "and the instant the bake traces. A skinned stage is posed for it");
     cmd->add_option("--path", o->paths, "extra AOFX bundle directories");
     cmd->callback([o] {
         gpu_host::Context* context = gpu_host::installProcessContext();
@@ -794,6 +796,12 @@ void addMesh2Splat(CLI::App& app) {
             if (!stage) return std::move(stage).error();
             usd::MeshStageOptions read;
             read.prim = o->prim;
+        // THE SAME INSTANT FOR BOTH. The gaussians come from the mesh at this
+        // time and the bake traces the scene at this time, so the rays stand
+        // on the surface they were built from. They did not: the conversion
+        // read the stage at its default time whatever `--time` said, and a
+        // bake at any other instant put its rays where the mesh used to be.
+        read.time = o->time;
             auto meshes = stage->read(*builder, read);
             if (!meshes) return std::move(meshes).error();
 

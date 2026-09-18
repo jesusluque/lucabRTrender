@@ -85,6 +85,12 @@ struct MeshStageOptions {
     /// Meshes with no `st` primvar are read anyway; their gaussians then take
     /// the triangle's own size rather than a texel's. False leaves them out.
     bool        withoutTexcoords = true;
+    /// The USD time code the geometry is read at: the pose a conversion turns
+    /// into gaussians. A skinned stage is posed for it first, into a session
+    /// layer, so the file on disk is not touched; a stage with no animation in
+    /// it reads exactly as it did, because an attribute with no time samples
+    /// answers with its default whatever time is asked for.
+    double      time = 0.0;
 };
 
 /// Opens `path` and reads its meshes. The stage stays open for as long as this

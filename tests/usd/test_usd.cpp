@@ -28,6 +28,9 @@
 #include <pxr/usd/usdGeom/xformCommonAPI.h>
 #include <pxr/usd/usdGeom/xform.h>
 #include <pxr/usd/usdVol/particleField3DGaussianSplat.h>
+
+#include "lrt/geom/Mesh.h"
+#include "lrt/usd/MeshStage.h"
 #include <pxr/base/gf/quath.h>
 #include <pxr/base/gf/vec3h.h>
 #include <cstdio>
@@ -6150,4 +6153,82 @@ TEST_CASE("a splat that decodes to nothing keeps its place in the written cloud"
     REQUIRE(extent.size() == 2);
     CHECK(std::isfinite(extent[0][0]));
     CHECK(extent[1][0] >= extent[0][0]);
+}
+
+// A CONVERSION READS THE POSE, NOT THE REST.
+//
+// `MeshStage` goes round Hydra on purpose -- a conversion wants none of a
+// render index -- and a skinned mesh's `points` attribute does not animate,
+// because the deformation is the skeleton's. So a stage with a SkelRoot used
+// to convert as the rest pose whatever time was asked for, and `--time`
+// reached only the bake's ray tracing: the rays stood where the mesh used to
+// be while the scene they traced was somewhere else.
+//
+// It is posed with `UsdSkelBakeSkinning`, into the session layer and for one
+// instant, which writes the posed points onto the meshes themselves. The
+// reads then need to know nothing about skinning. Here one joint carries the
+// whole square and slides by (1.2, 0.4, 0) between time 0 and time 1, so the
+// mesh the conversion builds must move by exactly that -- and its bounds are
+// the device's own fold over the points, not the host's.
+TEST_CASE("a skinned stage is read in the pose it holds at the time asked for", "[usd][gpu][mesh][skinning]") {
+    LRT_REQUIRE_GPU(gpu);
+    const fs::path path = scratch("mesh-stage-skinned.usda");
+    {
+        std::ofstream out(path);
+        out << "#usda 1.0\n(\n    upAxis = \"Y\"\n    startTimeCode = 0\n    endTimeCode = 1\n)\n"
+               "def SkelRoot \"Root\"\n{\n"
+               "    def Skeleton \"Skel\" (\n        prepend apiSchemas = [\"SkelBindingAPI\"]\n    )\n    {\n"
+               "        uniform token[] joints = [\"root\", \"root/arm\"]\n"
+               "        uniform matrix4d[] bindTransforms = [( (1,0,0,0), (0,1,0,0), (0,0,1,0), (0,0,0,1) ), "
+               "( (1,0,0,0), (0,1,0,0), (0,0,1,0), (0,0,0,1) )]\n"
+               "        uniform matrix4d[] restTransforms = [( (1,0,0,0), (0,1,0,0), (0,0,1,0), (0,0,0,1) ), "
+               "( (1,0,0,0), (0,1,0,0), (0,0,1,0), (0,0,0,1) )]\n"
+               "        rel skel:animationSource = </Root/Anim>\n    }\n"
+               "    def SkelAnimation \"Anim\"\n    {\n"
+               "        uniform token[] joints = [\"root/arm\"]\n"
+               "        float3[] translations.timeSamples = {\n            0: [(0, 0, 0)],\n"
+               "            1: [(1.2, 0.4, 0)],\n        }\n"
+               "        quatf[] rotations = [(1, 0, 0, 0)]\n"
+               "        half3[] scales = [(1, 1, 1)]\n    }\n"
+               "    def Mesh \"Square\" (\n        prepend apiSchemas = [\"SkelBindingAPI\"]\n    )\n    {\n"
+               "        int[] faceVertexCounts = [4]\n"
+               "        int[] faceVertexIndices = [0, 1, 2, 3]\n"
+               "        point3f[] points = [(-0.5, -0.5, -5), (0.5, -0.5, -5), (0.5, 0.5, -5), (-0.5, 0.5, -5)]\n"
+               "        uniform token subdivisionScheme = \"none\"\n"
+               "        rel skel:skeleton = </Root/Skel>\n"
+               "        int[] primvars:skel:jointIndices = [1, 1, 1, 1] ( elementSize = 1\n"
+               "            interpolation = \"vertex\" )\n"
+               "        float[] primvars:skel:jointWeights = [1, 1, 1, 1] ( elementSize = 1\n"
+               "            interpolation = \"vertex\" )\n"
+               "        matrix4d primvars:skel:geomBindTransform = ( (1,0,0,0), (0,1,0,0), (0,0,1,0), (0,0,0,1) )\n"
+               "    }\n}\n";
+    }
+    auto builder = geom::MeshBuilder::create(*gpu->library);
+    if (!builder) FAIL(builder.error().toString());
+
+    const auto boundsAt = [&](double time) {
+        auto stage = usd::MeshStage::open(path);
+        if (!stage) FAIL(stage.error().toString());
+        usd::MeshStageOptions options;
+        options.time = time;
+        auto meshes = stage->read(*builder, options);
+        if (!meshes) FAIL(meshes.error().toString());
+        REQUIRE(meshes->size() == 1);
+        return (*meshes)[0].mesh.bounds;
+    };
+    const scene::Bounds rest = boundsAt(0.0);
+    const scene::Bounds posed = boundsAt(1.0);
+    std::printf("  rest %.3f %.3f, posed %.3f %.3f\n", double(rest.min[0]), double(rest.min[1]),
+                double(posed.min[0]), double(posed.min[1]));
+
+    // The square, as authored, at time 0.
+    CHECK(rest.min[0] == Catch::Approx(-0.5).margin(1e-4));
+    CHECK(rest.min[1] == Catch::Approx(-0.5).margin(1e-4));
+    // And carried by its one joint at time 1.
+    CHECK(posed.min[0] == Catch::Approx(0.7).margin(1e-3));
+    CHECK(posed.min[1] == Catch::Approx(-0.1).margin(1e-3));
+    CHECK(posed.max[0] == Catch::Approx(1.7).margin(1e-3));
+    CHECK(posed.max[1] == Catch::Approx(0.9).margin(1e-3));
+    // The plane it stands in does not move: the joint slides in x and y.
+    CHECK(posed.min[2] == Catch::Approx(rest.min[2]).margin(1e-4));
 }
