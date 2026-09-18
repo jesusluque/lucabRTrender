@@ -12,6 +12,7 @@
 #include "lrt/render/ReferenceRenderer.h"
 #include "lrt/render/TileRasterizer.h"
 #include "lrt/light/LightTable.h"
+#include "lrt/render/GaussianRayTracer.h"
 #include "lrt/scene/GpuClouds.h"
 
 using namespace lrt;
@@ -320,6 +321,84 @@ TEST_CASE("a SplatEdit is in the cloud's own space and per instance", "[render][
     CHECK(right[0] < 0.01F);             // tinted green
     CHECK(right[2] < 0.01F);
     CHECK(right[1] > 0.3F);
+}
+
+TEST_CASE("both routes relight a splat, and alike: what the rasteriser does the ray tracer does",
+          "[render][splats][relight][rt]") {
+    LRT_REQUIRE_GPU(gpu);
+    if (!gpu->device->caps().rayQuery || !gpu->device->caps().accelerationStructure) {
+        SKIP("no ray queries on this device");
+    }
+    auto h = harness(gpu);
+    auto tracer = render::GaussianRayTracer::create(*gpu->library);
+    if (!tracer) FAIL(tracer.error().toString());
+    // One flat splat facing the camera, its baked colour a known albedo, and
+    // what it reflects with: rough enough that the specular lobe is a sheen
+    // rather than a spike a single sample would miss.
+    CloudBuilder b;
+    b.add(0.0F, 0.0F, 0.0F, 0.99F, 0.6F, 0.6F, 0.02F, {1.0F, 0.0F, 0.0F, 0.0F}, {0.8F, 0.4F, 0.2F});
+    b.raw.encoding.metallic = b.raw.encoding.floatsPerRecord;
+    b.raw.encoding.roughness = b.raw.encoding.floatsPerRecord + 1;
+    b.raw.encoding.floatsPerRecord += 2;
+    std::vector<float> widened;
+    for (uint32_t k = 0; k < b.raw.count; ++k) {
+        widened.insert(widened.end(), b.raw.records.begin() + k * (b.raw.encoding.floatsPerRecord - 2),
+                       b.raw.records.begin() + (k + 1) * (b.raw.encoding.floatsPerRecord - 2));
+        widened.push_back(0.0F);   // metallic: a dielectric
+        widened.push_back(0.4F);   // roughness
+    }
+    b.raw.records = std::move(widened);
+    auto cloud = h->loader.upload(b.raw);
+    if (!cloud) FAIL(cloud.error().toString());
+    CHECK(cloud->hasPbr());
+    auto table = light::LightTable::create(*gpu->library);
+    if (!table) FAIL(table.error().toString());
+    light::Light lamp;
+    lamp.kind = light::LightKind::Sphere;
+    lamp.lightToWorld = aofx::xform::translation({0.0, 0.0, 2.0});
+    lamp.radius = 0.3F;
+    lamp.intensity = 4.0F;
+    lamp.shadow = false;
+    lamp.lightCategory = light::kLightUnlinked;
+    REQUIRE(table->set(std::span<const light::Light>(&lamp, 1)));
+    render::SplatLights lights;
+    lights.records = &table->records();
+    lights.count = table->count();
+
+    const render::Camera camera = render::Camera::lookingAt({0.0, 0.0, 3.0}, {0.0, 0.0, 0.0});
+    render::RenderSettings settings;
+    settings.width = 96;
+    settings.height = 96;
+    const auto both = [&](bool relight, render::RenderTargets& rasterised, render::RenderTargets& traced) {
+        std::vector<render::SplatInstance> instances{{&*cloud, render::Mat4::identity()}};
+        instances[0].relight = relight;
+        REQUIRE(h->raster.render(camera, instances, settings, rasterised, {}, nullptr, &lights));
+        REQUIRE(tracer->render(camera, instances, settings, traced, &lights));
+    };
+    render::RenderTargets bakedRaster, bakedTraced, relitRaster, relitTraced;
+    both(false, bakedRaster, bakedTraced);
+    both(true, relitRaster, relitTraced);
+
+    const auto compare = [&](const render::RenderTargets& a, const render::RenderTargets& c) {
+        auto diff = render::compareImages(*gpu->library, a.colour, c.colour, settings.width, settings.height);
+        if (!diff) FAIL(diff.error().toString());
+        return *diff;
+    };
+    const auto tracedChanged = compare(bakedTraced, relitTraced);
+    const auto routes = compare(relitRaster, relitTraced);
+    const auto bakedRoutes = compare(bakedRaster, bakedTraced);
+    std::printf("  traced baked against traced relit: max %u, %llu pixels beyond 2; "
+                "relit raster against relit traced: p99 %u, max %u; baked, the same two: p99 %u, max %u\n",
+                tracedChanged.max, static_cast<unsigned long long>(tracedChanged.over2), routes.p99, routes.max,
+                bakedRoutes.p99, bakedRoutes.max);
+    // The flag means something on the traced route: it used to mean nothing
+    // there, and a cloud converted from a mesh came back as its own albedo.
+    CHECK(tracedChanged.over2 > 100);
+    // And it means the same thing on both. The two renderers differ a little
+    // wherever they always differ -- EWA against the exact evaluation -- so
+    // the claim is that relighting does not widen that: the relit pair agrees
+    // as closely as the baked pair does.
+    CHECK(routes.p99 <= bakedRoutes.p99 + 1);
 }
 
 TEST_CASE("a splat asked to be relit shows the scene's light, not the light it was baked with",

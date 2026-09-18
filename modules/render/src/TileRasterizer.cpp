@@ -324,6 +324,22 @@ Result<FrameStats> TileRasterizer::render(const Projection& projection,
             cursor["params"]["shadowRays"].setData(uint32_t{shadows ? 1u : 0u});
             cursor["params"]["shadowLights"].setData(shadowLights);
             cursor["shadowFactors"].setBinding(shadows ? shadowFactors_.rhi() : emptyShadow_.rhi());
+            // What the splat reflects with, where its cloud carries it (a
+            // conversion from a mesh does, a capture does not). Bound either
+            // way, and `hasPbr` is what says whether it is read.
+            cursor["params"]["hasPbr"].setData(uint32_t{cloud->hasPbr() ? 1u : 0u});
+            cursor["pbr"].setBinding(cloud->hasPbr() ? cloud->pbr.rhi() : cloud->shape.rhi());
+            // Relighting happens in the world: the rows take this cloud there
+            // and the eye is already there.
+            const std::array<float, 12> toWorld = instance.objectToWorld.rows3x4();
+            static const char* kWorldRow[12] = {"w00", "w01", "w02", "w03", "w10", "w11",
+                                                "w12", "w13", "w20", "w21", "w22", "w23"};
+            for (int k = 0; k < 12; ++k) {
+                cursor["params"][kWorldRow[k]].setData(toWorld[static_cast<size_t>(k)]);
+            }
+            cursor["params"]["eyeWorldX"].setData(static_cast<float>(projection.eyeWorld.x));
+            cursor["params"]["eyeWorldY"].setData(static_cast<float>(projection.eyeWorld.y));
+            cursor["params"]["eyeWorldZ"].setData(static_cast<float>(projection.eyeWorld.z));
         });
         base += cloud->count;
     }

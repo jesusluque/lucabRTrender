@@ -10,6 +10,7 @@
 #include <pxr/usd/usd/stage.h>
 #include <pxr/usd/usdGeom/camera.h>
 #include <pxr/usd/usdGeom/metrics.h>
+#include <pxr/usd/usdGeom/primvarsAPI.h>
 #include <pxr/usd/usdGeom/tokens.h>
 #include <pxr/usd/usdGeom/xform.h>
 #include <pxr/usd/usdGeom/xformCommonAPI.h>
@@ -57,6 +58,9 @@ Result<void> writeParticleFieldStage(gpu::ShaderLibrary& library, const io::RawS
     VtVec3fArray scales;
     VtFloatArray opacities;
     VtVec3fArray coefficients;
+    VtFloatArray metallics;
+    VtFloatArray roughnesses;
+    const bool pbr = e.metallic != io::SplatEncoding::kNoField || e.roughness != io::SplatEncoding::kNoField;
     positions.reserve(raw.count);
     const uint32_t perRecord = 1 + keep;
     GfVec3d lo(1e30), hi(-1e30);
@@ -108,6 +112,13 @@ Result<void> writeParticleFieldStage(gpu::ShaderLibrary& library, const io::RawS
                 const float* cc = co->data() + (size_t{i} * perRecord + k) * 4;
                 coefficients.push_back(GfVec3f(cc[0], cc[1], cc[2]));
             }
+            if (pbr) {
+                // Straight out of the record: both are already 0 to 1, and a
+                // value is not a thing this file decodes.
+                const float* record = raw.records.data() + size_t{first + i} * e.floatsPerRecord;
+                metallics.push_back(e.metallic != io::SplatEncoding::kNoField ? record[e.metallic] : 0.0F);
+                roughnesses.push_back(e.roughness != io::SplatEncoding::kNoField ? record[e.roughness] : 1.0F);
+            }
             for (int axis = 0; axis < 3; ++axis) {
                 lo[axis] = std::min(lo[axis], static_cast<double>(pp[axis]));
                 hi[axis] = std::max(hi[axis], static_cast<double>(pp[axis]));
@@ -137,6 +148,19 @@ Result<void> writeParticleFieldStage(gpu::ShaderLibrary& library, const io::RawS
     if (options.rotateXDegrees != 0.0) {
         UsdGeomXformCommonAPI(splats.GetPrim()).SetRotate(
             GfVec3f(static_cast<float>(options.rotateXDegrees), 0.0F, 0.0F));
+    }
+
+    if (pbr) {
+        // What a relit gaussian reflects with, beside the colours it reflects.
+        // Primvars rather than attributes of the schema: the schema is USD's
+        // and says nothing about a surface, while LrtSplatLightingAPI is ours.
+        static const TfToken kMetallic("primvars:lrt:splat:metallic");
+        static const TfToken kRoughness("primvars:lrt:splat:roughness");
+        UsdGeomPrimvarsAPI primvars(splats.GetPrim());
+        primvars.CreatePrimvar(kMetallic, SdfValueTypeNames->FloatArray, UsdGeomTokens->vertex)
+            .Set(VtValue(metallics));
+        primvars.CreatePrimvar(kRoughness, SdfValueTypeNames->FloatArray, UsdGeomTokens->vertex)
+            .Set(VtValue(roughnesses));
     }
 
     if (options.relight) {

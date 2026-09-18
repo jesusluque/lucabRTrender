@@ -47,7 +47,13 @@ struct GpuSplats {
     gpu::Buffer positions;          ///< float4
     gpu::Buffer shape;              ///< uint * 4
     gpu::Buffer sh;                 ///< uint * shWords (one dummy word at degree 0)
+    /// What each splat reflects with, where the cloud carries it: one uint a
+    /// splat, metallic in the low byte and roughness in the next. Empty for a
+    /// capture, which has neither -- `hasPbr` is how a kernel asks.
+    gpu::Buffer pbr;
     Bounds      bounds;
+
+    [[nodiscard]] bool hasPbr() const noexcept { return pbr.valid(); }
 
     [[nodiscard]] uint32_t degree() const noexcept {
         return restPerColour == 15 ? 3 : restPerColour == 8 ? 2 : restPerColour == 3 ? 1 : 0;
@@ -87,6 +93,10 @@ struct SplatStreams {
     FloatStream opacities;      ///< linear
     uint32_t    coefficients = 0;   ///< SH coefficients per splat, DC first: (degree + 1)^2
     FloatStream sh;             ///< rgb per coefficient
+    /// What the gaussian reflects with, one per splat, where the stage says
+    /// so (`primvars:lrt:splat:metallic` and `:roughness`). Empty otherwise.
+    FloatStream metallic;
+    FloatStream roughness;
 };
 
 /// A point cloud as separate arrays, the way UsdGeomPoints stores one.
@@ -124,7 +134,8 @@ private:
     struct SogOnDevice;
     [[nodiscard]] Result<SogOnDevice> sogOnDevice(const io::RawSog& sog, uint32_t maxDegree);
     [[nodiscard]] Result<void> sogSlice(const SogOnDevice& on, uint32_t first, uint32_t n, const gpu::Buffer& into);
-    [[nodiscard]] Result<GpuSplats> startSplats(const std::string& source, uint32_t declared, uint32_t keep);
+    [[nodiscard]] Result<GpuSplats> startSplats(const std::string& source, uint32_t declared, uint32_t keep,
+                                                bool withPbr = false);
     /// Validates and decodes `n` records in `raw` into `splats` after `written`.
     [[nodiscard]] Result<uint32_t> decodeSlice(const gpu::Buffer& raw, const io::SplatEncoding& e, uint32_t n,
                                                uint32_t written, uint32_t keep, GpuSplats& splats);

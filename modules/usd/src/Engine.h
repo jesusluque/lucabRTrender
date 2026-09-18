@@ -498,6 +498,10 @@ private:
     gpu::Buffer                               materialBlob_;
     /// Row and blob for this frame's materials, primvar slots set on the scene.
     [[nodiscard]] Result<void> prepareMaterials(const std::vector<std::string>& aovPrimvars);
+    /// The light table a frame of relit splats needs, for both routes that
+    /// draw one (LrtSplatLightingAPI).
+    [[nodiscard]] Result<void> prepareSplatLights(const std::vector<light::Light>& lamps,
+                                                  std::span<const render::SplatInstance> splats);
     std::optional<gpu::ComputeKernel>          nearest_;
     std::optional<gpu::ComputeKernel>          domeBackground_;
     std::optional<gpu::ComputeKernel>          exposure_;   ///< made on first use

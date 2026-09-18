@@ -108,9 +108,12 @@ struct Options {
 struct MapKey {
     std::string metallic;   ///< also the only file, for a one-file map
     std::string roughness;
+    bool        packed = false;
 
     friend bool operator<(const MapKey& a, const MapKey& b) {
-        return a.metallic != b.metallic ? a.metallic < b.metallic : a.roughness < b.roughness;
+        if (a.metallic != b.metallic) return a.metallic < b.metallic;
+        if (a.roughness != b.roughness) return a.roughness < b.roughness;
+        return static_cast<int>(a.packed) < static_cast<int>(b.packed);
     }
 };
 
@@ -284,13 +287,13 @@ public:
         return ok();
     }
 
-    /// One map as a picture, cached. `roughness` empty means the whole of
-    /// `metallic`'s four channels; otherwise the two files are packed as glTF
-    /// packs them, metallic in blue and roughness in green, which is what the
-    /// conversion reads.
+    /// One map as a picture, cached. Without `pack` it is one file in all four
+    /// channels -- an albedo, a normal map. With it, the two files are packed
+    /// as glTF packs them, metallic in blue and roughness in green, which is
+    /// what the conversion reads, and either of them may be absent.
     [[nodiscard]] Result<image::ImagePtr> mapPicture(const std::string& metallic,
-                                                     const std::string& roughness) {
-        const MapKey key{metallic, roughness};
+                                                     const std::string& roughness, bool pack = false) {
+        const MapKey key{metallic, roughness, pack};
         if (const auto held = maps_.find(key); held != maps_.end()) {
             return held->second;
         }
@@ -323,7 +326,11 @@ public:
 
         gpu::CommandBatch batch(library_->device());
         const uint32_t stride = static_cast<uint32_t>((*picture)->stride());
-        const auto write = [&](const std::string& file, uint32_t channels, bool clear, float fallback) {
+        // `fallback` is what the picture holds where no texture wrote: the
+        // defaults a material has when it names no map. Metallic is nothing
+        // and roughness is a half, which is what the conversion assumes.
+        const std::array<float, 4> defaults{1.0F, 0.5F, 0.0F, 1.0F};
+        const auto write = [&](const std::string& file, uint32_t channels, bool clear) {
             const auto id = ids_.find(file);
             const uint32_t which = id != ids_.end() ? id->second : 0;
             rows_.dispatch(batch, {width, height, 1}, [&](rhi::ShaderCursor cursor) {
@@ -337,17 +344,23 @@ public:
                 cursor["params"]["channels"].setData(channels);
                 cursor["params"]["fromChannel"].setData(uint32_t{0});
                 cursor["params"]["clear"].setData(clear ? 1U : 0U);
-                const float fill[4] = {fallback, fallback, fallback, 1.0F};
-                cursor["params"]["fallback"].setData(fill, 16);
+                cursor["params"]["fallback"].setData(defaults.data(), 16);
             });
         };
-        if (roughness.empty()) {
-            write(metallic, 15, true, 1.0F);
+        if (!pack) {
+            write(metallic, 15, true);   // a picture of its own: albedo, a normal map
         } else {
             // Blue is metallic, green is roughness: glTF's packing, and what
-            // their fragment shader reads.
-            write(metallic, 4, true, 0.0F);
-            write(roughness, 2, false, 0.5F);
+            // their fragment shader reads. The defaults go down first, so a
+            // material that names one map and not the other keeps the
+            // default for the one it does not name -- which is what it meant.
+            write({}, 0, true);
+            if (!metallic.empty()) {
+                write(metallic, 4, false);
+            }
+            if (!roughness.empty()) {
+                write(roughness, 2, false);
+            }
         }
         LRT_TRY(batch.submit(true));
         (*picture)->deviceWrote();
@@ -358,13 +371,17 @@ public:
     [[nodiscard]] Result<io::RawSplats> convert(aofx::Effect& effect, std::vector<usd::StageMesh>& meshes) {
         io::RawSplats raw;
         raw.source = options_->stage;
-        raw.encoding.floatsPerRecord = 14;
         raw.encoding.x = 0; raw.encoding.y = 1; raw.encoding.z = 2; raw.encoding.opacity = 3;
         raw.encoding.scale0 = 4; raw.encoding.scale1 = 5; raw.encoding.scale2 = 6;
         raw.encoding.rotW = 7; raw.encoding.rotX = 8; raw.encoding.rotY = 9; raw.encoding.rotZ = 10;
         raw.encoding.dc0 = 11; raw.encoding.dc1 = 12; raw.encoding.dc2 = 13;
-        raw.encoding.restBase = 14;
+        raw.encoding.restBase = 16;
         raw.encoding.restPerColour = 0;
+        // What the gaussian reflects with, which is what lets a relit cloud
+        // show the sheen its mesh had: two more floats a record.
+        raw.encoding.metallic = 14;
+        raw.encoding.roughness = 15;
+        raw.encoding.floatsPerRecord = 16;
         raw.encoding.opacity_ = io::SplatEncoding::Opacity::Linear;
         raw.encoding.scale_ = io::SplatEncoding::Scale::Linear;
         raw.encoding.colour = io::SplatEncoding::Colour::Linear;
@@ -436,17 +453,14 @@ private:
         if (!normal) return std::move(normal).error();
         const bool anyMr = !options_->noTextures &&
                            (!material.metallicMap.empty() || !material.roughnessMap.empty());
-        auto mr = anyMr ? mapPicture(material.metallicMap.file.empty() ? material.roughnessMap.file
-                                                                      : material.metallicMap.file,
-                                     material.metallicMap.file.empty() ? std::string{}
-                                                                       : material.roughnessMap.file)
+        auto mr = anyMr ? mapPicture(material.metallicMap.file, material.roughnessMap.file, true)
                         : Result<image::ImagePtr>{image::ImagePtr{}};
         if (!mr) return std::move(mr).error();
 
         // The records the effect writes go into a picture of their own, four
         // entries a splat: position and opacity, the three sizes, the rotation,
         // the colour.
-        constexpr uint32_t kRecordEntries = 4;
+        constexpr uint32_t kRecordEntries = 6;
         const uint64_t budget = std::min<uint64_t>(room, 1ull << 23);
         const image::PixelRect bounds = pictureFor(budget * kRecordEntries);
 
@@ -471,9 +485,9 @@ private:
         number("minOpacity", options_->minOpacity);
         number("maxCells", static_cast<double>(options_->maxCells));
         number("useNormalMap", options_->normalMapTurns ? 1.0 : 0.0);
-        // The PBR channels have nowhere to go in a ParticleField yet, so the
-        // records are the four entries a splat needs and no more.
-        number("writePbr", 0.0);
+        // Six entries a splat: the four a gaussian is, and the two that say
+        // what it reflects with.
+        number("writePbr", 1.0);
         number("transmission", static_cast<double>(material.transmission));
         job.params.push_back(aofx::ParamValue{"sigma", {options_->sigma, options_->sigma}, {}});
         const auto colour = [&job](const char* name, const std::array<float, 3>& rgb) {
@@ -505,9 +519,9 @@ private:
         const auto floats = out.floats();
         const auto stride = static_cast<size_t>(out.stride());
         const auto width = static_cast<size_t>(out.bounds().width());
-        answer.records.resize(answer.written * 14);
+        answer.records.resize(answer.written * 16);
         for (uint64_t splat = 0; splat < answer.written; ++splat) {
-            float* record = answer.records.data() + splat * 14;
+            float* record = answer.records.data() + splat * 16;
             const auto entry = [&](uint32_t component) {
                 const uint64_t index = splat * kRecordEntries + component;
                 return floats.data() + ((index / width) * stride + index % width) * 4;
@@ -522,6 +536,14 @@ private:
             record[7] = rotation[0]; record[8] = rotation[1]; record[9] = rotation[2];
             record[10] = rotation[3];
             record[11] = rgb[0]; record[12] = rgb[1]; record[13] = rgb[2];
+            // The fifth entry is (shading normal, metallic) and the sixth
+            // (roughness, transmission, u, v): the normal and the texture
+            // coordinate have nowhere to live in a ParticleField, and these
+            // two do.
+            const float* shading = entry(4);
+            const float* surface = entry(5);
+            record[14] = shading[3];
+            record[15] = surface[0];
         }
         return answer;
     }

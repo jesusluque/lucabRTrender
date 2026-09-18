@@ -27,6 +27,8 @@ static const uint kScales = 4;
 static const uint kOpacities = 8;
 static const uint kSh = 16;
 static const uint kColours = 32;
+static const uint kMetallic = 64;
+static const uint kRoughness = 128;
 
 struct StreamParams {
     uint count;          // records in this slice
@@ -37,7 +39,11 @@ struct StreamParams {
     uint present;        // which streams are bound (k* bits)
     uint halves;         // which of them are float16
     uint colourMode;     // points: 0 none (white), 1 one colour, 2 one per point
+    uint pbrBase;        // where metallic and roughness go in a record, or kNoPbr
+    uint pad0; uint pad1; uint pad2;
 };
+
+static const uint kNoPbr = 0xFFFFFFFFu;
 
 StructuredBuffer<uint>     positions;   // xyz
 StructuredBuffer<uint>     rotations;   // xyzw, GfQuat's layout
@@ -45,6 +51,8 @@ StructuredBuffer<uint>     scales;      // xyz
 StructuredBuffer<uint>     opacities;
 StructuredBuffer<uint>     sh;          // rgb per coefficient
 StructuredBuffer<uint>     colours;     // rgb
+StructuredBuffer<uint>     metallic;    // one a splat, where the stage carries it
+StructuredBuffer<uint>     roughness;
 RWStructuredBuffer<float>  records;
 ConstantBuffer<StreamParams> params;
 
@@ -86,6 +94,12 @@ void splatStreams(uint3 tid: SV_DispatchThreadID) {
         for (uint c = 0; c < 3; ++c) {
             records[r + 14 + basis * 3 + c] = streamValue(sh, isHalf(kSh), (base + 1 + basis) * 3 + c);
         }
+    }
+    // What the gaussian reflects with, after the harmonics: a cloud converted
+    // from a mesh brings them, a capture does not.
+    if (params.pbrBase != kNoPbr) {
+        records[r + params.pbrBase] = present(kMetallic) ? streamValue(metallic, isHalf(kMetallic), e) : 0.0;
+        records[r + params.pbrBase + 1] = present(kRoughness) ? streamValue(roughness, isHalf(kRoughness), e) : 1.0;
     }
 }
 

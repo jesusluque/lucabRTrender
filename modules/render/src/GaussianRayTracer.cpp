@@ -140,6 +140,23 @@ Result<GaussianRayTracer> GaussianRayTracer::create(gpu::ShaderLibrary& library,
     };
     LRT_TRY(make(r.frames_kernel_, "lrt/rt/rt_frames", "rtFrames"));
     LRT_TRY(make(r.shade_, "lrt/rt/rt_shade", "rtShade"));
+    {
+        // The two the shade kernel declares for relighting and does not read
+        // when nothing is relit. A LightRecord is 96 bytes (light/lights.slang).
+        gpu::BufferDesc desc;
+        desc.bytes = 96;
+        desc.elementBytes = 96;
+        desc.label = "rt.lights.empty";
+        auto lights = gpu::Buffer::create(*r.device_, desc);
+        if (!lights) return std::move(lights).error();
+        r.emptyLights_ = std::move(*lights);
+        desc.bytes = 4;
+        desc.elementBytes = 4;
+        desc.label = "rt.shadow.empty";
+        auto shadow = gpu::Buffer::create(*r.device_, desc);
+        if (!shadow) return std::move(shadow).error();
+        r.emptyShadow_ = std::move(*shadow);
+    }
     if (r.settings_.route == RayTracingRoute::Hardware) {
         LRT_TRY(make(r.proxy_, "lrt/rt/rt_proxy", "rtProxy"));
         if (!structuresOnly) {
@@ -390,7 +407,8 @@ Result<void> GaussianRayTracer::buildBvh(const Cloud& cloud, gpu::Buffer& boxes,
 }
 
 Result<void> GaussianRayTracer::prepareFrame(std::span<const SplatInstance> instances,
-                                             const Vec3& eyeWorld, uint32_t shLimit) {
+                                             const Vec3& eyeWorld, uint32_t shLimit,
+                                             const SplatLights* lights) {
     gpu::Device& device = *device_;
     const bool hardware = settings_.route == RayTracingRoute::Hardware;
     std::vector<rhi::AccelerationStructureInstanceDescGeneric> generic;
@@ -402,6 +420,11 @@ Result<void> GaussianRayTracer::prepareFrame(std::span<const SplatInstance> inst
         uint32_t                colourStart;
         Vec3                    eye;
         SplatEdit               edit;
+        // What relighting needs: whether this instance asked for it, where it
+        // stands in the world and which lights reach it.
+        bool                    relight = false;
+        std::array<float, 12>   toWorld{};
+        uint64_t                categories = 0;
     };
     std::vector<Shade> shades;
     uint64_t colours = 0;
@@ -417,7 +440,8 @@ Result<void> GaussianRayTracer::prepareFrame(std::span<const SplatInstance> inst
         const std::array<float, 12> rows = instance.objectToWorld.rows3x4();
         const std::array<float, 12> toCloudRows = toCloud.rows3x4();
         const auto colourStart = static_cast<uint32_t>(colours);
-        shades.push_back({instance.splats, colourStart, toCloud.point(eyeWorld), instance.edit});
+        shades.push_back({instance.splats, colourStart, toCloud.point(eyeWorld), instance.edit,
+                          instance.relight && lights != nullptr && lights->any(), rows, instance.categories});
         colours += instance.splats->count;
         if (!hardware) {
             data.insert(data.end(), toCloudRows.begin(), toCloudRows.end());
@@ -504,6 +528,11 @@ Result<void> GaussianRayTracer::prepareFrame(std::span<const SplatInstance> inst
             cursor["shape"].setBinding(shade.cloud->shape.rhi());
             cursor["sh"].setBinding(shade.cloud->sh.rhi());
             cursor["colours"].setBinding(colours_.rhi());
+            // Every name a shader declares must be bound whether it is read
+            // or not; the flags are what say which of them are.
+            cursor["pbr"].setBinding(shade.cloud->hasPbr() ? shade.cloud->pbr.rhi() : shade.cloud->shape.rhi());
+            cursor["lights"].setBinding(shade.relight ? lights->records->rhi() : emptyLights_.rhi());
+            cursor["shadowFactors"].setBinding(emptyShadow_.rhi());
             rhi::ShaderCursor p = cursor["params"];
             p["count"].setData(shade.cloud->count);
             p["base"].setData(shade.colourStart);
@@ -514,6 +543,19 @@ Result<void> GaussianRayTracer::prepareFrame(std::span<const SplatInstance> inst
             p["v13"].setData(static_cast<float>(shade.eye.y));
             p["v23"].setData(static_cast<float>(shade.eye.z));
             setEdit(p["edit"], shade.edit);
+            p["relight"].setData(uint32_t{shade.relight ? 1u : 0u});
+            p["lightCount"].setData(shade.relight ? lights->count : 0u);
+            p["categoriesLo"].setData(static_cast<uint32_t>(shade.categories & 0xFFFFFFFFu));
+            p["categoriesHi"].setData(static_cast<uint32_t>(shade.categories >> 32));
+            p["hasPbr"].setData(uint32_t{shade.cloud->hasPbr() ? 1u : 0u});
+            static const char* kWorldRow[12] = {"w00", "w01", "w02", "w03", "w10", "w11",
+                                                "w12", "w13", "w20", "w21", "w22", "w23"};
+            for (int k = 0; k < 12; ++k) {
+                p[kWorldRow[k]].setData(shade.toWorld[static_cast<size_t>(k)]);
+            }
+            p["eyeWorldX"].setData(static_cast<float>(eyeWorld.x));
+            p["eyeWorldY"].setData(static_cast<float>(eyeWorld.y));
+            p["eyeWorldZ"].setData(static_cast<float>(eyeWorld.z));
         });
     }
     return batch.submit(false);
@@ -522,13 +564,13 @@ Result<void> GaussianRayTracer::prepareFrame(std::span<const SplatInstance> inst
 Result<RayTracerStats> GaussianRayTracer::render(const Camera& camera,
                                                  std::span<const SplatInstance> instances,
                                                  const RenderSettings& settings,
-                                                 RenderTargets& targets) {
-    return render(projectionFor(camera, settings.width, settings.height), instances, settings, targets);
+                                                 RenderTargets& targets, const SplatLights* lights) {
+    return render(projectionFor(camera, settings.width, settings.height), instances, settings, targets, lights);
 }
 
 Result<RayTracerStats> GaussianRayTracer::prepare(const Projection& projection,
                                                   std::span<const SplatInstance> instances,
-                                                  uint32_t maxShDegree) {
+                                                  uint32_t maxShDegree, const SplatLights* lights) {
     const auto start = Clock::now();
     RayTracerStats stats;
     stats.route = settings_.route;
@@ -556,7 +598,7 @@ Result<RayTracerStats> GaussianRayTracer::prepare(const Projection& projection,
     for (const Cloud& cloud : clouds_) {
         stats.chunks += cloud.chunks;
     }
-    LRT_TRY(prepareFrame(instances, projection.eyeWorld, maxShDegree));
+    LRT_TRY(prepareFrame(instances, projection.eyeWorld, maxShDegree, lights));
     stats.buildMs = msSince(start);
     stats.totalMs = stats.buildMs;
     return stats;
@@ -576,7 +618,7 @@ ShadowScene GaussianRayTracer::shadowScene() const noexcept {
 Result<RayTracerStats> GaussianRayTracer::render(const Projection& projection,
                                                  std::span<const SplatInstance> instances,
                                                  const RenderSettings& settings,
-                                                 RenderTargets& targets) {
+                                                 RenderTargets& targets, const SplatLights* lights) {
     const auto start = Clock::now();
     RayTracerStats stats;
     stats.route = settings_.route;
@@ -616,7 +658,7 @@ Result<RayTracerStats> GaussianRayTracer::render(const Projection& projection,
         targets.width = settings.width;
         targets.height = settings.height;
     }
-    LRT_TRY(prepareFrame(instances, projection.eyeWorld, settings.maxShDegree));
+    LRT_TRY(prepareFrame(instances, projection.eyeWorld, settings.maxShDegree, lights));
     stats.buildMs = msSince(start);
 
     const auto renderStart = Clock::now();

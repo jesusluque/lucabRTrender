@@ -126,6 +126,16 @@ scene::SplatStreams splatStreams(const ParticleFieldArrays& a, std::string sourc
     if (s.sh.values() < uint64_t{s.count} * s.coefficients * 3) {
         s.sh = {};   // fewer coefficients than the degree says: none, as before
     }
+    // One value a particle, or nothing: a shorter array is no array, as the
+    // harmonics above are.
+    s.metallic = streamOf(a.metallic);
+    s.roughness = streamOf(a.roughness);
+    if (s.metallic.values() < s.count) {
+        s.metallic = {};
+    }
+    if (s.roughness.values() < s.count) {
+        s.roughness = {};
+    }
     return s;
 }
 

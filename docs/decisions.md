@@ -4278,3 +4278,70 @@ scene's lights light it. What is left after that is the representation itself:
 splat relighting is one diffuse sample per light with a normal a splat never
 had, so a dark glossy marble reads darker as gaussians than as a surface with
 a specular lobe. That is what the per-gaussian PBR carrier is for.
+
+## A relit splat: both routes, and what it reflects with
+
+Two renders of the converted pawn disagreed again, and this time the cloud was
+the wrong one: black where the mesh was polished marble. Two separate defects
+and one missing piece.
+
+**The flag meant nothing when a frame was traced.** `LrtSplatLightingAPI` was
+read in `splat_project.slang`, the tile rasteriser's, and nowhere else. A
+cloud drawn by the ray tracer -- which is what a stage of nothing but splats
+gets under `lrt:technique = rt` -- showed exactly what it was baked with. For a
+capture that is right by luck; for a cloud converted from a mesh, whose colours
+are an albedo, it is the albedo itself with no light on it: measured, a white
+material came back at **1.0** and the chess set's black marble at **0.003**.
+The relight now lives in `shaders/lrt/splat/splat_relight.slang` and both
+routes call it, so the two cannot drift again. The traced route needed the
+light table as well, which only a mesh layer used to build
+(`Engine::prepareSplatLights`).
+
+**It was relit in the wrong space.** The rasteriser sampled world-space lights
+with a splat's position in its *cloud's* space. Every stage this had been
+tried on had the cloud at the origin, so nothing showed. Both routes now take
+the cloud to the world first, by rows the host passes, which is what
+`splat_shadow.slang` already did.
+
+**And it was Lambert.** A splat had a diffuse lobe and nothing else, which is
+why the marble was black: at `0.003` of albedo, everything you see of that
+material in a render of the mesh is **reflection**. So a splat now has a
+specular lobe -- GGX, Smith's height-correlated visibility, Schlick's Fresnel,
+the shape the surface lobes use -- and carries what it reflects with:
+`GpuSplats::pbr`, one word a splat, metallic and roughness a byte each. The
+conversion writes them (`primvars:lrt:splat:metallic` and `:roughness` on the
+ParticleField prim), `CloudLoader` packs them, and a cloud without them -- a
+capture, every file a trainer writes -- relights as it did, with metallic 0
+and roughness 1.
+
+**A dome is answered whole rather than sampled.** Every other light is
+somewhere: one sample at its centre is a direction worth taking. A dome is
+everywhere, and one sample of it gives a splat a spike where a surface shows a
+broad sheen. So the dome's contribution is integrated in closed form: uniform
+radiance over the hemisphere is `albedo * L` of diffuse and
+`environmentBrdf * L` along the mirror direction of specular, with Lazarov's
+analytic fit of the split-sum term.
+
+**Measured.**
+
+- `tests/render/test_splat_render.cpp`, "both routes relight a splat, and
+  alike": the traced frame changes with the flag (max 178, 9216 pixels past
+  2), and the relit pair agrees between the routes exactly as closely as the
+  baked pair does (p99 1, max 1 for both) -- so relighting does not widen the
+  difference the two renderers always have.
+- The pawn, path traced with the viewer's default lights, over a 60 by 60
+  patch of its body: the mesh averages **0.085, 0.099, 0.097** and the cloud
+  **0.044, 0.046, 0.046**. Before this it was **0.0036** against the mesh's
+  floor of 0.043, and black on the screen.
+
+**What is left, and why.** The cloud is about half as bright as the mesh over
+that patch. A splat gets one sample a light, no bounce, and a normal it never
+had; the mesh gets a path tracer. That is the representation, not a defect,
+and it is the reason the conversion carries metallic and roughness at all --
+without them the difference was a factor of ten and a black pawn.
+
+**One more thing the conversion got wrong**, found on the way: a material that
+names a roughness map and no metallic map had its roughness written into all
+four channels of the packed map, so metallic came out equal to roughness --
+the chess set's glass, whose only map is a roughness. The defaults are laid
+down first now, and each file writes only its own channel.

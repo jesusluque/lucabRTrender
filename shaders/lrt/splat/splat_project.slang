@@ -9,12 +9,16 @@ import frame;
 import lrt.common.edit;
 // The core of the light module, which reads no texture: a dome is its colour
 // here, since this kernel lives below material and has no table to sample.
-import lrt.light.lights;
+// What a relit splat does with those lights is splat_relight's, shared with
+// the ray traced route so that the two cannot drift.
+import splat_relight;
+import lrt.scene.splat_encoding;
 // A shadow ray against the cloud's own proxies, where the caller built them.
 
 StructuredBuffer<float4>    positions;
 StructuredBuffer<uint>      shape;
 StructuredBuffer<uint>      sh;
+StructuredBuffer<uint>      pbr;      // metallic and roughness a splat, where the cloud carries them
 StructuredBuffer<LightRecord> lights;
 RWStructuredBuffer<ProjRecord> proj;
 RWStructuredBuffer<uint>    visible;      // 1 when the splat touches a tile
@@ -164,38 +168,26 @@ void splatProject(uint3 tid: SV_DispatchThreadID) {
     float3 colour = max(base + evaluateRest(sh, i * params.shWords, degree, dir), 0.0);
     if (params.relight != 0) {
         // LrtSplatLightingAPI: the radiance a capture was baked with replaced
-        // by what this scene's lights put on it. A splat is not a surface, so
-        // both of these are approximations and say so: the normal is its
-        // shortest axis -- the direction a flattened Gaussian faces -- turned
-        // towards the eye, and the albedo is the harmonics' constant term,
-        // which is the colour it shows on average.
-        const float3 albedo = max(base, 0.0);
-        const uint shortest = scale.x <= scale.y ? (scale.x <= scale.z ? 0u : 2u) : (scale.y <= scale.z ? 1u : 2u);
-        float3 normal = normalize(float3(r[0][shortest], r[1][shortest], r[2][shortest]));
-        const float3 position = posOpacity.xyz;
-        const float3 toEye = normalize(float3(params.eyeX, params.eyeY, params.eyeZ) - position);
-        if (dot(normal, toEye) < 0.0) {
-            normal = -normal;
-        }
-        float3 lit = float3(0.0);
-        for (uint k = 0; k < params.lightCount; ++k) {
-            const LightRecord light = lights[k];
-            // Light linking reaches a cloud as it reaches a mesh: by one bit.
-            if (!lightLinked(light.lightCategory, params.categoriesLo, params.categoriesHi)) {
-                continue;
-            }
-            // One sample at the middle of the light: a splat has no shadow
-            // ray and no second sample, so what it gets is the light's centre.
-            const LightSample ls = sampleLight(light, position, normal, float2(0.5, 0.5));
-            if (!ls.valid) {
-                continue;
-            }
-            const float through = params.shadowRays != 0 && k < params.shadowLights
-                                      ? shadowFactors[slot * params.shadowLights + k]
-                                      : 1.0;
-            lit += through * albedo * (1.0 / 3.14159265358979) * max(dot(normal, ls.wi), 0.0) * ls.radiance / ls.pdf;
-        }
-        colour = lit;
+        // by what this scene's lights put on it. What that means is in
+        // splat_relight.slang, which the ray traced route reads too.
+        // In the world, where the lights are: the cloud's own space is where
+        // its harmonics were trained, and a light stands somewhere else.
+        const float4 w0 = float4(params.w00, params.w01, params.w02, params.w03);
+        const float4 w1 = float4(params.w10, params.w11, params.w12, params.w13);
+        const float4 w2 = float4(params.w20, params.w21, params.w22, params.w23);
+        const float3 eye = float3(params.eyeWorldX, params.eyeWorldY, params.eyeWorldZ);
+        const float3 cloudNormal = splatNormal(r, scale, posOpacity.xyz,
+                                               float3(params.eyeX, params.eyeY, params.eyeZ));
+        SplatSurface surface;
+        surface.position = relightToWorld(w0, w1, w2, posOpacity.xyz);
+        surface.normal = relightDirectionToWorld(w0, w1, w2, cloudNormal);
+        surface.albedo = max(base, 0.0);
+        surface.metallic = params.hasPbr != 0 ? pbrMetallic(pbr[i]) : 0.0;
+        surface.roughness = params.hasPbr != 0 ? pbrRoughness(pbr[i]) : 1.0;
+        const uint shadowLights = params.shadowRays != 0 ? params.shadowLights : 0;
+        colour = relitSplat(surface, normalize(eye - surface.position), lights, params.lightCount,
+                            params.categoriesLo, params.categoriesHi, shadowFactors,
+                            slot * params.shadowLights, shadowLights);
     }
     if (fate.graded) {
         colour = editGrade(params.edit, colour);

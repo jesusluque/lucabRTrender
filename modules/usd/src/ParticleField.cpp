@@ -178,6 +178,13 @@ void HdLrtParticleField::Sync(HdSceneDelegate* delegate, HdRenderParam* renderPa
         arrays.shDegree = degree.IsHolding<int>() ? degree.UncheckedGet<int>() : 0;
         arrays.shCoefficients = either(UsdVolTokens->radianceSphericalHarmonicsCoefficients,
                                        UsdVolTokens->radianceSphericalHarmonicsCoefficientsh);
+        // LrtSplatLightingAPI's other two: what a relit gaussian reflects
+        // with, which a cloud converted from a mesh knows and a capture does
+        // not. Primvars, so they arrive without the namespace.
+        static const TfToken kMetallic("lrt:splat:metallic");
+        static const TfToken kRoughness("lrt:splat:roughness");
+        arrays.metallic = delegate->Get(id, kMetallic);
+        arrays.roughness = delegate->Get(id, kRoughness);
         raw = std::move(arrays);
     }
     std::optional<lrt::render::SplatEdit> edit;

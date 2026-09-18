@@ -1077,6 +1077,40 @@ Result<void> Engine::writeAov(const render::RenderTargets& targets, AovSource ao
     return out->read(*device_, 0, bytes, into.data());
 }
 
+/// The lights a frame of relit splats needs, where nothing else built them.
+///
+/// A mesh layer builds the table for its own shading; a frame that is only
+/// splats has no such layer, and both routes that draw one -- the tile
+/// rasteriser and the ray tracer -- ask for the same table.
+Result<void> Engine::prepareSplatLights(const std::vector<light::Light>& lamps,
+                                        std::span<const render::SplatInstance> splats) {
+    if (!lightTable_.has_value()) {
+        auto made = light::LightTable::create(*library_);
+        if (!made) return std::move(made).error();
+        lightTable_.emplace(std::move(*made));
+    }
+    if (!splats.empty()) {
+        // A dome's or a sun's share of the power wants the scene's reach;
+        // a cloud's own bounds are what there is.
+        float radius = 0.0F;
+        for (const render::SplatInstance& instance : splats) {
+            if (instance.splats == nullptr) {
+                continue;
+            }
+            if (!loader_.has_value()) {
+                break;
+            }
+            auto bounds = loader_->boundsOf(instance.splats->positions, instance.splats->count);
+            if (!bounds) return std::move(bounds).error();
+            const scene::Bounds& b = *bounds;
+            const float dx = b.max[0] - b.min[0], dy = b.max[1] - b.min[1], dz = b.max[2] - b.min[2];
+            radius = std::max(radius, 0.5F * std::sqrt(dx * dx + dy * dy + dz * dz));
+        }
+        lightSceneRadius_ = std::max(radius, 1.0e-3F);
+    }
+    return lightTable_->set(lamps, lightSceneRadius_);
+}
+
 Result<void> Engine::render(const render::Projection& projection, const render::RenderSettings& settings,
                             render::RenderTargets& targets, Technique technique, bool settleStreams,
                             const pxr::TfTokenVector* renderTags, const AovRequest& aovRequest,
@@ -1378,7 +1412,20 @@ Result<void> Engine::render(const render::Projection& projection, const render::
             if (!made) return std::move(made).error();
             rayTracer_.emplace(std::move(*made));
         }
-        LRT_TRY(rayTracer_->render(projection, splats, settings, targets));
+        // A cloud whose prim asked to be relit is relit here as it is in the
+        // rasteriser: the flag used to mean nothing on this route, so a cloud
+        // converted from a mesh came back as its own albedo, unlit.
+        render::SplatLights tracedLights;
+        const bool relitTraced = std::any_of(splats.begin(), splats.end(),
+                                             [](const render::SplatInstance& s) { return s.relight; });
+        if (relitTraced && !lamps.empty()) {
+            LRT_TRY(prepareSplatLights(lamps, splats));
+            if (lightTable_->count() > 0) {
+                tracedLights.records = &lightTable_->records();
+                tracedLights.count = lightTable_->count();
+            }
+        }
+        LRT_TRY(rayTracer_->render(projection, splats, settings, targets, &tracedLights));
         return ok();
     }
     if (visibility == MeshVisibility::Automatic) {
@@ -1830,31 +1877,7 @@ Result<void> Engine::render(const render::Projection& projection, const render::
     // of what the mesh layer needs. Before this the table was never built and
     // a relit cloud showed what it was baked with.
     if (!meshLayer && relitSplats && !lamps.empty()) {
-        if (!lightTable_.has_value()) {
-            auto made = light::LightTable::create(*library_);
-            if (!made) return std::move(made).error();
-            lightTable_.emplace(std::move(*made));
-        }
-        if (!splats.empty()) {
-            // A dome's or a sun's share of the power wants the scene's reach;
-            // a cloud's own bounds are what there is.
-            float radius = 0.0F;
-            for (const render::SplatInstance& instance : splats) {
-                if (instance.splats == nullptr) {
-                    continue;
-                }
-                if (!loader_.has_value()) {
-                    break;
-                }
-                auto bounds = loader_->boundsOf(instance.splats->positions, instance.splats->count);
-                if (!bounds) return std::move(bounds).error();
-                const scene::Bounds& b = *bounds;
-                const float dx = b.max[0] - b.min[0], dy = b.max[1] - b.min[1], dz = b.max[2] - b.min[2];
-                radius = std::max(radius, 0.5F * std::sqrt(dx * dx + dy * dy + dz * dz));
-            }
-            lightSceneRadius_ = std::max(radius, 1.0e-3F);
-        }
-        LRT_TRY(lightTable_->set(lamps, lightSceneRadius_));
+        LRT_TRY(prepareSplatLights(lamps, splats));
     }
     const bool pointLayer = !points.empty() && pointRasterizer_.has_value();
     if (pointLayer) {

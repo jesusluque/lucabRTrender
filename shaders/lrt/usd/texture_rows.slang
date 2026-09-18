@@ -25,9 +25,9 @@ struct RowsParams {
     uint  height;
 
     uint  stride;      ///< pixels a row of the destination
-    uint  channels;    ///< 15: all four. Otherwise a mask: 1 r, 2 g, 4 b, 8 a
+    uint  channels;    ///< 15: all four. 0: only the clear. Otherwise a mask: 1 r, 2 g, 4 b, 8 a
     uint  fromChannel; ///< which channel of the sample the masked write takes
-    uint  clear;       ///< 1: write the fallback where the mask does not reach
+    uint  clear;       ///< 1: lay `fallback` down over the whole pixel first
 
     float4 fallback;   ///< where the texture did not load, or is not there
 };
@@ -60,12 +60,14 @@ void textureRows(uint3 tid: SV_DispatchThreadID) {
     }
     // One channel of a picture that several textures share: a metallic file
     // and a roughness file become the glTF packing the conversion expects,
-    // written a channel at a time into the same rows.
+    // written a channel at a time into the same rows. A pass with no channels
+    // at all is the one that lays the defaults down, and a channel whose
+    // texture did not load keeps the default rather than taking a red one.
     float4 held = params.clear != 0 ? params.fallback : rows[at];
     const float one = value[min(params.fromChannel, 3u)];
     for (uint c = 0; c < 4; ++c) {
         if ((params.channels & (1u << c)) != 0) {
-            held[c] = one;
+            held[c] = found ? one : params.fallback[c];
         }
     }
     rows[at] = held;

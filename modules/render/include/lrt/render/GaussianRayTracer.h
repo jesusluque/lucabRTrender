@@ -84,21 +84,27 @@ public:
     [[nodiscard]] static Result<GaussianRayTracer> create(gpu::ShaderLibrary& library,
                                                           RayTracerSettings settings = {});
 
+    /// `lights` is what a cloud whose prim asked to be relit is relit with
+    /// (LrtSplatLightingAPI): the same table the rasteriser takes, so the two
+    /// routes answer alike. Null leaves every cloud as it was baked.
     [[nodiscard]] Result<RayTracerStats> render(const Camera& camera,
                                                 std::span<const SplatInstance> instances,
                                                 const RenderSettings& settings,
-                                                RenderTargets& targets);
+                                                RenderTargets& targets,
+                                                const SplatLights* lights = nullptr);
     [[nodiscard]] Result<RayTracerStats> render(const Projection& projection,
                                                 std::span<const SplatInstance> instances,
                                                 const RenderSettings& settings,
-                                                RenderTargets& targets);
+                                                RenderTargets& targets,
+                                                const SplatLights* lights = nullptr);
 
     /// Everything `render` builds before it draws -- the per-cloud
     /// structures and this frame's colours -- for a caller that will not
     /// draw with it: a shadow ray needs the proxies, not the image.
     [[nodiscard]] Result<RayTracerStats> prepare(const Projection& projection,
                                                  std::span<const SplatInstance> instances,
-                                                 uint32_t maxShDegree = 3);
+                                                 uint32_t maxShDegree = 3,
+                                                 const SplatLights* lights = nullptr);
 
     /// The structures the last render or prepare built, for a ray that only
     /// needs transmittance (rt_shadow.slang). Valid until the next of either.
@@ -126,7 +132,8 @@ private:
     [[nodiscard]] Result<void> buildBvh(const Cloud& cloud, gpu::Buffer& boxes, gpu::Buffer& children,
                                         gpu::Buffer& leaves);
     [[nodiscard]] Result<void> prepareFrame(std::span<const SplatInstance> instances,
-                                            const Vec3& eyeWorld, uint32_t shLimit);
+                                            const Vec3& eyeWorld, uint32_t shLimit,
+                                            const SplatLights* lights);
     [[nodiscard]] const Cloud* find(const scene::GpuSplats& splats) const;
 
     gpu::Device*       device_ = nullptr;
@@ -159,6 +166,10 @@ private:
     gpu::Buffer bvhChildren_;       ///< uint * 2 per internal node
     gpu::Buffer bvhLeaves_buffer_;  ///< uint per particle: sorted leaf -> particle in cloud
     gpu::Buffer bvhInstances_;      ///< per instance: node base, leaf base, particles
+    // One record of nothing, for a frame that relights nothing: a name the
+    // shader declares must be bound whether it is read or not.
+    gpu::Buffer emptyLights_;
+    gpu::Buffer emptyShadow_;
 };
 
 }   // namespace lrt::render

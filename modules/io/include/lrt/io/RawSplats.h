@@ -13,6 +13,9 @@
 namespace lrt::io {
 
 struct SplatEncoding {
+    /// An offset no record has: the field is not in this file.
+    static constexpr uint32_t kNoField = 0xFFFFFFFFU;
+
     uint32_t floatsPerRecord = 0;
     // Offsets, in floats, from the start of a record.
     uint32_t x = 0, y = 0, z = 0;
@@ -20,6 +23,12 @@ struct SplatEncoding {
     uint32_t scale0 = 0, scale1 = 0, scale2 = 0;
     uint32_t rotW = 0, rotX = 0, rotY = 0, rotZ = 0;
     uint32_t dc0 = 0, dc1 = 0, dc2 = 0;
+    /// What a gaussian reflects with, where it has it: a cloud converted from
+    /// a mesh knows its material's metallic and roughness, and a capture does
+    /// not. `kNoField` for a file that carries neither, which is every file a
+    /// trainer writes.
+    uint32_t metallic = kNoField;
+    uint32_t roughness = kNoField;
     /// First rest coefficient and how many basis functions per colour the file
     /// carries (0, 3, 8 or 15).
     uint32_t restBase = 0;

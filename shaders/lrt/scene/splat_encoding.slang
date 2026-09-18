@@ -16,7 +16,9 @@ public struct DecodeParams {
     public uint dc1; public uint dc2; public uint restBase; public uint filePerColour;
     public uint restColourOuter; public uint opacityMode; public uint scaleMode; public uint colourMode;
     public uint rotationMode; public uint shWords; public uint restMode; public uint flipYZ;
-    public float positionScale; public uint pad0; public uint pad1; public uint pad2;
+    // What a gaussian reflects with, where the file carries it: 0xFFFFFFFF
+    // means it does not, which is every file a trainer writes.
+    public float positionScale; public uint metallic; public uint roughness; public uint pad0;
 };
 
 public float fieldOf(StructuredBuffer<float> raw, uint record, uint stride, uint field) {
@@ -103,3 +105,16 @@ public float4 decodeQuaternion(StructuredBuffer<float> raw, uint record, DecodeP
     // A half turn about x: conjugating by it negates the y and z parts.
     return p.flipYZ != 0 ? float4(q.x, -q.y, -q.z, q.w) : q;
 }
+
+public static const uint kNoField = 0xFFFFFFFFu;
+
+/// Metallic and roughness as a splat carries them: a byte each, the rest
+/// spare. Nothing is decoded here -- both are already 0 to 1.
+public uint packPbr(float metallic, float roughness) {
+    const uint m = uint(saturate(metallic) * 255.0 + 0.5);
+    const uint r = uint(saturate(roughness) * 255.0 + 0.5);
+    return m | (r << 8);
+}
+
+public float pbrMetallic(uint word) { return float(word & 0xFFu) / 255.0; }
+public float pbrRoughness(uint word) { return float((word >> 8) & 0xFFu) / 255.0; }

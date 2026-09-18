@@ -56,6 +56,16 @@ public struct RtParams {
     /// proves the segment query composes. 0: one query, as a frame draws.
     public float splitAt;
     public uint  pad1; public uint pad2;
+    // shade: what this cloud is relit with. The rows take a splat to the
+    // world, where the lights are; the eye is there too.
+    public uint  relight;        // 1: light these splats rather than show them as baked
+    public uint  lightCount;
+    public uint  categoriesLo; public uint categoriesHi;
+    public uint  hasPbr; public uint pad3; public uint pad4; public uint pad5;
+    public float w00; public float w01; public float w02; public float w03;
+    public float w10; public float w11; public float w12; public float w13;
+    public float w20; public float w21; public float w22; public float w23;
+    public float eyeWorldX; public float eyeWorldY; public float eyeWorldZ; public float pad6;
     public EditParams edit;      // shade: this instance's SplatEdit (common/edit.slang)
 };
 

@@ -68,6 +68,14 @@ public struct FrameParams {
     public uint  shadowLights;   // lights splat_shadow measured a factor for
     public float shadowOffset;   // where its shadow ray starts, in the splat's own sigmas
     public float shadowCut;      // and where the ray gives up
+    public uint  hasPbr;         // 1: `pbr` holds this cloud's metallic and roughness
+    // Relighting happens in the world, where the lights are: the cloud to
+    // world rows, and the eye there. The colour from the harmonics is still
+    // the cloud's own business, which is why the eye above stays as it is.
+    public float w00; public float w01; public float w02; public float w03;
+    public float w10; public float w11; public float w12; public float w13;
+    public float w20; public float w21; public float w22; public float w23;
+    public float eyeWorldX; public float eyeWorldY; public float eyeWorldZ; public float pad9;
     public EditParams edit;      // this cloud instance's SplatEdit (common/edit.slang)
 };
 

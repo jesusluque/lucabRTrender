@@ -12,6 +12,9 @@ StructuredBuffer<uint>       dest;
 RWStructuredBuffer<float4>   positions;
 RWStructuredBuffer<uint>     shape;
 RWStructuredBuffer<uint>     sh;
+// What the splat reflects with, where the file says: one word a splat. Always
+// bound -- `params.metallic` is what says whether there is anything to write.
+RWStructuredBuffer<uint>     pbr;
 ConstantBuffer<DecodeParams> params;
 
 [shader("compute")]
@@ -44,6 +47,12 @@ void splatDecode(uint3 tid: SV_DispatchThreadID) {
     shape[row + 1] = packHalves(halfSafe(ls.x), halfSafe(ls.y));
     shape[row + 2] = packHalves(halfSafe(ls.z), halfSafe(base.x));
     shape[row + 3] = packHalves(halfSafe(base.y), halfSafe(base.z));
+
+    if (params.metallic != kNoField || params.roughness != kNoField) {
+        const float metallic = params.metallic != kNoField ? fieldOf(raw, i, s, params.metallic) : 0.0;
+        const float roughness = params.roughness != kNoField ? fieldOf(raw, i, s, params.roughness) : 1.0;
+        pbr[j] = packPbr(metallic, roughness);
+    }
 
     if (params.keepPerColour == 0) {
         return;

@@ -29,6 +29,11 @@ struct ParticleFieldArrays {
     pxr::VtValue opacities;        ///< VtFloatArray or VtHalfArray; empty: opaque
     int          shDegree = 0;
     pxr::VtValue shCoefficients;   ///< VtVec3fArray or VtVec3hArray, (degree+1)^2 per particle, DC first
+    /// What a relit gaussian reflects with, one value each
+    /// (`primvars:lrt:splat:metallic` and `:roughness`, LrtSplatLightingAPI).
+    /// Empty for a capture, which was trained with its light already in it.
+    pxr::VtValue metallic;         ///< VtFloatArray or VtHalfArray
+    pxr::VtValue roughness;
 };
 
 /// A volume's field asset, as UsdVolOpenVDBAsset names it.
