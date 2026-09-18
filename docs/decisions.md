@@ -4425,3 +4425,63 @@ composites its own way, and a surface you can see 30% through is not what a
 conversion of a solid mesh means. The rasteriser is less affected than the ray
 tracer (0.94 against 0.70 at 0.65), which is the two integrations differing,
 not the cloud.
+
+## Path traced into gaussians: the bake
+
+A relit cloud is an approximation and says so -- one sample a light, no
+bounce, a normal a splat never had. The conversion can do better, because the
+scene it converts is the scene the path tracer already knows: `lrt mesh2splat`
+now **bakes**, and what it bakes is the path tracer's own answer at every
+gaussian.
+
+**How little it took, and why that matters.** A bake is a frame whose camera
+is a list of rays. So it is not a second integrator -- the thing this
+repository would least want -- but a *variant of the path tracer's kernel*
+where the first hit comes from a buffer instead of from a camera
+(`kBake`/`foundBaked`), and everything after that first vertex is the frame's
+own path: the same lights, the same shadows, the same bounces, the same
+materials. The engine reaches it through `Engine::bakePoints`, which is a
+render with a bake request in it, so the scene preparation is shared by
+construction rather than by copy.
+
+**Which direction is baked.** One colour cannot be view-dependent, so the
+bake stores the **cosine-weighted average over the hemisphere the surface
+faces** -- the radiance a diffuse surface of the same radiosity would have.
+The direction varies per sample, so the mean over the paths is the mean over
+the hemisphere.
+
+Two things were measured on the way:
+
+- **Along the normal was wrong.** It was tried first, and under a dome it
+  makes every gaussian show the same reflection: the chess set's marble came
+  out as polished plastic, 0.21 against the mesh's 0.085, with its texture
+  gone.
+- **The directions must be stratified, not drawn.** The radiance leaving a
+  glossy surface swings by orders of magnitude across the hemisphere, so
+  random directions leave one gaussian in the mirror of the sun and its
+  neighbour nowhere near it. That was salt and pepper over the whole model,
+  and **four times the paths barely touched it** -- 64 against 256 looked the
+  same, which is how it was diagnosed as not being noise. A grid with a jitter
+  in each cell took it out at 64.
+- **A ray starts along the direction it is seen from**, not along the normal:
+  one that starts above the point and travels sideways misses its own surface
+  at grazing angles, and the gaussians it misses come back black.
+
+**And two defects it turned up in the tracer:**
+
+- `setPrograms` did not know about the new variant, so it returned early and
+  the frame ran the kernel compiled without it: the bake's first hits came
+  from a camera of one pixel, and **exactly one gaussian of 729073** came back
+  with anything in it.
+- A bake has no camera, so it can have no headlight. Without that, a stage
+  with no lights of its own bakes in a lamp standing whereever the frame's
+  one-pixel camera happened to be.
+
+**Where it stands.** The pawn bakes in 25 seconds at 64 paths a gaussian
+(debug, 729073 gaussians) and the body's mean lands at 0.099/0.097/0.085
+against the mesh's 0.085/0.099/0.098 -- the same light. What it does not
+reproduce is the *look* from a camera: a glossy surface reads as uniformly
+shiny, because the average over the hemisphere has the specular everywhere
+while a view has it in one place. That is the limit of a colour with no
+direction in it, and what answers it is spherical harmonics -- which the
+clouds already carry to degree 3 and the bake does not write yet.

@@ -140,12 +140,17 @@ public float3 relitByOne(SplatSurface s, float3 wo, LightSample ls, float throug
     }
     const float nDotL = dot(s.normal, ls.wi);
     const float front = max(nDotL, 0.0);
-    const float back = max(-nDotL, 0.0);
-    if (front <= 0.0 && back <= 0.0) {
-        return float3(0.0);
-    }
+    const float back = -nDotL;   // negative in front of the surface; the wrap below clamps it
     const float3 body = s.albedo * (1.0 - s.metallic) * (1.0 / 3.14159265358979);
-    const float3 diffuse = body * ((1.0 - s.transmission) * front + s.transmission * back);
+    // Translucency is not transparency. What comes through a translucent
+    // material has been scattered on the way, so it does not stop at the
+    // terminator the way a reflection does and it does not draw what stands
+    // behind: it wraps around the body and leaves softened. `kWrap` is how
+    // far round it reaches -- half a hemisphere, which is what reads as jade
+    // or wax rather than as a window.
+    const float kWrap = 0.5;
+    const float wrapped = saturate((back + kWrap) / (1.0 + kWrap));
+    const float3 diffuse = body * ((1.0 - s.transmission) * front + s.transmission * wrapped);
     const float3 specular = specularLobe(s, wo, ls.wi) * front;
     return through * (diffuse + specular) * ls.radiance / ls.pdf;
 }

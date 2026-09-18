@@ -361,6 +361,7 @@ TEST_CASE("both routes relight a splat, and alike: what the rasteriser does the 
     lamp.shadow = false;
     lamp.lightCategory = light::kLightUnlinked;
     REQUIRE(table->set(std::span<const light::Light>(&lamp, 1)));
+    // After `set`, which is what makes the buffer.
     render::SplatLights lights;
     lights.records = &table->records();
     lights.count = table->count();
@@ -399,6 +400,85 @@ TEST_CASE("both routes relight a splat, and alike: what the rasteriser does the 
     // the claim is that relighting does not widen that: the relit pair agrees
     // as closely as the baked pair does.
     CHECK(routes.p99 <= bakedRoutes.p99 + 1);
+}
+
+TEST_CASE("a translucent splat is lit by a light behind it, and an opaque one is not",
+          "[render][splats][relight][translucency]") {
+    LRT_REQUIRE_GPU(gpu);
+    auto h = harness(gpu);
+    auto table = light::LightTable::create(*gpu->library);
+    if (!table) FAIL(table.error().toString());
+    // One flat splat facing the camera and a light on the far side of it.
+    // What reaches the eye can only have come through: a reflection cannot
+    // reach it, and a Lambert lobe stops dead at the terminator.
+    const auto cloudWith = [&](float transmission) {
+        CloudBuilder b;
+        b.add(0.0F, 0.0F, 0.0F, 0.99F, 0.6F, 0.6F, 0.02F, {1.0F, 0.0F, 0.0F, 0.0F}, {0.8F, 0.8F, 0.8F});
+        const uint32_t floats = b.raw.encoding.floatsPerRecord;
+        b.raw.encoding.metallic = floats;
+        b.raw.encoding.roughness = floats + 1;
+        b.raw.encoding.transmission = floats + 2;
+        b.raw.encoding.floatsPerRecord = floats + 3;
+        std::vector<float> widened;
+        for (uint32_t k = 0; k < b.raw.count; ++k) {
+            widened.insert(widened.end(), b.raw.records.begin() + k * floats,
+                           b.raw.records.begin() + (k + 1) * floats);
+            widened.push_back(0.0F);           // metallic
+            widened.push_back(0.6F);           // roughness
+            widened.push_back(transmission);
+        }
+        b.raw.records = std::move(widened);
+        auto cloud = h->loader.upload(b.raw);
+        if (!cloud) FAIL(cloud.error().toString());
+        return std::move(*cloud);
+    };
+    light::Light lamp;
+    lamp.kind = light::LightKind::Sphere;
+    lamp.lightToWorld = aofx::xform::translation({0.0, 0.0, -2.0});   // behind the splat
+    lamp.radius = 0.3F;
+    lamp.intensity = 8.0F;
+    lamp.shadow = false;
+    const render::Camera camera = render::Camera::lookingAt({0.0, 0.0, 3.0}, {0.0, 0.0, 0.0});
+    render::RenderSettings settings;
+    settings.width = 96;
+    settings.height = 96;
+    settings.background = {0.0F, 0.0F, 0.0F, 0.0F};
+    const auto draw = [&](const scene::GpuSplats& cloud, uint32_t category, render::RenderTargets& into) {
+        lamp.lightCategory = category;
+        REQUIRE(table->set(std::span<const light::Light>(&lamp, 1)));
+        // The table's buffer is made by `set`, so the frame's lights are taken
+        // after it and not before.
+        render::SplatLights lights;
+        lights.records = &table->records();
+        lights.count = table->count();
+        std::vector<render::SplatInstance> instances{{&cloud, render::Mat4::identity()}};
+        instances[0].relight = true;
+        REQUIRE(h->raster.render(camera, instances, settings, into, {}, nullptr, &lights));
+    };
+    const scene::GpuSplats clear = cloudWith(1.0F);
+    const scene::GpuSplats opaque = cloudWith(0.0F);
+    render::RenderTargets lit;
+    render::RenderTargets dark;
+    render::RenderTargets unreached;
+    draw(clear, light::kLightUnlinked, lit);
+    draw(opaque, light::kLightUnlinked, dark);
+    // The same opaque splat, with the light in a collection that does not
+    // include it: nothing reaches it at all.
+    draw(opaque, 0, unreached);
+
+    auto diff = render::compareImages(*gpu->library, lit.colour, dark.colour, settings.width, settings.height);
+    if (!diff) FAIL(diff.error().toString());
+    auto against = render::compareImages(*gpu->library, dark.colour, unreached.colour, settings.width,
+                                         settings.height);
+    if (!against) FAIL(against.error().toString());
+    std::printf("  translucent against opaque, light behind: max %u, %llu pixels beyond 2; "
+                "the opaque one against a light that does not reach it: max %u\n",
+                diff->max, static_cast<unsigned long long>(diff->over2), against->max);
+    // The translucent splat is lit by a light it faces away from.
+    CHECK(diff->over2 > 100);
+    // And the one that lets nothing through is not: a light behind it is the
+    // same as no light at all.
+    CHECK(against->max <= 1);
 }
 
 TEST_CASE("a splat asked to be relit shows the scene's light, not the light it was baked with",

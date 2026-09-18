@@ -51,6 +51,7 @@
 #include "lrt/material/TextureStore.h"
 #include "lrt/usd/Export.h"
 #include "lrt/usd/MeshStage.h"
+#include "lrt/usd/StageRenderer.h"
 
 namespace lrt::cli {
 namespace {
@@ -95,13 +96,19 @@ struct Options {
     double                   sigma = 1.0;
     double                   flatness = 1.0e-7;
     double                   opacity = 1.0;
-    double                   minOpacity = 0.15;
+    double                   minOpacity = 0.6;
     uint32_t                 maxCells = 1u << 18;
     uint32_t                 textureSize = 0;
     bool                     noTextures = false;
     bool                     normalMapTurns = false;
     bool                     addCamera = true;
-    bool                     baked = false;
+    /// Bake the path tracer's answer into the gaussians (the default), or
+    /// carry the material and be relit.
+    bool                     bake = true;
+    uint32_t                 bakeSamples = 64;
+    uint32_t                 bakeBounces = 3;
+    bool                     defaultLights = false;
+    double                   time = 0.0;
     std::vector<std::string> paths;
 };
 
@@ -415,6 +422,7 @@ public:
             wanted += out->wanted;
             degenerate += out->degenerate;
             raw.records.insert(raw.records.end(), out->records.begin(), out->records.end());
+            normals_.insert(normals_.end(), out->normals.begin(), out->normals.end());
             std::printf("mesh2splat: %s -> %llu splats of %llu wanted (%u triangles)\n",
                         meshes[k].path.c_str(), static_cast<unsigned long long>(out->written),
                         static_cast<unsigned long long>(out->wanted), triangles_[k]);
@@ -445,6 +453,7 @@ private:
         uint64_t           wanted = 0;
         uint64_t           degenerate = 0;
         std::vector<float> records;
+        std::vector<float> normals;   ///< xyz a splat, for the bake
     };
 
     [[nodiscard]] Result<OneMesh> runOne(aofx::Effect& effect, const usd::StageMesh& mesh, size_t at,
@@ -554,10 +563,22 @@ private:
             record[14] = shading[3];
             record[15] = surface[0];
             record[16] = surface[1];
+            // Where the bake stands and which way it looks, kept beside the
+            // record rather than in it: the file has no field for a normal.
+            answer.normals.push_back(shading[0]);
+            answer.normals.push_back(shading[1]);
+            answer.normals.push_back(shading[2]);
         }
         return answer;
     }
 
+    /// Every splat's shading normal, xyz, in the order the records are in.
+    std::vector<float>                       normals_;
+
+public:
+    [[nodiscard]] const std::vector<float>& normals() const noexcept { return normals_; }
+
+private:
     gpu_host::Context*                       context_ = nullptr;
     gpu::ShaderLibrary*                      library_ = nullptr;
     const Options*                           options_ = nullptr;
@@ -573,6 +594,72 @@ private:
 };
 
 }   // namespace
+
+/// The path tracer's answer at every gaussian, written into its colour.
+///
+/// One ray a gaussian: from a little way along its normal, back down onto the
+/// surface it came from. What the tracer finds there is the same surface the
+/// mesh had -- the same material, the same texture, the same normal map --
+/// and what it answers is the radiance leaving it along that normal, with
+/// this stage's lights, its shadows and its bounces in it. That is the
+/// conversion this engine can make and a relighting approximation cannot.
+///
+/// A direction had to be chosen, since one colour cannot be view-dependent,
+/// and the surface's own normal is the one that needs no camera. What it
+/// costs is the highlight that would only be seen from elsewhere.
+[[nodiscard]] Result<void> bakeInto(io::RawSplats& raw, const std::vector<float>& normals,
+                                    const std::string& stage, double time, uint32_t samples,
+                                    uint32_t bounces, bool defaultLights) {
+    if (raw.count == 0 || normals.size() < size_t{raw.count} * 3) {
+        return Error(ErrorCode::InternalError, "bake: a normal a gaussian is what it stands on");
+    }
+    // How far off the surface the ray starts: enough that it does not begin
+    // inside the triangle it is about to hit, scaled by where the model is.
+    float extent = 0.0F;
+    for (uint32_t k = 0; k < raw.count; ++k) {
+        const float* record = raw.records.data() + size_t{k} * raw.encoding.floatsPerRecord;
+        extent = std::max({extent, std::abs(record[0]), std::abs(record[1]), std::abs(record[2])});
+    }
+    const float step = std::max(extent, 1.0F) * 1.0e-3F;
+    std::vector<float> rays(size_t{raw.count} * 8);
+    for (uint32_t k = 0; k < raw.count; ++k) {
+        const float* record = raw.records.data() + size_t{k} * raw.encoding.floatsPerRecord;
+        const float* n = normals.data() + size_t{k} * 3;
+        float* ray = rays.data() + size_t{k} * 8;
+        for (int axis = 0; axis < 3; ++axis) {
+            ray[axis] = record[axis];        // where the gaussian stands
+            ray[4 + axis] = n[axis];         // and which way its surface faces
+        }
+        ray[3] = step;   // how far off the surface a ray starts
+        ray[7] = 0.0F;
+    }
+    auto renderer = usd::StageRenderer::open(stage);
+    if (!renderer) return std::move(renderer).error();
+    if (defaultLights) {
+        LRT_TRY((*renderer)->setDefaultLights(true));
+    }
+    auto baked = (*renderer)->bakePoints(rays, raw.count, time, samples, bounces);
+    if (!baked) return std::move(baked).error();
+    // Straight into the record's colour. It is light, which is what the
+    // encoding already says these records carry.
+    uint32_t lit = 0;
+    for (uint32_t k = 0; k < raw.count; ++k) {
+        float* record = raw.records.data() + size_t{k} * raw.encoding.floatsPerRecord;
+        const float* colour = baked->data() + size_t{k} * 4;
+        record[raw.encoding.dc0] = colour[0];
+        record[raw.encoding.dc1] = colour[1];
+        record[raw.encoding.dc2] = colour[2];
+        lit += colour[3] > 0.0F ? 1u : 0u;
+    }
+    std::printf("mesh2splat: baked %u of %u gaussians (%u paths each, %u bounces)\n", lit, raw.count,
+                samples, bounces);
+    if (lit * 2 < raw.count) {
+        std::fprintf(stderr,
+                     "mesh2splat: more than half the gaussians found no surface under them; the bake "
+                     "is unlikely to be what you want\n");
+    }
+    return ok();
+}
 
 void addMesh2Splat(CLI::App& app) {
     auto o = std::make_shared<Options>();
@@ -590,16 +677,25 @@ void addMesh2Splat(CLI::App& app) {
     cmd->add_option("--flatness", o->flatness, "the third size, across the surface");
     cmd->add_option("--opacity", o->opacity, "the opacity every gaussian starts from");
     cmd->add_option("--glass-opacity", o->minOpacity,
-                    "what a fully transmitting material keeps: a tint, since a gaussian cannot refract");
+                    "what a fully transmitting material still stops. Low is a window -- you see what "
+                    "stands behind it -- and translucency is not that: the light comes through "
+                    "scattered, so the body stays mostly there");
     cmd->add_option("--max-cells", o->maxCells, "most cells one triangle may walk");
     cmd->add_option("--texture-size", o->textureSize, "read maps no larger than this (0: their own size)");
     cmd->add_flag("--no-textures", o->noTextures, "ignore the maps; materials keep their constant values");
     cmd->add_flag("--normal-map-turns", o->normalMapTurns,
                   "orient each gaussian by the normal map rather than the surface");
     cmd->add_flag("!--no-camera", o->addCamera, "do not add a camera framing the cloud");
-    cmd->add_flag("--baked", o->baked,
-                  "show the colours as they are instead of lighting them: the cloud carries an albedo, "
-                  "so it is relit by the scene's lights unless this says otherwise");
+    cmd->add_flag("!--no-bake", o->bake,
+                  "do not bake: carry the material instead and let the scene's lights relight the "
+                  "cloud every frame. Cheaper to convert, and the cloud can then be put under other "
+                  "light; what it loses is the bounce, the shadows and the exactness");
+    cmd->add_option("--bake-samples", o->bakeSamples, "paths a gaussian the bake traces");
+    cmd->add_option("--bake-bounces", o->bakeBounces, "bounces after the first hit, in the bake");
+    cmd->add_flag("--default-lights", o->defaultLights,
+                  "bake under a dome and a sun in the session layer, for a stage that brings no "
+                  "lights of its own (what lrt view offers)");
+    cmd->add_option("--time", o->time, "USD time code the bake reads the stage at");
     cmd->add_option("--path", o->paths, "extra AOFX bundle directories");
     cmd->callback([o] {
         gpu_host::Context* context = gpu_host::installProcessContext();
@@ -648,12 +744,26 @@ void addMesh2Splat(CLI::App& app) {
             if (!raw) return std::move(raw).error();
             count = raw->count;
 
+            // THE LIGHT THE MESH HAD, baked into the gaussians.
+            //
+            // A relit cloud carries the material and is lit again every
+            // frame, which is an approximation: one sample a light, no
+            // bounce, and a normal a splat never had. A bake asks the path
+            // tracer instead -- the same stage, the same lights, the same
+            // integrator -- and stores what it answers. What that costs is
+            // the light: a baked cloud carries this scene's, and cannot be
+            // put under another.
+            if (o->bake) {
+                LRT_TRY(bakeInto(*raw, converter.normals(), o->stage, o->time, o->bakeSamples,
+                                 o->bakeBounces, o->defaultLights));
+            }
+
             usd::ExportOptions options;
             options.maxDegree = 0;
             options.addCamera = o->addCamera;
-            // What comes out of a conversion is an albedo the scene is to
-            // light, not a capture carrying its own light.
-            options.relight = !o->baked;
+            // A baked cloud carries light and is shown as it is; a converted
+            // one that was not baked carries an albedo the scene is to light.
+            options.relight = !o->bake;
             return usd::writeParticleFieldStage(library, *raw, o->output, options);
         };
         auto ran = context->run([&] { inside = work(); });

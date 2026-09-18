@@ -672,6 +672,54 @@ Result<StageImage> StageRenderer::render(const std::string& camera, double time,
     return readImage(width, height);
 }
 
+Result<std::vector<float>> StageRenderer::bakePoints(const std::vector<float>& rays, uint32_t count,
+                                                     double time, uint32_t samples, uint32_t bounces) {
+    Impl& impl = *impl_;
+    if (count == 0 || rays.size() < size_t{count} * 8) {
+        return Error(ErrorCode::InvalidArgument, "bake: two float4 a point, and at least one point");
+    }
+    if (!impl.delegate->HasEngine()) {
+        return Error(ErrorCode::DeviceFailure, "bake: the render delegate has no GPU");
+    }
+    // The stage has to be on the device before its light can be asked for,
+    // and what puts it there is a frame: one pixel of it, path traced, with
+    // the streams settled so nothing is still on its way in.
+    impl.delegate->SetRenderSetting(TfToken("lrt:settleStreams"), VtValue(true));
+    auto framing = framingCamera(time, 35.0, "rt");
+    if (!framing) return std::move(framing).error();
+    LRT_TRY(aim(*framing, time, 1, 1, "rt"));
+    LRT_TRY(execute(1, 1));
+
+    lrt::usd::Engine& engine = impl.delegate->GetEngine();
+    gpu::Device& device = engine.device();
+    gpu::BufferDesc desc;
+    desc.bytes = rays.size() * sizeof(float);
+    desc.elementBytes = 16;
+    desc.label = "bake.rays";
+    auto buffer = gpu::Buffer::create(device, desc, rays.data());
+    if (!buffer) return std::move(buffer).error();
+
+    render::RenderTargets out;
+    lrt::usd::BakeRequest bake;
+    bake.rays = &*buffer;
+    bake.count = count;
+    bake.samples = samples;
+    bake.bounces = bounces;
+    bake.out = &out;
+    render::RenderSettings settings;
+    settings.width = 1;
+    settings.height = 1;
+    const render::Projection projection = render::projectionFor(*framing, 1, 1);
+    LRT_TRY(engine.bakePoints(bake, projection, settings));
+    if (!out.colour.valid()) {
+        return Error(ErrorCode::InternalError, "bake: the frame wrote nothing");
+    }
+    auto baked = out.colour.readAll<float>(device);
+    if (!baked) return std::move(baked).error();
+    baked->resize(size_t{count} * 4);
+    return std::move(*baked);
+}
+
 Result<StageImage> StageRenderer::render(const render::Camera& camera, double time, uint32_t width, uint32_t height,
                                          const std::string& technique) {
     impl_->delegate->SetRenderSetting(TfToken("lrt:settleStreams"), VtValue(true));

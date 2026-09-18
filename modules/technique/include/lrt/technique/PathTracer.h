@@ -78,6 +78,15 @@ struct PathAux {
     [[nodiscard]] uint64_t normalOffsetBytes() const noexcept { return normalOffset() * 16; }
 };
 
+/// Where a bake starts from: one ray a point, and the grid they are dispatched
+/// over (the kernel indexes them as it indexes pixels).
+struct BakePoints {
+    const gpu::Buffer* rays = nullptr;   ///< 2 float4 a point: origin + tMin, direction
+    uint32_t           count = 0;
+    uint32_t           width = 0;        ///< the grid; `count` <= width * height
+    uint32_t           height = 0;
+};
+
 class PathTracer {
 public:
     [[nodiscard]] static Result<PathTracer> create(gpu::ShaderLibrary& library);
@@ -95,7 +104,22 @@ public:
     [[nodiscard]] Result<void> trace(gpu::CommandBatch& batch, const VisibilityTargets& targets,
                                      const render::Projection& projection, const MaterialFrame& frame,
                                      const PathSettings& settings, render::RenderTargets& out,
-                                     PathAux* aux = nullptr);
+                                     PathAux* aux = nullptr, const BakePoints* bake = nullptr);
+
+    /// The same integrator, started from points instead of from a camera:
+    /// `points.rays` holds two `float4` per point -- where the ray starts and
+    /// how near it may hit, then which way it goes -- and what comes back in
+    /// `out.colour` is the radiance leaving that point along the ray it came
+    /// from. Everything after the first vertex is the frame's own path: the
+    /// same lights, the same shadows, the same bounces.
+    ///
+    /// What it is for: turning a mesh into gaussians that carry the light the
+    /// mesh had (`lrt mesh2splat`), which is a conversion no relighting
+    /// approximation can match -- it is the path tracer's own answer.
+    [[nodiscard]] Result<void> bake(gpu::CommandBatch& batch, const VisibilityTargets& targets,
+                                    const render::Projection& projection, const MaterialFrame& frame,
+                                    const PathSettings& settings, const BakePoints& points,
+                                    render::RenderTargets& out);
 
     /// How many paths a pixel the accumulation holds -- the frame's count;
     /// an adaptive pixel that stopped holds fewer.
@@ -136,6 +160,8 @@ private:
     bool                              volumes_ = false;
     bool                              splats_ = false;
     bool                              aux_ = false;
+    bool                              bake_ = false;
+    bool                              bakeBuilt_ = false;   ///< the variant the kernel was built with
     bool                              saidNoRoomForSplats_ = false;
     uint32_t                          sumPlanes_ = 1;   ///< 1 + 2 * light groups
     gpu::Buffer                       sum_;           ///< float4 a pixel: the paths added so far

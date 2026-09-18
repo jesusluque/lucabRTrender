@@ -1111,10 +1111,28 @@ Result<void> Engine::prepareSplatLights(const std::vector<light::Light>& lamps,
     return lightTable_->set(lamps, lightSceneRadius_);
 }
 
+/// A bake is a frame whose camera is a list of rays. Everything the frame
+/// needs -- the meshes on the device, their materials, the lights, the
+/// acceleration structure -- is what `render` prepares, so the bake goes
+/// through it rather than around it: a 1 by 1 frame, drawn nowhere, with the
+/// request carried to the one place the path tracer is asked to trace.
+Result<void> Engine::bakePoints(const BakeRequest& bake, const render::Projection& projection,
+                                const render::RenderSettings& settings) {
+    if (bake.rays == nullptr || !bake.rays->valid() || bake.count == 0 || bake.out == nullptr) {
+        return Error(ErrorCode::InvalidArgument, "nothing to bake");
+    }
+    render::RenderSettings frame = settings;
+    frame.width = 1;
+    frame.height = 1;
+    render::RenderTargets nowhere;
+    return render(projection, frame, nowhere, Technique::RayTraced, true, nullptr, {},
+                  MeshVisibility::Automatic, &bake);
+}
+
 Result<void> Engine::render(const render::Projection& projection, const render::RenderSettings& settings,
                             render::RenderTargets& targets, Technique technique, bool settleStreams,
                             const pxr::TfTokenVector* renderTags, const AovRequest& aovRequest,
-                            MeshVisibility visibility) {
+                            MeshVisibility visibility, const BakeRequest* bake) {
     // A frame builds the clouds' shadow proxies at most once, wherever it
     // first needs them: for a mesh's shadow rays, or for a relit cloud's own.
     shadowTracerReady_ = false;
@@ -1822,6 +1840,30 @@ Result<void> Engine::render(const render::Projection& projection, const render::
             // cost a buffer, and on Metal that buffer is the one a cloud's
             // shadow tables want (technique::PathTracer says which wins).
             const bool wantAux = denoise_.load() || aovRequest.aux;
+            if (bake != nullptr) {
+                // The frame's own work, at the caller's points instead of at
+                // this frame's pixels. One pass, its own mean: a bake does not
+                // converge over frames the way a viewport does.
+                technique::BakePoints points;
+                points.rays = bake->rays;
+                points.count = bake->count;
+                points.width = std::min(bake->count, 4096u);
+                points.height = (bake->count + points.width - 1) / points.width;
+                paths.accumulate = false;
+                paths.adaptive = false;
+                // A bake has no camera, so it cannot have a headlight: what
+                // would be baked in is a lamp standing wherever the frame's
+                // one-pixel camera happened to be. A stage with no lights
+                // bakes black, and says so.
+                paths.headlight = false;
+                paths.samples = std::max(bake->samples, 1u);
+                paths.bounces = bake->bounces;
+                pathTracer_->restart();
+                LRT_TRY(pathTracer_->bake(batch, visibility_, projection, frame, paths, points, *bake->out));
+                LRT_TRY(batch.submit(true));
+                pathState_ = {};
+                return ok();
+            }
             LRT_TRY(pathTracer_->trace(batch, visibility_, projection, frame, paths, meshLayer_,
                                        wantAux ? &pathAux_ : nullptr));
             pathAuxValid_ = wantAux;

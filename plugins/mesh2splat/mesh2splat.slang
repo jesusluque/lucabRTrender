@@ -73,7 +73,7 @@ struct M2sParams {
     float4 materialColour;    // multiplied into the albedo; w unused
     float4 transmissionColour;
 
-    float minOpacity;     // what a fully transmitting material still keeps
+    float pad0;           // was minOpacity, which the renderer decides instead
     float metallic;       // the material's own, multiplied into the map where there is one
     float roughness;
     uint  pad1;
@@ -343,14 +343,14 @@ void m2sEmit(uint3 tid: SV_DispatchThreadID) {
             shading = normalize(straight * fromMap.x + bitangent * fromMap.y + normal * fromMap.z);
         }
 
-        // Ours, not theirs: a transmitting material keeps less of its
-        // opacity and takes its transmission colour. Not all of it, though:
-        // `1 - transmission` is nothing at all for glass, and a gaussian with
-        // no opacity is not a translucent gaussian but an absent one -- the
-        // export drops it. So a fully transmitting material keeps
-        // `minOpacity`, and what stands behind the glass is dimmed by that
-        // much rather than seen through it. A tint, not a lens.
-        const float keptOpacity = params.opacity * lerp(1.0, params.minOpacity, params.transmission);
+        // Ours, not theirs: transmission. Their conversion has no channel for
+        // it, so glass came out as opaque white. What goes into the record is
+        // what the material says -- its opacity, its colour taken towards the
+        // transmission colour, and the transmission itself in a channel of
+        // its own. What a renderer makes of that is the renderer's: a
+        // translucent material is not a transparent one, and lowering the
+        // opacity here would say it was.
+        const float keptOpacity = params.opacity;
         colour = lerp(colour, colour * params.transmissionColour.xyz, params.transmission);
 
         const float3 shortAxis = params.useNormalMap != 0 ? shading : normal;

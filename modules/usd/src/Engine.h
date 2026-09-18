@@ -163,6 +163,19 @@ struct AovView {
 };
 
 /// What a frame should compute beyond colour and depth.
+/// Points to bake the frame's light at (`Engine::bakePoints`).
+struct BakeRequest {
+    /// Two `float4` a point: where its ray starts and how near it may hit,
+    /// then which way it goes. The caller writes these; nothing here invents
+    /// a direction for a point.
+    const gpu::Buffer* rays = nullptr;
+    uint32_t           count = 0;
+    uint32_t           samples = 64;
+    uint32_t           bounces = 3;
+    /// Where the answer lands: one `float4` a point, the radiance in rgb.
+    render::RenderTargets* out = nullptr;
+};
+
 struct AovRequest {
     bool                     ids = false;       ///< primId, instanceId, elementId
     bool                     normals = false;   ///< Neye, normal
@@ -294,7 +307,20 @@ public:
     Result<void> render(const render::Projection& projection, const render::RenderSettings& settings,
                         render::RenderTargets& targets, Technique technique = Technique::Raster,
                         bool settleStreams = false, const pxr::TfTokenVector* renderTags = nullptr,
-                        const AovRequest& aovs = {}, MeshVisibility visibility = MeshVisibility::Automatic);
+                        const AovRequest& aovs = {}, MeshVisibility visibility = MeshVisibility::Automatic,
+                        const BakeRequest* bake = nullptr);
+
+    /// The light this stage's meshes carry, at points somebody names: for
+    /// every point, a ray from just off the surface back down onto it, path
+    /// traced with the scene's own lights, its shadows and its bounces. What
+    /// comes back is the radiance leaving that point along its normal.
+    ///
+    /// It is a frame in every way but the camera -- the same materials, the
+    /// same lights, the same integrator -- so it is a render with a bake
+    /// request in it rather than a pipeline of its own. What it is for:
+    /// turning a mesh into gaussians that carry the light the mesh had.
+    [[nodiscard]] Result<void> bakePoints(const BakeRequest& bake, const render::Projection& projection,
+                                          const render::RenderSettings& settings);
 
     [[nodiscard]] gpu::Device& device() noexcept { return *device_; }
     [[nodiscard]] gpu::ShaderLibrary& library() noexcept { return *library_; }

@@ -382,6 +382,70 @@ void writeAuxAt(uint at, uint pixels, float4 albedo, float4 normal) {
 }
 )";
 
+/// Baking: the first hit of every path comes from a ray a caller wrote down,
+/// not from a camera. That is the whole of the difference between a frame and
+/// a bake -- what a path does after its first vertex is the same integrator,
+/// the same lights, the same bounces -- so the bake is a variant of this
+/// kernel rather than a second one that would drift from it.
+///
+/// A variant and not a uniform because a buffer is what this kernel has none
+/// of to spare on Metal: 31 is the limit (kSplats says the rest).
+const char* kBake = R"(
+static const bool kBake = true;
+StructuredBuffer<float4> bakeRays;   // two entries a point: where it is and how far off to start, then its normal
+
+/// The point seen from one direction of the hemisphere it faces.
+///
+/// A colour that is one number cannot be view-dependent, so what a bake stores
+/// is the average of the radiance leaving the surface over that hemisphere,
+/// weighted by the cosine -- which is exactly the radiance a diffuse surface
+/// of the same radiosity has, and which spreads a highlight over the
+/// gaussians that would show it instead of putting all of it on the ones whose
+/// normal points at the light. Baking along the normal alone was tried first:
+/// under a dome it makes every gaussian show the same reflection, and the
+/// marble it was converted from came out as polished plastic.
+///
+/// One direction a sample, so the mean over the paths is the mean over the
+/// hemisphere. The ray still starts where the caller put it and still ends on
+/// the surface it named.
+Found foundBaked(uint at, uint sample, uint mask) {
+    const float4 o = bakeRays[at * 2];       // the point, and how far off the surface to start
+    const float4 d = bakeRays[at * 2 + 1];   // its normal
+    const float3 n = normalize(d.xyz);
+    const uint2 pixel = uint2(at % max(camera.width, 1u), at / max(camera.width, 1u));
+    // Stratified, not drawn: the radiance leaving a glossy surface swings by
+    // orders of magnitude across the hemisphere, so directions taken at
+    // random leave one gaussian in the mirror of the sun and its neighbour
+    // nowhere near it -- salt and pepper that more paths barely touch. A
+    // grid with a jitter in each cell covers the hemisphere evenly, and the
+    // same count then answers a different question.
+    const uint side = max(uint(sqrt(float(max(path.samples, 1u))) + 0.5), 1u);
+    const uint2 cell = uint2(sample % side, (sample / side) % side);
+    const float2 u = saturate((float2(cell) + random2(pixel, sample, 0u, 41u)) / float(side));
+    // Cosine about the normal, in a frame built on it.
+    const float r = sqrt(u.x);
+    const float phi = 2.0 * 3.14159265358979 * u.y;
+    float3 tangent = abs(n.z) < 0.999 ? normalize(cross(float3(0.0, 0.0, 1.0), n))
+                                      : float3(1.0, 0.0, 0.0);
+    const float3 bitangent = cross(n, tangent);
+    const float3 towards =
+        normalize(tangent * (r * cos(phi)) + bitangent * (r * sin(phi)) + n * sqrt(max(1.0 - u.x, 0.0)));
+    // Off the surface ALONG the direction it is seen from, not along the
+    // normal: a ray that starts above the point and travels sideways misses
+    // its own surface at grazing angles, and the gaussians it misses come
+    // back black. That was salt and pepper over the whole model, and no
+    // number of paths took it out -- it was not noise.
+    const float3 from = o.xyz + towards * o.w;
+    const PathHit hit = traceNearestFrom(from, -towards, o.w * 0.01, mask);
+    return foundHit(hit, from, -towards);
+}
+)";
+
+const char* kNoBake = R"(
+static const bool kBake = false;
+Found foundBaked(uint at, uint sample, uint mask) { return foundNothing(); }
+)";
+
 const char* kNoAux = R"(
 static const bool kAux = false;
 void writeAuxAt(uint at, uint pixels, float4 albedo, float4 normal) {}
@@ -1094,7 +1158,10 @@ void tracePathsAt(uint2 group, uint index) {
         return;
     }
     const uint at = tid.y * camera.width + tid.x;
-    const uint4 seen = visibility.Load(int3(int(tid.x), int(camera.height - 1 - tid.y), 0));
+    // A bake has no visibility buffer: its first hits are rays of its own,
+    // and the texture bound in its place is not this size.
+    const uint4 seen = kBake ? uint4(0, 0, 0, 0)
+                             : visibility.Load(int3(int(tid.x), int(camera.height - 1 - tid.y), 0));
     const uint pixels = camera.width * camera.height;
     if (path.accumulated == 0) {
         moments[pixels + at] = 0;   // a frame of its own: no flag from the last one
@@ -1109,7 +1176,9 @@ void tracePathsAt(uint2 group, uint index) {
     // the sample, and each path casts its own; the aux then carry the first
     // hit a path shaded.
     const bool ownRays = kTraces && path.ownRays != 0;
-    const Found firstFound = ownRays ? foundLensSample(tid, 0u, sampleMask(tid, 0u)) : foundAt(tid, seen);
+    const Found firstFound = kBake      ? foundBaked(at, 0u, sampleMask(tid, 0u))
+                             : ownRays  ? foundLensSample(tid, 0u, sampleMask(tid, 0u))
+                                        : foundAt(tid, seen);
     Shaded first;
     first.valid = false;
     first.depth = 0.0;
@@ -1126,7 +1195,12 @@ void tracePathsAt(uint2 group, uint index) {
     Groups groups = groupsZero();
     for (uint sample = 0; sample < samples && (firstFound.valid || ownRays || kVolumes); ++sample) {
         const uint mask = sampleMask(tid, sample);
-        Found found = ownRays && sample > 0 ? foundLensSample(tid, sample, mask) : firstFound;
+        // A bake looks from a new direction every sample (foundBaked says
+        // why); a frame's first hit is the same one for all of them unless a
+        // lens moves it.
+        Found found = kBake ? (sample == 0 ? firstFound : foundBaked(at, sample, mask))
+                      : ownRays && sample > 0 ? foundLensSample(tid, sample, mask)
+                                              : firstFound;
         // The ray to the first vertex: from the surface it found, or the
         // pixel's ray to nothing -- along which a volume may still lie.
         float3 o;
@@ -1493,16 +1567,22 @@ Result<void> PathTracer::setPrograms(const MaterialPrograms& programs) {
 
 Result<void> PathTracer::setPrograms(const MaterialPrograms& programs, bool groups, bool volumes, bool splats,
                                     bool aux) {
+    // `bake_` is set by the caller before this, and it is a variant like the
+    // rest: left out of this test, a frame that turned it on ran the kernel
+    // compiled without it -- which has no rays to read and is the frame's own
+    // size, so exactly one point of the bake came back (the camera's pixel).
     if (programs.module() == module_ && groups == groups_ && volumes == volumes_ && splats == splats_ &&
-        aux == aux_ && (kernel_.has_value() || rayKernel_.has_value())) {
+        aux == aux_ && bake_ == bakeBuilt_ && (kernel_.has_value() || rayKernel_.has_value())) {
         return ok();
     }
+    bakeBuilt_ = bake_;
     splats_ = splats;
     aux_ = aux;
     const bool traces = device_->caps().rayQuery && device_->caps().accelerationStructure;
     const std::string name = programs.module() + (traces ? "_path_traced" : "_path_direct") +
                              (groups ? "_groups" : "") + (volumes ? "_volumes" : "") +
-                             (traces && splats ? "_splatshadows" : "") + (aux_ ? "_aux" : "");
+                             (traces && splats ? "_splatshadows" : "") + (aux_ ? "_aux" : "") +
+                             (bake_ ? "_bake" : "");
     // Three ways to trace, and the module carries exactly one: inline rays in
     // a compute kernel, a ray tracing pipeline where there are no inline rays
     // (CUDA, through OptiX), or no rays at all -- direct light alone, which
@@ -1517,7 +1597,8 @@ Result<void> PathTracer::setPrograms(const MaterialPrograms& programs, bool grou
                                (withSplats ? std::string("import lrt.rt.rt_shadow_packed;\n") : std::string()) + kPrelude +
                                (groups ? kGroups : kNoGroups) + (volumes ? kVolumes : kNoVolumes) +
                                (traces ? kRays : pipeline ? kRaysPipeline : kNoRays) +
-                               (withSplats ? kSplats : kNoSplats) + (withAux ? kAux : kNoAux) + kBody +
+                               (withSplats ? kSplats : kNoSplats) + (withAux ? kAux : kNoAux) +
+                               (bake_ ? kBake : kNoBake) + kBody +
                                (pipeline ? kEntryRays : kEntryCompute);
     std::vector<std::string> entries{pipeline ? "tracePathsGen" : "tracePaths", "pathDecide"};
     if (pipeline) {
@@ -1553,12 +1634,27 @@ Result<void> PathTracer::setPrograms(const MaterialPrograms& programs, bool grou
     return ok();
 }
 
+Result<void> PathTracer::bake(gpu::CommandBatch& batch, const VisibilityTargets& targets,
+                              const render::Projection& projection, const MaterialFrame& frame,
+                              const PathSettings& settings, const BakePoints& points,
+                              render::RenderTargets& out) {
+    if (points.rays == nullptr || !points.rays->valid() || points.count == 0 || points.width == 0) {
+        return Error(ErrorCode::InvalidArgument, "path tracer: nothing to bake");
+    }
+    return trace(batch, targets, projection, frame, settings, out, nullptr, &points);
+}
+
 Result<void> PathTracer::trace(gpu::CommandBatch& batch, const VisibilityTargets& targets,
                                const render::Projection& projection, const MaterialFrame& frame,
-                               const PathSettings& settings, render::RenderTargets& out, PathAux* aux) {
+                               const PathSettings& settings, render::RenderTargets& out, PathAux* aux,
+                               const BakePoints* bake) {
     if (!kernel_.has_value() && !rayKernel_.has_value()) {
         return Error(ErrorCode::InvalidArgument, "path tracer: no materials set");
     }
+    // A bake is dispatched over its points, not over the frame's pixels, and
+    // every buffer below is that size.
+    const uint32_t width = bake != nullptr ? bake->width : targets.width;
+    const uint32_t height = bake != nullptr ? bake->height : targets.height;
     const bool groups = frame.groups.count > 0;
     const bool volumes = frame.volumes != nullptr && frame.volumeCount > 0 && frame.volumes->valid();
     // A cloud that shadows meshes is another kernel: compiled when one
@@ -1577,13 +1673,16 @@ Result<void> PathTracer::trace(gpu::CommandBatch& batch, const VisibilityTargets
         }
         splats = false;
     }
-    if ((groups != groups_ || volumes != volumes_ || splats != splats_ || wantAux != aux_) &&
+    const bool wantBake = bake != nullptr;
+    if ((groups != groups_ || volumes != volumes_ || splats != splats_ || wantAux != aux_ ||
+         wantBake != bake_) &&
         frame.programs != nullptr) {
+        bake_ = wantBake;
         LRT_TRY(setPrograms(*frame.programs, groups, volumes, splats, wantAux));
     }
     const uint32_t groupCount = std::min(frame.groups.count, kMaxLightGroups);
-    const uint64_t pixels = uint64_t{targets.width} * targets.height;
-    const bool resized = out.width != targets.width || out.height != targets.height || !out.colour.valid();
+    const uint64_t pixels = uint64_t{width} * height;
+    const bool resized = out.width != width || out.height != height || !out.colour.valid();
     if (resized) {
         gpu::BufferDesc colour;
         colour.bytes = pixels * 16;
@@ -1599,13 +1698,13 @@ Result<void> PathTracer::trace(gpu::CommandBatch& batch, const VisibilityTargets
         if (!madeDepth) return std::move(madeDepth).error();
         out.colour = std::move(*madeColour);
         out.depth = std::move(*madeDepth);
-        out.width = targets.width;
-        out.height = targets.height;
+        out.width = width;
+        out.height = height;
     }
     // The sum holds the colour's plane and, with light groups, their sums
     // and their means after it.
     const uint32_t planes = 1 + 2 * groupCount;
-    if (resized || width_ != targets.width || height_ != targets.height || !sum_.valid() || planes != sumPlanes_) {
+    if (resized || width_ != width || height_ != height || !sum_.valid() || planes != sumPlanes_) {
         gpu::BufferDesc sum;
                 sum.bytes = pixels * 16 * planes;
         sum.elementBytes = 16;
@@ -1630,14 +1729,14 @@ Result<void> PathTracer::trace(gpu::CommandBatch& batch, const VisibilityTargets
             if (!madeProgress) return std::move(madeProgress).error();
             progress_ = std::move(*madeProgress);
         }
-        width_ = targets.width;
-        height_ = targets.height;
+        width_ = width;
+        height_ = height;
         accumulated_ = 0;
     }
     if (!settings.accumulate) {
         accumulated_ = 0;
     }
-    if (aux != nullptr && (aux->width != targets.width || aux->height != targets.height || !aux->valid())) {
+    if (aux != nullptr && (aux->width != width || aux->height != height || !aux->valid())) {
         gpu::BufferDesc desc;
         desc.bytes = pixels * 16 * 2;
         desc.elementBytes = 16;
@@ -1645,8 +1744,8 @@ Result<void> PathTracer::trace(gpu::CommandBatch& batch, const VisibilityTargets
         auto planes = gpu::Buffer::create(*device_, desc);
         if (!planes) return std::move(planes).error();
         aux->planes = std::move(*planes);
-        aux->width = targets.width;
-        aux->height = targets.height;
+        aux->width = width;
+        aux->height = height;
     }
     auto ids = targets.ids.view(0);
     if (!ids) return std::move(ids).error();
@@ -1672,6 +1771,10 @@ Result<void> PathTracer::trace(gpu::CommandBatch& batch, const VisibilityTargets
             cursor["path"]["splatCut"].setData(frame.splatShadowCut);
         }
         cursor["visibility"].setBinding((*ids).get());
+        // Only the bake's own kernel declares the rays.
+        if (const rhi::ShaderCursor rays = cursor["bakeRays"]; rays.isValid() && bake != nullptr) {
+            rays.setBinding(bake->rays->rhi());
+        }
         cursor["sum"].setBinding(sum_.rhi());
         cursor["colour"].setBinding(out.colour.rhi());
         cursor["depth"].setBinding(out.depth.rhi());
@@ -1728,7 +1831,7 @@ Result<void> PathTracer::trace(gpu::CommandBatch& batch, const VisibilityTargets
         cursor["path"]["focusDistance"].setData(static_cast<float>(projection.focusDistance));
         cursor["path"]["distortionK1"].setData(static_cast<float>(projection.distortionK1));
         cursor["path"]["distortionK2"].setData(static_cast<float>(projection.distortionK2));
-        setCamera(cursor["camera"], projection, targets.width, targets.height);
+        setCamera(cursor["camera"], projection, width, height);
         cursor["path"]["samples"].setData(samples);
         cursor["path"]["bounces"].setData(settings.bounces);
         cursor["path"]["seed"].setData(settings.seed);
@@ -1739,11 +1842,11 @@ Result<void> PathTracer::trace(gpu::CommandBatch& batch, const VisibilityTargets
     if (rayKernel_.has_value()) {
         // A dispatch of rays has no groups: the launch is one ray a pixel of
         // the 16 x 16 blocks the body still walks in quad order.
-        const uint32_t groupsAcross = (targets.width + 15) / 16;
-        const uint32_t groupsDown = (targets.height + 15) / 16;
+        const uint32_t groupsAcross = (width + 15) / 16;
+        const uint32_t groupsDown = (height + 15) / 16;
         rayKernel_->dispatch(batch, groupsAcross * groupsDown * 256, 1, 1, bindPath);
     } else {
-        kernel_->dispatch(batch, {targets.width, targets.height, 1}, bindPath);
+        kernel_->dispatch(batch, {width, height, 1}, bindPath);
     }
     accumulated_ = already + samples;
     lastErrorTarget_ = settings.errorTarget;

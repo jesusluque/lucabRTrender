@@ -277,7 +277,7 @@ TEST_CASE("a gaussian takes the colour of the texel it stands on", "[aofx][mesh2
     }));
 }
 
-TEST_CASE("glass keeps the opacity it was given and takes its colour", "[aofx][mesh2splat]") {
+TEST_CASE("glass keeps its material's opacity and takes its transmission colour", "[aofx][mesh2splat]") {
     gpu_host::Context* gpu = gpu_host::installProcessContext();
     if (gpu == nullptr || gpu->compute() == nullptr) {
         SKIP("no gpe device");
@@ -322,10 +322,11 @@ TEST_CASE("glass keeps the opacity it was given and takes its colour", "[aofx][m
         number(job, "flatness", kFlatness);
         number(job, "opacity", 1.0);
         number(job, "writePbr", 0.0);
-        // Glass: fully transmitting, which a gaussian answers with a tint of
-        // the density `minOpacity` names rather than with nothing at all.
+        // Glass: fully transmitting. What the conversion writes is what the
+        // material says -- its opacity, its colour taken towards the
+        // transmission colour, and the transmission in a channel of its own.
+        // What a renderer makes of that is the renderer's.
         number(job, "transmission", 1.0);
-        number(job, "minOpacity", 0.25);
         job.params.push_back(aofx::ParamValue{"sigma", {kSigma, kSigma}, {}});
         job.params.push_back(aofx::ParamValue{"materialColour", {1.0, 1.0, 1.0}, {}});
         job.params.push_back(aofx::ParamValue{"transmissionColour", {0.2, 0.5, 0.4}, {}});
@@ -358,7 +359,7 @@ TEST_CASE("glass keeps the opacity it was given and takes its colour", "[aofx][m
             cursor["params"]["sigma"].setData(kSigma);
             cursor["params"]["flatness"].setData(kFlatness);
             cursor["params"]["tolerance"].setData(1.0e-3F);
-            cursor["params"]["opacity"].setData(0.25F);
+            cursor["params"]["opacity"].setData(1.0F);
             const std::array<float, 4> colour{0.2F, 0.5F, 0.4F, 1.0F};
             const std::array<float, 4> axis{0.0F, 0.0F, 1.0F, 0.0F};
             cursor["params"]["colour"].setData(colour.data(), 16);
@@ -368,6 +369,6 @@ TEST_CASE("glass keeps the opacity it was given and takes its colour", "[aofx][m
         auto violations = counts->readAll<uint32_t>(library.device());
         REQUIRE(violations);
         CHECK((*violations)[3] == 0);   // the transmission colour, multiplied in
-        CHECK((*violations)[4] == 0);   // a quarter of the opacity it had
+        CHECK((*violations)[4] == 0);   // and the opacity the material gave it
     }));
 }

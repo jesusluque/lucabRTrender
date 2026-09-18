@@ -120,6 +120,22 @@ public:
     /// the renderer through Hydra as authored ones do.
     [[nodiscard]] Result<void> setDefaultLights(bool on);
 
+    /// The light this stage's meshes carry, at points somebody names.
+    ///
+    /// `rays` holds two `float4` a point -- where its ray starts and how near
+    /// it may hit, then which way it goes -- and what comes back, one `float4`
+    /// a point, is the radiance leaving the surface that ray finds, path
+    /// traced with this stage's own lights, shadows and bounces. The stage is
+    /// synced first, by drawing one pixel of it, because the meshes and their
+    /// materials have to be on the device before anything can be asked of
+    /// them.
+    ///
+    /// What it is for: `lrt mesh2splat`, which turns a mesh into gaussians
+    /// that carry the light the mesh had.
+    [[nodiscard]] Result<std::vector<float>> bakePoints(const std::vector<float>& rays, uint32_t count,
+                                                        double time, uint32_t samples = 64,
+                                                        uint32_t bounces = 3);
+
     /// Samples per light per pixel: one for an interactive frame, more where
     /// an area light's noise would be read as error.
     void setLightSamples(uint32_t samples);

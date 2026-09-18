@@ -57,7 +57,7 @@ struct Mesh2SplatUniforms {
     float materialColour[4] = {1.0F, 1.0F, 1.0F, 1.0F};
     float transmissionColour[4] = {1.0F, 1.0F, 1.0F, 1.0F};
 
-    float    minOpacity = 0.25F;
+    float    pad0 = 0.0F;
     float    metallic = 0.0F;
     float    roughness = 0.5F;
     uint32_t pad1 = 0;
@@ -212,19 +212,6 @@ public:
         roughness.hardMax = {1.0};
         into.params.push_back(roughness);
 
-        aofx::ParamDesc floor;
-        floor.name = "minOpacity";
-        floor.label = "Glass opacity";
-        floor.hint =
-            "What a fully transmitting material still keeps. A gaussian cannot refract, and one "
-            "with no opacity at all is not glass but nothing -- so glass comes out as a tint this "
-            "dense. Not part of mesh2splat.";
-        floor.type = aofx::ParamType::Double;
-        floor.defaults = {0.25};
-        floor.hardMin = {0.0};
-        floor.hardMax = {1.0};
-        into.params.push_back(floor);
-
         aofx::ParamDesc tint;
         tint.name = "transmissionColour";
         tint.label = "Transmission colour";
@@ -335,8 +322,6 @@ public:
         uniforms.transmission =
             static_cast<float>(std::clamp(request.number("transmission", 0.0), 0.0, 1.0));
         uniforms.useNormalMap = request.number("useNormalMap", 0.0) >= 0.5 ? 1U : 0U;
-        uniforms.minOpacity =
-            static_cast<float>(std::clamp(request.number("minOpacity", 0.25), 0.0, 1.0));
         uniforms.metallic = static_cast<float>(std::clamp(request.number("metallic", 0.0), 0.0, 1.0));
         uniforms.roughness = static_cast<float>(std::clamp(request.number("roughness", 0.5), 0.0, 1.0));
         for (int k = 0; k < 3; ++k) {

@@ -100,6 +100,10 @@ public:
     /// The engine's device; only valid when HasEngine().
     [[nodiscard]] lrt::gpu::Device& GetEngineDevice() const { return _engine->device(); }
     [[nodiscard]] lrt::gpu::ShaderLibrary& GetEngineLibrary() const { return _engine->library(); }
+    /// The engine itself, for what a task cannot ask for through Hydra: the
+    /// bake, which is a frame at points a caller names rather than at pixels.
+    /// Only valid when HasEngine(), and only from the thread that renders.
+    [[nodiscard]] lrt::usd::Engine& GetEngine() const { return *_engine; }
 
 private:
     void _Setup();
