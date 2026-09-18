@@ -5062,3 +5062,46 @@ it is posed, because `ParticleField::Sync` re-reads every array on any
 skinning adds one cheap pass to that; what it does not do is make the frame
 cheap. That is the next change, and it is on the other side of the boundary
 from this one.
+
+## What a rigged cloud actually costs
+
+Measured, not estimated. The asset is a tube of 200 rings by 64 segments --
+25472 triangles -- with forty joints down its length, two influences a vertex
+blended smoothly between neighbours, and a travelling wave of rotations over
+25 time codes. It stands in for the Fox until `Fox.glb` has been through a USD
+exporter; what it exercises is the same path, and its weights are smooth,
+which one influence a vertex would not have been (bound one ring to one joint,
+the rings tear apart and the picture shows it).
+
+`lrt mesh2splat --skinned --resolution 512`, on the Mac in release:
+
+| | |
+|---|---|
+| gaussians | **184 320** |
+| joints | 40 |
+| the file, at 25 instants | **9.27 MB** |
+| the file, at 121 instants | **9.50 MB** |
+| the same range as per-frame arrays, half precision | **~713 MB** |
+
+**Five times the frames costs 230 kilobytes.** That is the whole argument for
+carrying the rig rather than the frames, and it is why the file is one number
+and the sampled alternative is two orders of magnitude bigger. It is also
+exact between the instants, where a sampled cloud is whatever the reader
+interpolates.
+
+(With two influences a vertex the file is 12.55 MB rather than 9.5: the
+blend gives most gaussians four joints where one influence gave them one, and
+the joints and weights are 32 bytes a gaussian.)
+
+**A frame costs about 0.9 s** at 640 by 640 path traced, 184320 gaussians --
+and almost none of that is the skinning. It is the cloud being re-uploaded and
+its BVH rebuilt at every time step, which is the same cost a cloud with
+per-frame arrays would pay and is written down above as the next change. The
+skinning itself is one kernel over the gaussians.
+
+**Not done**: the Fox. `Fox.glb` is CC0 for the model and CC-BY for the rig
+and the glTF conversion (PixelMannen; tomkranis; @AsoboStudio and @scurest),
+and getting it into USD needs an exporter this machine does not have -- `guc`
+says plainly that "all glTF features with the exception of animation and
+skinning are implemented", and Blender is not installed. The run above is what
+that run would report.
