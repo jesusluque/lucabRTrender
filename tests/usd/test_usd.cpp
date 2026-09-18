@@ -6001,3 +6001,100 @@ TEST_CASE("the raster sees a dome through glass as the path tracer does", "[usd]
         CHECK(errors[0] / errors[1] > 8.0);
     }
 }
+
+// THE BAKE'S ANSWER CANNOT DEPEND ON HOW MANY HARMONICS IT IS ASKED FOR.
+//
+// A Lambertian surface sends the same radiance in every direction of the half
+// of the sphere it faces. Every basis function above the constant is therefore
+// zero, and the constant is the radiance -- whatever degree the bake is asked
+// to fit. Two degrees that disagree about a flat surface are a defect in the
+// fit and nothing else, which is what this pins down.
+//
+// It is what the projection did. Fitting by projecting over the sphere with
+// the far half taken as nothing, a plane of albedo 0.18 under a dome came back
+// at 0.045 at degree 0, 0.094 at degree 2 and 0.069 at degree 3 -- three
+// answers to a question with one, and a dark rim around every silhouette in
+// the model, since a silhouette is the surface seen from the equator of that
+// half, where the step the projection puts there is worth half the light.
+TEST_CASE("a Lambertian surface bakes to the same constant at every degree", "[usd][gpu][mesh][bake]") {
+    LRT_REQUIRE_GPU(gpu);
+    const gpu::Caps& caps = gpu->device->caps();
+    if (!caps.accelerationStructure || !(caps.rayQuery || caps.rayTracing)) {
+        SKIP("needs ray tracing");
+    }
+    const fs::path path = scratch("bake_lambert.usda");
+    {
+        std::ofstream out(path);
+        out << "#usda 1.0\n(\n    upAxis = \"Y\"\n)\n"
+               "def Mesh \"Square\"\n{\n"
+               "    int[] faceVertexCounts = [4]\n    int[] faceVertexIndices = [0, 1, 2, 3]\n"
+               "    point3f[] points = [(-4, -4, -1.5), (4, -4, -1.5), (4, 4, -1.5), (-4, 4, -1.5)]\n"
+               "    normal3f[] normals = [(0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1)] (interpolation = \"vertex\")\n"
+               "    uniform token subdivisionScheme = \"none\"\n}\n"
+               "def DomeLight \"Sky\"\n{\n    float inputs:intensity = 1\n}\n"
+               "def Camera \"Camera\"\n{\n    float focalLength = 35\n"
+               "    float horizontalAperture = 24.576\n    float verticalAperture = 18.432\n"
+               "    float2 clippingRange = (0.1, 1000)\n}\n";
+    }
+    // A row of points on the plane, each with the plane's normal and a step to
+    // start its rays off the surface.
+    const uint32_t count = 64;
+    std::vector<float> rays(size_t{count} * 8, 0.0F);
+    for (uint32_t k = 0; k < count; ++k) {
+        float* ray = rays.data() + size_t{k} * 8;
+        ray[0] = -1.5F + 3.0F * (static_cast<float>(k) + 0.5F) / static_cast<float>(count);
+        ray[1] = 0.0F;
+        ray[2] = -1.5F;
+        ray[3] = 1.0e-3F;   // how far off the surface the rays start
+        ray[6] = 1.0F;      // the normal, +z
+    }
+    // What the surface sends, in the space a cloud is blended in: the plane
+    // reads 0.18 in a frame (the test above measures it) and a bake fits
+    // there, not in linear light.
+    const float expected = static_cast<float>(1.055 * std::pow(0.18, 1.0 / 2.4) - 0.055);
+    auto check = gpu::ComputeKernel::create(*gpu->library, "lrt/test/bake_check", "bakeCheck");
+    if (!check) FAIL(check.error().toString());
+
+    auto renderer = usd::StageRenderer::open(path);
+    if (!renderer) FAIL(renderer.error().toString());
+    for (const uint32_t degree : {0u, 2u, 3u}) {
+        auto baked = (*renderer)->bakePoints(rays, count, 0.0, 1024, 1, degree);
+        if (!baked) FAIL(baked.error().toString());
+        const uint32_t planes = (degree + 1) * (degree + 1);
+        REQUIRE(baked->size() == size_t{count} * planes * 4);
+        gpu::BufferDesc desc;
+        desc.bytes = baked->size() * 4;
+        desc.elementBytes = 16;
+        auto fitted = gpu::Buffer::create(*gpu->device, desc, baked->data());
+        REQUIRE(fitted);
+        gpu::Buffer counts = test::uintBuffer(*gpu->device, 2, "counts");
+        gpu::Buffer worst = test::uintBuffer(*gpu->device, 4, "worst");
+        {
+            gpu::CommandBatch batch(*gpu->device);
+            check->dispatch(batch, {1, 1, 1}, [&](rhi::ShaderCursor cursor) {
+                cursor["coefficients"].setBinding(fitted->rhi());
+                cursor["counts"].setBinding(counts.rhi());
+                cursor["worst"].setBinding(worst.rhi());
+                rhi::ShaderCursor p = cursor["params"];
+                p["count"].setData(count);
+                p["planes"].setData(planes);
+                // The renderer reads the basis along the eye's line to the
+                // point, which for a plane looked at straight on is -z.
+                const float direction[4] = {0.0F, 0.0F, -1.0F, 0.05F};
+                const float want[4] = {expected, expected, expected, 0.0F};
+                p["direction"].setData(direction, sizeof(direction));
+                p["expected"].setData(want, sizeof(want));
+            });
+            REQUIRE(batch.submit(true));
+        }
+        uint32_t seen[2] = {0, 0};
+        float    got[4] = {0.0F, 0.0F, 0.0F, 0.0F};
+        REQUIRE(counts.read(*gpu->device, 0, sizeof(seen), seen));
+        REQUIRE(worst.read(*gpu->device, 0, sizeof(got), got));
+        std::printf("  degree %u: %u points, %u beyond 5%%, worst %.4f, first %.4f/%.4f/%.4f against %.4f\n",
+                    degree, seen[0], seen[1], double(got[0]), double(got[1]), double(got[2]), double(got[3]),
+                    double(expected));
+        CHECK(seen[0] == count);
+        CHECK(seen[1] == 0);
+    }
+}

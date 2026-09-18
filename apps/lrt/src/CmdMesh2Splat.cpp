@@ -684,6 +684,19 @@ private:
     for (uint32_t k = 0; k < raw.count; ++k) {
         float* record = raw.records.data() + size_t{k} * raw.encoding.floatsPerRecord;
         const float* point = baked->data() + size_t{k} * coefficients * 4;
+        // A GAUSSIAN THE BAKE FOUND NOTHING UNDER IS NOT A BLACK GAUSSIAN.
+        //
+        // Its coefficients come back as zeros, and zero is not "no colour":
+        // the constant term is kept shifted to where 3DGS trains it, so a
+        // zero there decodes as `0.5 - 0.5`, which is black. A cloud out of
+        // mesh2splat is nearly all discs (the third axis is 1e-7), so one of
+        // those seen edge on at a silhouette is a black splinter -- which is
+        // what the pawn's gold ring had a fringe of, forty-four of them in
+        // 729073. It stands for nothing, so it draws nothing.
+        if (!(point[3] > 0.0F)) {
+            record[raw.encoding.opacity] = 0.0F;
+            continue;
+        }
         record[raw.encoding.dc0] = point[0];
         record[raw.encoding.dc1] = point[1];
         record[raw.encoding.dc2] = point[2];

@@ -4644,3 +4644,139 @@ it could not: it drew a stage exactly as the stage stood, so the chess set --
 which carries no light of its own -- came back black on black, and no
 comparison with what `lrt view` and `lrt stage --default-lights` show was
 possible through it.
+
+## The bake fits the harmonics, and no longer projects them
+
+The harmonics were fitted by **projecting** the radiance over the whole sphere
+with the half the surface does not face taken as nothing -- which keeps the
+basis orthogonal, and is a different question from the one a bake is asking.
+Three things came of it, and they are one thing:
+
+- **Degree 0 at a fifth.** The projection gives `Y0 * 2 pi * mean` and reading
+  it back gives `kSH0` times that, which is **half** the light the surface
+  sends. The pawn's glass ball read 0.048/0.059/0.054 against the mesh's
+  0.224/0.335/0.307.
+- **A dark rim around every silhouette.** A silhouette is the surface seen
+  from the equator of that half -- exactly where the function being projected
+  steps from the radiance to nothing, and where a series through a step is
+  worth the middle of it. Across the ball, the mesh reads a flat 0.309 and the
+  cloud read **0.152 at the edge**, climbing over a hundred pixels to 0.325 at
+  the centre.
+- **Degree 3 further from the mesh than degree 2**, ringing about it
+  (0.224, 0.271, 0.193 across the same ball). Gibbs, not noise: more paths did
+  not touch it.
+
+**What settles it** is that a Lambertian surface's radiance does not depend on
+direction, so neither can the answer depend on the degree. Over the pawn's
+marble body, which is diffuse once the polish is taken out of it:
+
+| | degree 0 | degree 2 | degree 3 |
+|---|---|---|---|
+| projecting | 0.045 | 0.094 | 0.069 |
+| fitting | 0.0749 | 0.0725 | 0.0745 |
+
+Three answers to a question with one, against three that agree to two percent.
+`tests/usd/test_usd.cpp` holds that invariant on a plane under a dome.
+
+**The fit, and why it is small enough to solve a gaussian at a time.** It is
+the normal equations `G c = b` over the half of the sphere the surface faces,
+with `b` what the samples already sum to and `G_kj = integral(Y_k Y_j)` over
+that half. Two bands of the **same parity are orthogonal over any half of the
+sphere**: `Y(-w) = (-1)^l Y(w)`, so the two halves' integrals are equal and
+each is half the sphere's, which is `delta/2` whatever the normal is. So only
+the block between the even and the odd bands depends on the direction the
+surface faces, and only it is worked out -- six by ten at degree 3. What is
+left is `[[I/2, E], [E^T, I/2]]`, whose Schur complement is **six by six**,
+symmetric and positive definite, and Cholesky ends it. Degree 0 falls out of
+the same arithmetic: no odd bands, so `c = 2 b`, which is the half the
+projection was missing.
+
+**The matrix costs no rays.** It depends on the normal and on nothing else --
+not the light, not the material, not a path. Estimated from the paths instead,
+at 256 of them, the fit came apart: the sampling error on the matrix is the
+size of the entries themselves, and the pawn came back with pixels in the
+thousands. It is integrated deterministically over 32 elevations by 16
+azimuths, which for a product of two basis functions is worth about four
+figures, and costs 512 directions of arithmetic against 256 of ray tracing.
+
+**Where the noise is stopped, and why not with a ridge.** Half of a sphere
+does not determine sixteen harmonics equally: the combinations that are nearly
+nothing on the half the surface faces are what the data cannot see, and solved
+exactly the fit puts a few hundred paths` noise into exactly those. On the
+pawn a few gaussians reached **65344** -- fp16's ceiling, which is what a
+cloud stores them in -- and burned out as white blobs.
+
+A ridge on every diagonal fixes it and charges every gaussian for the few that
+need it. At 0.02 the whole fit shrinks by `0.5 / 0.52`, and the test's
+Lambertian plane, whose light is 0.4614, came back at **0.4436** -- 3.9% low,
+exactly that ratio -- with degree 2 at 9%. A **floor under Cholesky's pivot**
+charges nobody: the pivot only goes small where the matrix is near singular,
+which is the direction the data could not see, so flooring it bounds what that
+direction contributes and leaves every well determined gaussian solved
+exactly. At 0.005, against a diagonal of a half, the plane comes back at
+**0.4614 exactly at degree 0** and within 1.4% and 2.0% at degrees 2 and 3 --
+which is the paths' own noise -- and the pawn's brightest pixel is 8.4 where
+the mesh's is 41.
+
+**Where it lands** (1600 by 1600, 512 paths, degree 3, 256 paths a gaussian):
+
+| patch | mesh | carried and relit | projected | fitted |
+|---|---|---|---|---|
+| glass ball | 0.224/0.335/0.307 | 0.208/0.328/0.299 | 0.198/0.304/0.266 | 0.173/0.265/0.237 |
+| gold ring | 0.224/0.167/0.086 | 0.456/0.337/0.179 | 0.408/0.327/0.192 | 0.306/0.239/0.137 |
+| marble body | 0.084/0.099/0.097 | 0.064/0.080/0.078 | 0.073/0.094/0.091 | 0.061/0.075/0.074 |
+
+Across the ball's silhouette, where the projection swung from 0.152 to 0.325
+against a mesh that is flat at 0.300 to 0.320, the fit reads 0.238 to 0.262 --
+**flat**, which is what the dark rim was.
+
+The fit is nearer the mesh than the projection on the ring and further on the
+ball and the body, and what is left is **not the harmonics**: the cloud that
+was never baked at all sits in the same place as the fitted one on the body
+(0.080 against 0.075 against the mesh's 0.099), so the last quarter is the
+conversion's own -- how wide a gaussian is against its cell, and what it
+therefore covers -- and not how its colour was arrived at.
+
+## The sky was painted where nothing was drawn, not behind what was
+
+Every silhouette in a converted cloud wore a dark fringe. Zoomed to where a
+viewer puts it, that fringe is a row of black splinters, which is how it was
+noticed.
+
+It is not the cloud and it is not the bake -- the cloud that was never baked
+has it too, and so does the rasteriser. Read out of the render buffer, the
+pixel just outside the pawn's collar is **0.087/0.071/0.049 with an alpha of
+0.199**: a fifth of the body's colour, premultiplied, and none of the four
+fifths of sky that belongs behind it.
+
+`dome_background.slang` painted the sky where the depth buffer said nothing
+had been drawn, and wrote it **over** the pixel. For a mesh that is right: a
+mesh covers a pixel or it does not. A cloud's silhouette is a ramp of partial
+coverage five pixels wide, and every one of those pixels has a depth, so none
+of them got any sky at all.
+
+The sky is opaque and it is behind everything, so it is composited under, by
+the pixel's own coverage, and the pixel is opaque afterwards. The profile
+across the collar now runs 0.600, 0.567, 0.554, 0.536, 0.488, 0.446 -- the
+sky falling to the body -- where it ran 0.600, 0.087, 0.123, 0.202, 0.332,
+0.446. **A fully covered pixel is bit for bit what it was**, which is what a
+mesh always saw.
+
+The light groups' planes take the sky under the same coverage, so that they
+still sum to the beauty, and they read that coverage out of the beauty's own
+alpha -- which the beauty pass sets to one, so the groups are dispatched
+first.
+
+**And a gaussian the bake found nothing under is not a black gaussian.** Its
+coefficients come back as zeros, and zero is not "no colour": the constant
+term is kept shifted to where 3DGS trains it, so a zero there decodes as
+`0.5 - 0.5`. A cloud out of mesh2splat is nearly all discs, so one of those
+seen edge on at a silhouette is a black splinter of its own -- thirty-nine of
+them in 729073 on the pawn. It stands for nothing, so it now draws nothing.
+
+**What was tried and was not it.** The third axis: mesh2splat writes 1e-7
+there, a length in the model's own units while the other two sizes are in
+cells, so on a pawn 66 mm tall it is a thousandth of a cell -- a disc a ray
+meeting it side on is barely stopped by. Widened three hundred times, the dark
+minimum at the edge was **just as deep** (0.027 against 0.033), so the razor
+was not what made the fringe, and EA's number stands.

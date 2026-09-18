@@ -2083,24 +2083,11 @@ Result<void> Engine::paintDomes(const render::Projection& projection, uint32_t w
     }
     const std::array<float, 12> toWorld = aofx::xform::inverseAffine(projection.worldToView).rows3x4();
     gpu::CommandBatch batch(*device_);
-    domeBackground_->dispatch(batch, {width, height, 1}, [&](rhi::ShaderCursor cursor) {
-        lightTable_->bind(cursor);
-        // A dome reads its image through the same table the materials sample,
-        // so the background pass binds it too: without it every dome is the
-        // white a missing file falls back to.
-        if (textures_) {
-            textures_->bind(cursor["gTextures"]);
-        }
-        cursor["colour"].setBinding(targets.colour.rhi());
-        cursor["depth"].setBinding(targets.depth.rhi());
-        technique::setCamera(cursor["camera"], projection, width, height);
-        static constexpr const char* kNames[12] = {"v00", "v01", "v02", "v03", "v10", "v11",
-                                                   "v12", "v13", "v20", "v21", "v22", "v23"};
-        for (size_t k = 0; k < 12; ++k) {
-            cursor["background"][kNames[k]].setData(toWorld[k]);
-        }
-    });
-    // And in the light groups' planes: a dome seen by the camera is its group's.
+    // The light groups' planes first: a dome seen by the camera is its group's,
+    // and each plane takes the sky under the same coverage the beauty will, so
+    // that the groups still sum to it. They read that coverage out of the
+    // beauty's own alpha, which the pass below writes to one, so this one goes
+    // first.
     if (lightGroupCount_ > 0 && lightGroupColour_.valid() && lightGroupPixels_ == uint64_t{width} * height) {
         if (!domeGroups_.has_value()) {
             auto made = gpu::ComputeKernel::create(*library_, "lrt/technique/dome_background", "domeBackgroundGroups");
@@ -2112,7 +2099,7 @@ Result<void> Engine::paintDomes(const render::Projection& projection, uint32_t w
             if (textures_) {
                 textures_->bind(cursor["gTextures"]);
             }
-            cursor["depth"].setBinding(targets.depth.rhi());
+            cursor["colour"].setBinding(targets.colour.rhi());
             cursor["groupPlanes"].setBinding(lightGroupColour_.rhi());
             cursor["groupBase"].setData(uint32_t{0});
             cursor["groupCount"].setData(lightGroupCount_);
@@ -2124,6 +2111,22 @@ Result<void> Engine::paintDomes(const render::Projection& projection, uint32_t w
             }
         });
     }
+    domeBackground_->dispatch(batch, {width, height, 1}, [&](rhi::ShaderCursor cursor) {
+        lightTable_->bind(cursor);
+        // A dome reads its image through the same table the materials sample,
+        // so the background pass binds it too: without it every dome is the
+        // white a missing file falls back to.
+        if (textures_) {
+            textures_->bind(cursor["gTextures"]);
+        }
+        cursor["colour"].setBinding(targets.colour.rhi());
+        technique::setCamera(cursor["camera"], projection, width, height);
+        static constexpr const char* kNames[12] = {"v00", "v01", "v02", "v03", "v10", "v11",
+                                                   "v12", "v13", "v20", "v21", "v22", "v23"};
+        for (size_t k = 0; k < 12; ++k) {
+            cursor["background"][kNames[k]].setData(toWorld[k]);
+        }
+    });
     LRT_TRY(batch.submit(true));
     return ok();
 }
