@@ -1447,6 +1447,14 @@ Result<void> Engine::render(const render::Projection& projection, const render::
             }
         }
         LRT_TRY(rayTracer_->render(projection, splats, settings, targets, &tracedLights));
+        // What every other route does when it has finished drawing, and what
+        // this one used to return without: the sky behind the frame, and the
+        // camera's exposure. A stage of nothing but splats came back over
+        // black where the rasteriser drew it over its dome, which is the sort
+        // of difference that is only ever noticed by putting the two side by
+        // side.
+        LRT_TRY(paintDomes(projection, settings.width, settings.height, targets));
+        LRT_TRY(applyExposure(projection.exposure, settings.width, settings.height, targets));
         return ok();
     }
     if (visibility == MeshVisibility::Automatic) {

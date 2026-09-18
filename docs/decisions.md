@@ -4577,3 +4577,17 @@ first, and the second arrives through a lobe that bends every sample somewhere
 else. It comes back mottled. What would answer it is either far more
 coefficients than a cloud carries or the thing LiTo went after -- a learned
 latent instead of a basis -- and neither is this conversion's business today.
+
+## A traced frame of splats alone did not finish
+
+A cloud drawn by the ray tracer -- what a stage of nothing but splats gets
+under `rt` -- returned from `Engine::render` as soon as it had drawn, before
+the two things every other route ends with: the sky behind the frame
+(`paintDomes`) and the camera's exposure (`applyExposure`). So the same cloud
+came back over the dome's grey when rasterised and over nothing when traced,
+and an exposure the camera asked for was applied to one and not the other.
+
+It was found by looking at two renders side by side and noticing the
+backgrounds did not match -- which is the only way a difference like this is
+ever found, and the reason the comparison was being made at all. Both routes
+now end the same way; the pawn's sky reads 0.600098 in each.
