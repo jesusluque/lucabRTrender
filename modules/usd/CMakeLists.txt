@@ -20,7 +20,7 @@ set(LRT_USD_LIBS usd usdGeom usdVol usdShade usdLux usdRender usdSkel usdImaging
 
 # The engine side of Hydra, linked into the CLI and tests.
 lrt_add_module(usd
-    SOURCES ${LRT_USD_SOURCES} src/StageRenderer.cpp src/BindingPurposes.cpp src/Export.cpp
+    SOURCES ${LRT_USD_SOURCES} src/StageRenderer.cpp src/BindingPurposes.cpp src/Export.cpp src/MeshStage.cpp
     PUBLIC_LIBS lrt::render lrt::io lrt::scene lrt::lod lrt::geom lrt::world lrt::technique ${LRT_USD_LIBS})
 # USD's headers predate the warnings this engine asks for.
 target_compile_options(lrt_usd PRIVATE -Wno-old-style-cast -Wno-shadow -Wno-cast-align

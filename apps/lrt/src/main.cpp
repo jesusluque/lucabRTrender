@@ -24,6 +24,7 @@ int main(int argc, char** argv) {
     lrt::cli::addConvert(app);
     lrt::cli::addStage(app);
     lrt::cli::addAofx(app);
+    lrt::cli::addMesh2Splat(app);
     lrt::cli::addLive(app);
 #if LRT_HAVE_VIEW
     lrt::cli::addView(app);

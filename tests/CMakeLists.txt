@@ -152,10 +152,11 @@ lrt_test(lrt_gpu_host_tests
 
 add_subdirectory(aofx/bundles)
 lrt_test(lrt_aofx_tests
-    SOURCES aofx/test_aofx.cpp
-    LIBS lrt::aofx_host
+    SOURCES aofx/test_aofx.cpp aofx/test_mesh2splat.cpp
+    LIBS lrt::aofx_host lrt::gpu
     LABELS gpe)
-add_dependencies(lrt_aofx_tests aofx_test_bundles)
+# The conversion's own bundle, checked through the host like any other.
+add_dependencies(lrt_aofx_tests aofx_test_bundles lrt_aofx_mesh2splat)
 target_compile_definitions(lrt_aofx_tests PRIVATE
     LRT_AOFX_TEST_BUNDLES="${LRT_AOFX_TEST_BUNDLES}"
     LRT_AOFX_TEST_RUN_BUNDLES="${LRT_AOFX_TEST_RUN_BUNDLES}"

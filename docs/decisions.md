@@ -4128,3 +4128,100 @@ the splat tracer's own `--splat-shadows`, unchanged), a bounce ray meets no
 splats (only shadow rays do), and on a device that traces in a pipeline
 (CUDA) there are no splat shadows at all: the traversal would have to be an
 any hit program of its own, and the path tracer already carries two.
+
+## mesh2splat: a mesh becomes a cloud, through the plugin interface
+
+Electronic Arts' [mesh2splat](https://github.com/electronicarts/mesh2splat)
+turns a textured mesh into 3D gaussians. It is BSD-3, the algorithm is short
+and the result is exactly the primitive this engine already draws, so it was
+worth having. What was decided is **where it runs**: it is an AOFX effect
+(`plugins/mesh2splat`), not a module of the engine.
+
+**Why a plugin and not a module.** The conversion is a kernel over triangles
+with no state, no device to own and no scene to walk -- which is the shape an
+AOFX effect has, exactly. Making it one costs a boundary and buys three
+things: it runs unchanged in openFXplayer, it is the proof that this SDK
+serves a *process* and not only a filter over pictures, and the engine keeps
+a conversion out of its own modules, where it would have been the first thing
+in `modules/` that is neither a renderer nor a loader.
+
+**What the boundary costs.** An effect is handed pictures. A mesh is not one,
+so the triangles travel as a picture of numbers -- six `float4` entries a
+triangle, `(position, u)` and `(normal, v)` for each corner, in world space
+(`shaders/lrt/usd/mesh_pack.slang`) -- and every map a material names travels
+as rows of linear `float4` sampled out of the texture table
+(`shaders/lrt/usd/texture_rows.slang`). Neither is a copy: the pictures are
+allocated by the AOFX host's own image storage, which on a device with
+unified memory is memory a kernel reads, and `Context::renderView` gives a
+slang-rhi view of the same bytes, so the packing kernel writes where the
+effect will read. What does cross back is the records, once, because
+`usd::writeParticleFieldStage` takes a `io::RawSplats` -- and the numbers in
+a file are the processor's business by definition.
+
+**The port.** Their pipeline is a geometry shader and a fragment shader; this
+is one compute kernel with the fragments walked (`m2sEmit`, one thread a
+triangle, over the cells of its projected bounding box). Three things in it
+were read out of their source rather than guessed, and getting the first two
+wrong is what the first render showed:
+
+- the Jacobian is over their **`orthogonalUvs`** -- the triplanar projection,
+  normalised by the model's box -- and **not** over the texture coordinates;
+- the scale is `|Ju| * sigma / resolution`, the `/ resolution` being applied
+  by their *exporter* (`SceneManager.cpp`: `scaleMultiplier = gaussianStd /
+  resolutionTarget`) and not by any shader. Without it every gaussian is the
+  size of the whole model, which renders as a heap of slabs;
+- the frame is the triangle's **longest edge**, its normal and the cross of
+  the two -- not the Jacobian's columns, which is what the sizes are measured
+  along. That inconsistency is theirs and it is kept: the gaussian is a disc
+  in the triangle's plane however that plane was parametrised.
+
+**What is ours, and not theirs: transmission.** Their fragment shader samples
+albedo, normal and metallic-roughness. A `standard_surface` with
+`transmission = 1` -- the chess set's glass -- has no channel there at all, so
+it would come out as an opaque white gaussian. Here the material's
+`transmission` and `transmission_color` are read from the stage and the
+gaussian keeps `lerp(1, minOpacity, transmission)` of its opacity and takes
+that colour. `minOpacity` is 0.25 rather than zero because `1 - transmission`
+is nothing at all for glass, and a gaussian with no opacity is not a
+translucent gaussian but an absent one -- `splatExport` drops it. So glass
+converts to **a tint, not a lens**: what stands behind it is dimmed rather
+than refracted, and that is the honest limit of the primitive.
+
+**Reading a stage without Hydra.** `usd::MeshStage` is new, and it is the
+first thing in this repository to walk `UsdShade` itself: every other route
+into the engine goes through Hydra, which hands over a network. It reads the
+meshes, their world transforms and, from the bound material's surface, the
+`standard_surface` or `UsdPreviewSurface` inputs a gaussian can carry --
+following connections through node graphs, interface inputs and a normal-map
+node to whichever image node finally produces them. A value that is *computed*
+rather than authored (a mix, a noise) has no answer without shading a point,
+so the default stands.
+
+**Measured** (`tests/aofx/test_mesh2splat.cpp`, the inputs written by a kernel
+and the answers counted by one):
+
+- **A unit quad at resolution 16** gives between 256 and 272 gaussians -- one
+  a cell whose centre it covers, the slack being the cells the diagonal runs
+  through, which both triangles claim. None off the quad's plane, none off
+  its extent.
+- **Every one is `sigma / resolution` wide** on both axes, `1e-7` on the
+  third, and its frame's short axis is the quad's normal: 0 violations of
+  each over every gaussian.
+- **Colour**: against a checker, a gaussian well inside a cell takes that
+  cell's colour, through the texture coordinate its record carries. 0 wrong.
+- **Glass**: `transmission = 1` with `minOpacity = 0.25` leaves every gaussian
+  at a quarter of its opacity and the transmission colour, exactly.
+- **The chess pawn**, end to end: `lrt mesh2splat Pawn.usd` reads the two
+  meshes with their bound materials (`M_Pawn_Body_B` with its black marble
+  maps, `M_Pawn_Top_B` with `transmission = 1`), writes 729073 gaussians at
+  resolution 512 in about two and a half seconds of a debug build, and the
+  stage path traces with the viewer's default lights into a pawn whose head is
+  green glass.
+
+**Not done.** The PBR channels the conversion can write (shading normal,
+metallic, roughness, the texture coordinate) have nowhere to live in a
+`ParticleField3DGaussianSplat` yet, so `lrt mesh2splat` asks for the four-entry
+record and leaves them out; they arrive when the per-gaussian PBR carrier
+does. A mesh whose `GeomSubset`s bind different materials is converted as one
+material, the one bound to the mesh. Nothing here is built or checked on
+Linux yet, so CUDA is unverified.

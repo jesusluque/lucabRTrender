@@ -26,6 +26,7 @@ const char* typeName(aofx::ParamType type) {
     case aofx::ParamType::Boolean: return "boolean";
     case aofx::ParamType::Choice: return "choice";
     case aofx::ParamType::String: return "string";
+    case aofx::ParamType::Colour: return "colour";
     default: return "other";
     }
 }

@@ -106,7 +106,7 @@ void addStage(CLI::App& app) {
         uint32_t frames = 1;
         uint32_t pathSamples = 1, pathBounces = 1, pathTotal = 1, motionBuckets = 4, refine = 0;
         uint32_t lightSamples = 1;
-        bool denoise = false, frameAll = false, splatShadows = false;
+        bool denoise = false, frameAll = false, splatShadows = false, defaultLights = false;
     };
     auto o = std::make_shared<Options>();
     auto* cmd = app.add_subcommand("stage", "render a USD stage through the engine's Hydra delegate");
@@ -120,6 +120,9 @@ void addStage(CLI::App& app) {
     cmd->add_option("--path-bounces", o->pathBounces, "rt: bounces after the first hit");
     cmd->add_option("--path-total", o->pathTotal, "rt: paths a pixel the image is drawn until it holds");
     cmd->add_flag("--denoise", o->denoise, "rt: denoise the image once it holds its total (OIDN)");
+    cmd->add_flag("--default-lights", o->defaultLights,
+                  "a dome and a sun in the session layer, for a stage that brings no lights "
+                  "(what lrt view offers)");
     cmd->add_option("--motion-buckets", o->motionBuckets,
                     "rt: shutter slices for motion blur, 1 to 8 (the shutter is the camera's)");
     cmd->add_option("--refine", o->refine, "subdivision surfaces refined this many levels (0: the control mesh)");
@@ -163,6 +166,12 @@ void addStage(CLI::App& app) {
         (*renderer)->setRefineLevel(o->refine);
         (*renderer)->setLightSamples(o->lightSamples);
         (*renderer)->setSplatShadows(o->splatShadows);
+        if (o->defaultLights) {
+            if (auto lit = (*renderer)->setDefaultLights(true); !lit) {
+                std::fprintf(stderr, "%s\n", lit.error().toString().c_str());
+                throw CLI::RuntimeError(1);
+            }
+        }
         if (!o->renderSettings.empty()) {
             const std::filesystem::path directory =
                 o->output.empty() ? std::filesystem::path() : std::filesystem::path(o->output).parent_path();

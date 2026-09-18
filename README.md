@@ -126,6 +126,35 @@ Gaussian splats as a primitive beside triangles rather than as a demo.
 
 `ref/spire-engine` is kept for the same reason and on the same terms.
 
+## What it owes to mesh2splat
+
+[mesh2splat](https://github.com/electronicarts/mesh2splat), Electronic Arts'
+mesh-to-gaussian converter, is the algorithm behind `lrt mesh2splat` and the
+`Mesh2Splat` AOFX plugin under `plugins/mesh2splat`. It is **BSD-3-Clause**
+(Copyright (c) 2024-2025 Electronic Arts Inc.), and what was taken is the
+conversion itself, ported from its OpenGL pipeline -- a vertex, geometry and
+fragment shader -- into one Slang compute kernel:
+
+- a triangle is projected onto the plane its normal points along least, with
+  the position taken relative to the model's box and over the wider of that
+  plane's two ranges (their `orthogonalUvs`);
+- the Jacobian of that map to space, `J = V (O)^-1`, gives the two sizes:
+  `|Ju| * sigma / resolution` and `|Jv| * sigma / resolution`, so a gaussian
+  is as wide as one cell of the grid the triangle is drawn on;
+- the frame is the triangle's longest edge, its normal, and the third axis
+  square to both; the flat axis is `1e-7`;
+- a gaussian is appended for every cell the triangle covers, sampling albedo,
+  normal and metallic-roughness there, with an atomic counter and a budget.
+
+The copyright notice and the three conditions are at the head of
+`plugins/mesh2splat/mesh2splat.slang`, which is the file the algorithm lives
+in. No code was copied: their shaders are GLSL and this is Slang, their
+density comes from a rasteriser and here the cells are walked. What is not
+theirs is marked in that file -- transmission, which their conversion has no
+channel for, and which a gaussian answers with a tint rather than a lens.
+
+EA's name and marks are not used to endorse anything here.
+
 ## Status
 
 Verified on an Apple M5 Pro (Metal). Not verified:
