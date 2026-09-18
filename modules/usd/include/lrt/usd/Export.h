@@ -18,6 +18,11 @@ struct ExportOptions {
     bool     addCamera = true;
     /// COLMAP-trained clouds are y-down; turn them over on the prim's xform.
     double   rotateXDegrees = 0.0;
+    /// Writes `primvars:lrt:splat:relight = 1` (LrtSplatLightingAPI): the
+    /// colours are an albedo the scene's lights are to light, not radiance
+    /// somebody captured. True for a cloud converted from a mesh, false for a
+    /// capture, which carries the light it was shot under.
+    bool     relight = false;
 };
 
 /// Writes `raw` as a UsdVolParticleField3DGaussianSplat at /World/Splats in a

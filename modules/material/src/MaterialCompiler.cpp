@@ -180,6 +180,18 @@ public:
     mutable std::vector<MaterialSlot> slots;
     mutable uint32_t words = 0;
 
+    /// What colour space each file is read in, by the path itself.
+    ///
+    /// A shader port does not always carry the colour space its document
+    /// input had: MaterialX puts one on a port for a colour management system
+    /// to act on, and this generator registers none -- it does the decode on
+    /// the device, in `TextureStore`, where the texture already is. So the
+    /// document is read for it before generating, and a file input whose port
+    /// says nothing takes its answer from here. Keyed by the path because that
+    /// is what both sides have: two nodes reading one file in two colour
+    /// spaces would be a document contradicting itself.
+    mutable std::map<std::string, std::string> fileColourSpaces;
+
     mx::ShaderPtr generate(const std::string& name, mx::ElementPtr element, mx::GenContext& context) const override {
         slots.clear();
         words = 0;
@@ -411,13 +423,23 @@ private:
                 // MaterialX reads a file in its colorspace, the document's
                 // (linear) unless it says srgb_texture; UsdUVTexture says
                 // sourceColorSpace instead: auto, raw or sRGB.
-                const std::string& space = port->getColorSpace();
+                std::string space = port->getColorSpace();
+                if (space.empty()) {
+                    if (const auto found = fileColourSpaces.find(slot.name); found != fileColourSpaces.end()) {
+                        space = found->second;
+                    }
+                }
                 const mx::ShaderInput* source = node != nullptr ? node->getInput("sourceColorSpace") : nullptr;
                 const std::string usd = source != nullptr && source->getValue() ? source->getValue()->getValueString()
                                                                                 : std::string();
-                if (space == "srgb_texture" || space == "g22_rec709" || usd == "sRGB") {
+                if (space == "srgb_texture" || space == "g22_rec709" || space == "srgb_rec709" ||
+                    usd == "sRGB") {
                     slot.space = ColourSpace::Srgb;
-                } else if (space.empty() && source != nullptr && (usd.empty() || usd == "auto")) {
+                } else if (space == "auto" || (space.empty() && source != nullptr && (usd.empty() || usd == "auto"))) {
+                    // "auto" is not a MaterialX colour space; the delegate
+                    // writes it where USD said the file decides, which is what
+                    // `sourceColorSpace = auto` means and what a file with no
+                    // colour space at all gets from the scene index.
                     slot.space = ColourSpace::Auto;
                 } else {
                     slot.space = ColourSpace::Raw;
@@ -704,6 +726,28 @@ Result<CompiledMaterial> MaterialCompiler::compileDocument(const std::shared_ptr
             !doc->getChild(kRenderableName)) {
             renderable->setName(kRenderableName);
         }
+        // What each file's colour space is, read off the document while it is
+        // still a document (see `fileColourSpaces`).
+        generator->fileColourSpaces.clear();
+        const std::function<void(const mx::ElementPtr&)> readSpaces = [&](const mx::ElementPtr& parent) {
+            for (const mx::ElementPtr& child : parent->getChildren()) {
+                if (const mx::NodePtr node = child->asA<mx::Node>()) {
+                    for (const mx::InputPtr& input : node->getInputs()) {
+                        if (input->getType() != "filename" || !input->getValue()) {
+                            continue;
+                        }
+                        const std::string space = input->getActiveColorSpace();
+                        if (!space.empty()) {
+                            generator->fileColourSpaces[input->getValue()->getValueString()] = space;
+                        }
+                    }
+                } else if (child->isA<mx::NodeGraph>()) {
+                    readSpaces(child);
+                }
+            }
+        };
+        readSpaces(doc);
+
         mx::GenContext context(generator);
         context.registerSourceCodeSearchPath(impl.sourcePaths);
         mx::GenOptions& options = context.getOptions();

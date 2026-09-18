@@ -7,6 +7,7 @@
 
 #include <catch2/catch_approx.hpp>
 
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -572,6 +573,74 @@ TEST_CASE("materials bound in USD shade a mesh: MaterialX with a texture, and Us
         CHECK(c[2] > 800);
         CHECK(c[0] == 0);
         CHECK(c[1] == 0);
+    }
+    SECTION("a file's colour space reaches the decode: srgb_texture is linearised, and its absence is not") {
+        // The same picture, read twice: once as the sRGB values it holds and
+        // once as linear ones. What the colour space says has to survive the
+        // journey a delegate takes it on -- USD attribute, scene index,
+        // MaterialX document, the compiled material's slot -- and it used not
+        // to: `HdMaterialNode2::parameters` is values and nothing else, so
+        // every texture was read raw and an 8-bit sRGB marble came out pale.
+        const auto linearOf = [](float value) {
+            return value <= 0.04045F ? value / 12.92F : std::pow((value + 0.055F) / 1.055F, 2.4F);
+        };
+        const std::array<float, 3> linearised{linearOf(textureColour[0]), linearOf(textureColour[1]),
+                                              linearOf(textureColour[2])};
+        const auto shadeWith = [&](const char* space, const char* name) {
+            const fs::path path = scratch(name);
+            {
+                std::ofstream out(path);
+                out << kSquareStage
+                    << "def Scope \"Materials\"\n{\n"
+                       "    def Material \"Mat\"\n    {\n"
+                       "        token outputs:mtlx:surface.connect = </Materials/Mat/Surface.outputs:out>\n"
+                       "        def Shader \"Surface\"\n        {\n"
+                       "            uniform token info:id = \"ND_surface\"\n"
+                       "            token inputs:bsdf.connect = </Materials/Mat/Diffuse.outputs:out>\n"
+                       "            token outputs:out\n        }\n"
+                       "        def Shader \"Diffuse\"\n        {\n"
+                       "            uniform token info:id = \"ND_oren_nayar_diffuse_bsdf\"\n"
+                       "            color3f inputs:color.connect = </Materials/Mat/Texture.outputs:out>\n"
+                       "            token outputs:out\n        }\n"
+                       "        def Shader \"Texture\"\n        {\n"
+                       "            uniform token info:id = \"ND_image_color3\"\n"
+                       "            asset inputs:file = @" << png.string() << "@ ( colorSpace = \"" << space
+                    << "\" )\n"
+                       "            color3f outputs:out\n        }\n    }\n}\n";
+            }
+            auto renderer = usd::StageRenderer::open(path);
+            if (!renderer) FAIL(renderer.error().toString());
+            auto image = (*renderer)->render("/Camera", 0.0, 160, 120);
+            if (!image) FAIL(image.error().toString());
+            return std::move(*image);
+        };
+        const auto srgb = shadeWith("srgb_texture", "material_srgb.usda");
+        const auto raw = shadeWith("lin_rec709", "material_raw.usda");
+        const float* srgbCentre = srgb.rgba.data() + (60 * 160 + 80) * 4;
+        const float* rawCentre = raw.rgba.data() + (60 * 160 + 80) * 4;
+        // Two claims, and the kernel carries the one it can carry exactly:
+        // every pixel of the square is the same colour as its centre (the
+        // check's tolerance is 1e-5, which a colour computed on the host with
+        // `pow` would not survive), and that centre is the texture's values
+        // put through the sRGB curve.
+        const auto wrongSrgb =
+            squareMismatches(*gpu, srgb, {srgbCentre[0], srgbCentre[1], srgbCentre[2]});
+        const auto wrongRaw = squareMismatches(*gpu, raw, textureColour);
+        std::printf("  srgb_texture: centre %.4f %.4f %.4f (linearised %.4f %.4f %.4f); "
+                    "lin_rec709: centre %.4f %.4f %.4f (as held %.4f %.4f %.4f)\n",
+                    double(srgbCentre[0]), double(srgbCentre[1]), double(srgbCentre[2]), double(linearised[0]),
+                    double(linearised[1]), double(linearised[2]), double(rawCentre[0]), double(rawCentre[1]),
+                    double(rawCentre[2]), double(textureColour[0]), double(textureColour[1]),
+                    double(textureColour[2]));
+        CHECK(wrongSrgb[2] > 800);
+        CHECK(wrongSrgb[0] == 0);
+        CHECK(wrongSrgb[1] == 0);
+        CHECK(wrongRaw[0] == 0);
+        CHECK(wrongRaw[1] == 0);
+        for (size_t k = 0; k < 3; ++k) {
+            CHECK(srgbCentre[k] == Catch::Approx(linearised[k]).epsilon(0.005));
+            CHECK(rawCentre[k] == Catch::Approx(textureColour[k]).epsilon(0.005));
+        }
     }
     SECTION("UsdPreviewSurface with a UsdUVTexture read through UsdPrimvarReader") {
         const fs::path path = scratch("material_preview_texture.usda");

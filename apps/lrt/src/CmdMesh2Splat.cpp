@@ -98,6 +98,7 @@ struct Options {
     bool                     noTextures = false;
     bool                     normalMapTurns = false;
     bool                     addCamera = true;
+    bool                     baked = false;
     std::vector<std::string> paths;
 };
 
@@ -562,6 +563,9 @@ void addMesh2Splat(CLI::App& app) {
     cmd->add_flag("--normal-map-turns", o->normalMapTurns,
                   "orient each gaussian by the normal map rather than the surface");
     cmd->add_flag("!--no-camera", o->addCamera, "do not add a camera framing the cloud");
+    cmd->add_flag("--baked", o->baked,
+                  "show the colours as they are instead of lighting them: the cloud carries an albedo, "
+                  "so it is relit by the scene's lights unless this says otherwise");
     cmd->add_option("--path", o->paths, "extra AOFX bundle directories");
     cmd->callback([o] {
         gpu_host::Context* context = gpu_host::installProcessContext();
@@ -613,6 +617,9 @@ void addMesh2Splat(CLI::App& app) {
             usd::ExportOptions options;
             options.maxDegree = 0;
             options.addCamera = o->addCamera;
+            // What comes out of a conversion is an albedo the scene is to
+            // light, not a capture carrying its own light.
+            options.relight = !o->baked;
             return usd::writeParticleFieldStage(library, *raw, o->output, options);
         };
         auto ran = context->run([&] { inside = work(); });

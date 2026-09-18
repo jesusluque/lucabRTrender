@@ -924,6 +924,20 @@ Result<void> Engine::prepareMaterials(const std::vector<std::string>& aovPrimvar
         const std::vector<float> words = material::MaterialCompiler::parameters(
             *entry.compiled, *textures_, [&](const std::string& name) { return scene_->slotOf(name); });
         materialRows_[id] = static_cast<uint32_t>(rows.size());
+        {
+            std::string files;
+            for (const material::MaterialSlot& slot : entry.compiled->slots) {
+                if (slot.kind == material::MaterialSlot::Kind::Texture && !slot.name.empty()) {
+                    const char* space = slot.space == material::ColourSpace::Srgb   ? " srgb"
+                                        : slot.space == material::ColourSpace::Raw ? " raw"
+                                                                                   : " auto";
+                    files += (files.empty() ? "" : ", ") + std::filesystem::path(slot.name).filename().string() +
+                             space;
+                }
+            }
+            log::debug("hdLrt: material {} row {} module {} [{}]", id.GetString(), rows.size(),
+                       entry.compiled->module, files);
+        }
         const uint32_t flags = entry.cutout ? technique::kMaterialCutout : 0u;
         materialCutouts_ = materialCutouts_ || entry.cutout;
         rows.push_back({function, static_cast<uint32_t>(blob.size()), flags, 0});

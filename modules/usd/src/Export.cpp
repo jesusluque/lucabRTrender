@@ -139,6 +139,15 @@ Result<void> writeParticleFieldStage(gpu::ShaderLibrary& library, const io::RawS
             GfVec3f(static_cast<float>(options.rotateXDegrees), 0.0F, 0.0F));
     }
 
+    if (options.relight) {
+        // The cloud's colours are an albedo, not radiance: a mesh's material
+        // said what the surface reflects, and nothing has lit it yet. The
+        // scene's lights do that (LrtSplatLightingAPI), which is what makes a
+        // converted mesh sit under the same lights the mesh would have.
+        static const TfToken kRelight("primvars:lrt:splat:relight");
+        splats.GetPrim().CreateAttribute(kRelight, SdfValueTypeNames->Bool, true).Set(true);
+    }
+
     if (options.addCamera) {
         // The centre where the cloud is drawn: turned with it about x.
         GfVec3d centre = (lo + hi) * 0.5;

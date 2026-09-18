@@ -5,6 +5,12 @@
 #include <set>
 
 #include <MaterialXCore/Document.h>
+#include <MaterialXCore/Node.h>
+#include <pxr/imaging/hd/materialNetworkSchema.h>
+#include <pxr/imaging/hd/materialNodeParameterSchema.h>
+#include <pxr/imaging/hd/materialNodeSchema.h>
+#include <pxr/imaging/hd/materialSchema.h>
+#include <pxr/imaging/hd/sceneIndex.h>
 #include <pxr/imaging/hd/sceneDelegate.h>
 #include <pxr/usd/sdf/assetPath.h>
 #include <pxr/imaging/hdMtlx/hdMtlx.h>
@@ -98,6 +104,102 @@ void matchDeclaredTypes(const MaterialX::DocumentPtr& document) {
                 // (vector3f, point3f, normal3f) reaches it as a string of its
                 // numbers: the declared type reads the same text.
                 input->setType(declared->getType());
+            }
+        }
+    }
+}
+
+/// What MaterialX calls the colour space USD named, or empty for one this
+/// does not know.
+std::string mtlxColourSpace(const TfToken& usd) {
+    const std::string& name = usd.GetString();
+    if (name == "sRGB" || name == "srgb_texture" || name == "srgb_rec709" || name == "sRGB - Texture") {
+        return "srgb_texture";
+    }
+    if (name == "raw" || name == "Raw" || name == "lin_rec709" || name == "linear") {
+        return "lin_rec709";
+    }
+    if (name == "auto") {
+        return "auto";   // not MaterialX's: read by MaterialCompiler, and by nothing else
+    }
+    return {};
+}
+
+/// The node named `name`, wherever it sits in the document.
+MaterialX::NodePtr nodeNamed(const MaterialX::DocumentPtr& doc, const std::string& name) {
+    if (const MaterialX::NodePtr direct = doc->getNode(name)) {
+        return direct;
+    }
+    for (const MaterialX::NodeGraphPtr& graph : doc->getNodeGraphs()) {
+        if (const MaterialX::NodePtr found = graph->getNode(name)) {
+            return found;
+        }
+    }
+    return nullptr;
+}
+
+/// Puts back the colour space a material network drops.
+///
+/// WHY THIS IS NEEDED AT ALL
+///
+/// `HdMaterialNode2::parameters` is a map of names to values and nothing else,
+/// so USD's `colorSpace` metadata on `inputs:file` -- and a UsdUVTexture's
+/// `sourceColorSpace`, which usdImaging folds into the same place -- is gone by
+/// the time a delegate reads `GetMaterialResource`. hdMtlx therefore writes a
+/// document whose file inputs say nothing about their colour space, and
+/// `MaterialCompiler` reads every texture raw: the chess set's black marble
+/// came out pale grey, because 8-bit sRGB values were taken for linear ones.
+///
+/// It survives in the scene index, which is where a Hydra 2.0 delegate should
+/// be reading materials in the first place (`HdMaterialNodeParameterSchema`
+/// carries it beside the value). So the network is read for its values, as
+/// before, and the scene index for this one thing, which is then written onto
+/// the MaterialX input the document ended up with. Nothing is transformed
+/// here: `material::MaterialCompiler` reads the attribute and `TextureStore`
+/// does the decode on the device.
+void applyColourSpaces(HdSceneDelegate* sceneDelegate, const SdfPath& id,
+                       const MaterialX::DocumentPtr& doc) {
+    const HdSceneIndexBaseRefPtr index = sceneDelegate->GetRenderIndex().GetTerminalSceneIndex();
+    if (!index) {
+        return;
+    }
+    const HdSceneIndexPrim prim = index->GetPrim(id);
+    if (!prim.dataSource) {
+        return;
+    }
+    const HdMaterialSchema material = HdMaterialSchema::GetFromParent(prim.dataSource);
+    if (!material.IsDefined()) {
+        return;
+    }
+    for (const TfToken& context : {TfToken("mtlx"), TfToken()}) {
+        const HdMaterialNetworkSchema network = material.GetMaterialNetwork(context);
+        if (!network.IsDefined()) {
+            continue;
+        }
+        const HdMaterialNodeContainerSchema nodes = network.GetNodes();
+        for (const TfToken& nodeName : nodes.GetNames()) {
+            const HdMaterialNodeSchema node = nodes.Get(nodeName);
+            if (!node.IsDefined()) {
+                continue;
+            }
+            const MaterialX::NodePtr mxNode =
+                nodeNamed(doc, HdMtlxCreateNameFromPath(SdfPath(nodeName.GetString())));
+            if (!mxNode) {
+                continue;
+            }
+            const HdMaterialNodeParameterContainerSchema parameters = node.GetParameters();
+            for (const TfToken& parameterName : parameters.GetNames()) {
+                const HdMaterialNodeParameterSchema parameter = parameters.Get(parameterName);
+                const HdTokenDataSourceHandle space = parameter.IsDefined() ? parameter.GetColorSpace()
+                                                                            : HdTokenDataSourceHandle();
+                if (!space) {
+                    continue;
+                }
+                const std::string mtlx = mtlxColourSpace(space->GetTypedValue(0.0F));
+                MaterialX::InputPtr input = mtlx.empty() ? nullptr : mxNode->getInput(parameterName.GetString());
+                if (input) {
+                    input->setColorSpace(mtlx);
+                }
             }
         }
     }
@@ -212,6 +314,7 @@ void HdLrtMaterial::Sync(HdSceneDelegate* sceneDelegate, HdRenderParam* renderPa
                     MaterialX::DocumentPtr mtlx = HdMtlxCreateMtlxDocumentFromHdNetwork(
                         network, surface->second, surfacePath, id, HdMtlxStdLibraries(), &data);
                     matchDeclaredTypes(mtlx);
+                    applyColourSpaces(sceneDelegate, id, mtlx);
                     document = mtlx;
                 } catch (const std::exception& e) {
                     lrt::log::warn("hdLrt: material {}: {}", id.GetString(), e.what());

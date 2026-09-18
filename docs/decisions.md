@@ -4225,3 +4225,56 @@ record and leaves them out; they arrive when the per-gaussian PBR carrier
 does. A mesh whose `GeomSubset`s bind different materials is converted as one
 material, the one bound to the mesh. Nothing here is built or checked on
 Linux yet, so CUDA is unverified.
+
+## A texture's colour space, which a material network drops
+
+Two renders of the same chess pawn disagreed: the mesh showed pale grey marble
+where the cloud converted from it showed the black marble the asset is made of.
+The cloud was right.
+
+**What was happening.** `HdMaterialNode2::parameters` is a map of names to
+values and nothing else. USD carries a texture's colour space beside the value
+-- as `colorSpace` metadata on `inputs:file`, or as a UsdUVTexture's
+`sourceColorSpace`, which usdImaging folds into the same place -- and all of it
+is gone by the time a delegate reads `GetMaterialResource()`. So hdMtlx wrote a
+document whose file inputs said nothing, `MaterialCompiler` read every texture
+**raw**, and an 8-bit sRGB base colour was taken for linear: 0.2 became 0.2
+where it should have been 0.033. Dark textures came out pale and washed; light
+ones came out flat. Every asset with an sRGB base colour was affected, which is
+every asset.
+
+**Where it survives**, and where a Hydra 2.0 delegate should have been reading
+it: the scene index. `HdMaterialNodeParameterSchema` carries `colorSpace`
+beside the value, and `UsdImagingDataSourceAttributeColorSpace` is what fills
+it -- including the `sourceColorSpace` consolidation. So `HdLrtMaterial::Sync`
+reads the network for its values as before and the terminal scene index for
+this one thing, and writes it onto the MaterialX input the document ended up
+with (`applyColourSpaces`, matching nodes by `HdMtlxCreateNameFromPath`).
+
+**And a second half, in the compiler.** A MaterialX shader port does not carry
+the colour space its document input had: MaterialX puts one there for a colour
+management system to act on, and this generator registers none -- the decode is
+`TextureStore`'s, on the device, where the texture already is. So
+`compileDocument` now reads the document itself before generating (every
+`filename` input's `getActiveColorSpace()`, which falls back to the document's
+own), keyed by the path, and a file input whose port says nothing takes its
+answer from there. `auto` is passed through as a colour space of its own, which
+is not MaterialX's: it means the file decides, which is what USD's
+`sourceColorSpace = auto` says and what `ColourSpace::Auto` already did.
+
+**Measured** (`tests/usd/test_usd.cpp`, "a file's colour space reaches the
+decode"): one 8-bit picture read twice through a MaterialX `image` node. With
+`colorSpace = "srgb_texture"` every pixel of the square shades to
+(0.6039, 0.3184, 0.0332), the texture's (0.8, 0.6, 0.2) through the sRGB curve
+(0.6038, 0.3185, 0.0331) -- and every pixel equals its centre exactly, so it is
+one decode and not a gradient. With `lin_rec709` it shades to the values as
+held, 0 mismatches at the check's own 1e-5.
+
+**A converted cloud is relit.** The other half of the pawns' difference was
+not a defect: a cloud out of `lrt mesh2splat` carries an albedo, not radiance
+somebody captured, so the export now writes `primvars:lrt:splat:relight = 1`
+(`ExportOptions::relight`, `lrt mesh2splat --baked` to turn it off) and the
+scene's lights light it. What is left after that is the representation itself:
+splat relighting is one diffuse sample per light with a normal a splat never
+had, so a dark glossy marble reads darker as gaussians than as a surface with
+a specular lobe. That is what the per-gaussian PBR carrier is for.
