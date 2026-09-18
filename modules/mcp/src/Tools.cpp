@@ -80,6 +80,9 @@ void applySettings(Session& session, const json& args) {
     if (args.contains("pathBounces")) r.setPathBounces(args["pathBounces"].get<uint32_t>());
     if (args.contains("pathTotal")) r.setPathTotal(args["pathTotal"].get<uint32_t>());
     if (args.contains("denoise")) r.setDenoise(args["denoise"].get<bool>());
+    if (args.contains("defaultLights")) {
+        (void)r.setDefaultLights(args["defaultLights"].get<bool>());
+    }
     if (args.contains("motionBuckets")) r.setMotionBuckets(args["motionBuckets"].get<uint32_t>());
     if (args.contains("refine")) r.setRefineLevel(args["refine"].get<uint32_t>());
     if (args.contains("visibility")) {
@@ -449,6 +452,7 @@ const std::vector<ToolEntry>& toolTable() {
                      {"pathBounces", field("integer", "rt: bounces after the first hit")},
                      {"pathTotal", field("integer", "rt: paths a pixel the image is drawn until it holds")},
                      {"denoise", field("boolean", "rt: denoise once the total is reached (OIDN)")},
+                     {"defaultLights", field("boolean", "a dome and a sun for a stage that carries no light")},
                      {"motionBuckets", field("integer", "rt: shutter slices")},
                      {"refine", field("integer", "subdivision levels")},
                      {"visibility", field("string", "how meshes are found: automatic | raster | rays | bvh")}}),

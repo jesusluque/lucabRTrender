@@ -632,14 +632,30 @@ private:
     if (raw.count == 0 || normals.size() < size_t{raw.count} * 3) {
         return Error(ErrorCode::InternalError, "bake: a normal a gaussian is what it stands on");
     }
-    // How far off the surface the ray starts: enough that it does not begin
-    // inside the triangle it is about to hit, scaled by where the model is.
-    float extent = 0.0F;
+    // How far off the surface the ray starts: far enough that it does not
+    // begin inside the triangle it is about to hit, and near enough that
+    // nothing else fits in between.
+    //
+    // It is a fraction of the MODEL, and of nothing else. Taken as a fraction
+    // of the scene's unit instead -- a thousandth, floored at one -- the
+    // chess pawn, which is 66 mm tall in a stage whose unit is a metre, began
+    // its rays a millimetre off the surface: thicker than the gold ring under
+    // the glass ball and high enough to start inside the ball, so the ray
+    // came down onto the wrong surface and the ring baked grey, the marble
+    // body's colour, where the mesh reads gold.
+    float low[3] = {raw.records[0], raw.records[1], raw.records[2]};
+    float high[3] = {low[0], low[1], low[2]};
     for (uint32_t k = 0; k < raw.count; ++k) {
         const float* record = raw.records.data() + size_t{k} * raw.encoding.floatsPerRecord;
-        extent = std::max({extent, std::abs(record[0]), std::abs(record[1]), std::abs(record[2])});
+        for (int axis = 0; axis < 3; ++axis) {
+            low[axis] = std::min(low[axis], record[axis]);
+            high[axis] = std::max(high[axis], record[axis]);
+        }
     }
-    const float step = std::max(extent, 1.0F) * 1.0e-3F;
+    const float span = std::sqrt((high[0] - low[0]) * (high[0] - low[0]) +
+                                 (high[1] - low[1]) * (high[1] - low[1]) +
+                                 (high[2] - low[2]) * (high[2] - low[2]));
+    const float step = (span > 0.0F ? span : 1.0F) * 1.0e-4F;
     std::vector<float> rays(size_t{raw.count} * 8);
     for (uint32_t k = 0; k < raw.count; ++k) {
         const float* record = raw.records.data() + size_t{k} * raw.encoding.floatsPerRecord;

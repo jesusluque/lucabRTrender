@@ -4591,3 +4591,56 @@ It was found by looking at two renders side by side and noticing the
 backgrounds did not match -- which is the only way a difference like this is
 ever found, and the reason the comparison was being made at all. Both routes
 now end the same way; the pawn's sky reads 0.600098 in each.
+
+## The bake's ray started a millimetre off the model
+
+The pawn's head has a mint glass ball standing on a ring of gold. Converted
+and baked, the ball came back dark and mottled and the ring came back **grey**
+-- and the same conversion **without** the bake, the albedo carried and relit
+every frame, came back with both right. So the conversion's colours were not
+the problem; something the bake did lost them.
+
+What it was, measured over the ring (50 by 5 pixels, both clouds and the mesh
+path traced with the same camera and the same default lights):
+
+| | R | G | B | ratio |
+|---|---|---|---|---|
+| mesh | 0.225 | 0.168 | 0.086 | 1 : 0.75 : 0.38 |
+| carried and relit | 0.452 | 0.334 | 0.177 | 1 : 0.74 : 0.39 |
+| baked, before | 0.298 | 0.289 | 0.264 | 1 : 0.97 : 0.89 |
+| baked, after | 0.406 | 0.325 | 0.191 | 1 : 0.80 : 0.47 |
+
+The baked ring was not dark. It was **the right level with no colour in it**,
+which is a surface lit and then multiplied by the wrong albedo -- and the
+albedo it had was the marble of the body, a few millimetres below.
+
+**How far off the surface a bake ray starts is a fraction of the model, and of
+nothing else.** It was a fraction of the scene's unit instead -- a thousandth,
+floored at one -- and the chess pawn is 66 mm tall in a stage whose unit is a
+metre. So every ray began **a millimetre** above its gaussian: thicker than
+the gold ring, and high enough to start *inside* the glass ball above it. The
+ray then came down onto whatever that offset had put it in front of, which for
+the ring was the body behind it and for the ball was its own far side. The
+floor was there to keep the step from being zero for a model at the origin; it
+made the step enormous for every model smaller than a metre. It is now the
+bounding box's diagonal times 1e-4 -- 8.8 µm on this pawn.
+
+**And a bake is not a frame, so it has no camera hit to cache.** The tracer
+shades the first vertex once a pixel and reuses it for every sample, which is
+right when the sample only changes what happens *after* that vertex. A bake's
+samples each look at the point from a different direction, so the cached shade
+answered all 256 of them with sample zero's eye, and every harmonic above the
+constant was noise about zero. `cameraHit` is now false in a bake.
+
+**Where it lands.** The ball reads 0.198/0.304/0.266 against the mesh's
+0.222/0.333/0.306, and the ring has its gold back. What is still over is a
+factor of 1.8 on the ring, and it is not the bake's: the ring is five pixels
+tall and the gaussians that stand on it are wider than it is, so a crop that
+catches dark edges on the mesh catches gold on the cloud. The cloud that was
+never baked is over by the same factor.
+
+**And the MCP server can ask for the default lights** (`defaultLights`), which
+it could not: it drew a stage exactly as the stage stood, so the chess set --
+which carries no light of its own -- came back black on black, and no
+comparison with what `lrt view` and `lrt stage --default-lights` show was
+possible through it.

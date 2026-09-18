@@ -1383,7 +1383,11 @@ void tracePathsAt(uint2 group, uint index) {
             }
             // The one place materials are evaluated; the camera's hit once a pixel.
             const Found target = lightStep ? lightPoint : found;
-            const bool cameraHit = !lightStep && bounce == 0 && !ownRays;
+            // A bake looks at its point from a new direction every sample, so
+            // its first vertex is not the one hit a pixel shades once: cached,
+            // every sample would answer with sample zero's eye and the
+            // harmonics past the constant would come back as noise about zero.
+            const bool cameraHit = !lightStep && bounce == 0 && !ownRays && !kBake;
             Shaded shaded;
             if (cameraHit && firstShaded) {
                 shaded = first;
