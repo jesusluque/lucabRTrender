@@ -12,6 +12,7 @@
 
 #include <array>
 #include <cstdint>
+#include <cstdio>
 #include <string>
 #include <vector>
 
@@ -370,5 +371,96 @@ TEST_CASE("glass keeps its material's opacity and takes its transmission colour"
         REQUIRE(violations);
         CHECK((*violations)[3] == 0);   // the transmission colour, multiplied in
         CHECK((*violations)[4] == 0);   // and the opacity the material gave it
+    }));
+}
+
+// THE SAME MESH MUST GIVE THE SAME ARRAY, not the same set in another order.
+//
+// The slot used to be taken with an atomic and the shader said so: "the order
+// of the output is nobody's business". Two conversions of the chess pawn then
+// wrote files that differed from the thousandth byte, which is fine for one
+// still frame and impossible for a sequence -- a gaussian is followed from one
+// pose to the next by being the same element. Counting each triangle's cells,
+// settling where each triangle starts, and then writing at that offset makes
+// the order the mesh's own.
+TEST_CASE("two conversions of one mesh write the same array, bit for bit", "[aofx][mesh2splat]") {
+    gpu_host::Context* gpu = gpu_host::installProcessContext();
+    if (gpu == nullptr || gpu->compute() == nullptr) {
+        SKIP("no gpe device");
+    }
+    aofx_host::EffectRegistry registry;
+    aofx::Effect* effect = conversion(registry, gpu);
+    if (effect == nullptr) {
+        SKIP("the Mesh2Splat bundle is not built here");
+    }
+    gpu::ShaderLibrary library(gpu->deviceShared());
+
+    REQUIRE(gpu->run([&] {
+        auto quad = gpu::ComputeKernel::create(library, "lrt/test/mesh2splat_check", "m2sQuad");
+        auto compare = gpu::ComputeKernel::create(library, "lrt/test/mesh2splat_compare", "m2sCompare");
+        REQUIRE(quad);
+        REQUIRE(compare);
+
+        constexpr uint32_t kMeshWidth = 64;
+        const image::ImagePtr mesh = pictureOf(kMeshWidth, 1);
+        const gpu::Buffer meshView = viewOf(*gpu, mesh);
+        const uint32_t budget = kResolution * kResolution * 2;
+        gpu::CommandBatch batch(library.device());
+        quad->dispatch(batch, {1, 1, 1}, [&](rhi::ShaderCursor cursor) {
+            cursor["mesh"].setBinding(meshView.rhi());
+            cursor["albedo"].setBinding(meshView.rhi());
+            cursor["records"].setBinding(meshView.rhi());
+            cursor["counts"].setBinding(meshView.rhi());
+            cursor["params"]["meshWidth"].setData(kMeshWidth);
+            cursor["params"]["meshStride"].setData(static_cast<uint32_t>(mesh->stride()));
+        });
+        REQUIRE(batch.submit(true));
+        mesh->deviceWrote();
+        mesh->attach("bounds", {0.0F, 0.0F, 0.0F, 1.0F, 1.0F, 0.0F});
+
+        const auto convert = [&]() -> image::ImagePtr {
+            const image::ImagePtr records = pictureOf(static_cast<int32_t>(budget * 4), 1);
+            aofx_host::EffectJob job;
+            job.bounds = records->bounds();
+            job.inputs.push_back({"Mesh", mesh});
+            number(job, "triangles", 2);
+            number(job, "resolution", kResolution);
+            number(job, "maxSplats", budget);
+            number(job, "flatness", kFlatness);
+            number(job, "opacity", 1.0);
+            number(job, "writePbr", 0.0);
+            job.params.push_back(aofx::ParamValue{"sigma", {kSigma, kSigma}, {}});
+            auto rendered = aofx_host::renderEffect(*gpu, *effect, job);
+            return rendered ? *rendered : image::ImagePtr{};
+        };
+        const image::ImagePtr one = convert();
+        const image::ImagePtr two = convert();
+        REQUIRE(one);
+        REQUIRE(two);
+
+        const gpu::Buffer viewOne = viewOf(*gpu, one);
+        const gpu::Buffer viewTwo = viewOf(*gpu, two);
+        gpu::BufferDesc desc;
+        desc.bytes = 8 * 4;
+        desc.elementBytes = 4;
+        desc.label = "compare.counts";
+        auto counts = gpu::Buffer::create(library.device(), desc);
+        REQUIRE(counts);
+        const auto entries = static_cast<uint32_t>(kResolution * kResolution * 4);
+        gpu::CommandBatch second(library.device());
+        compare->dispatch(second, {entries, 1, 1}, [&](rhi::ShaderCursor cursor) {
+            cursor["first"].setBinding(viewOne.rhi());
+            cursor["second"].setBinding(viewTwo.rhi());
+            cursor["counts"].setBinding(counts->rhi());
+            cursor["params"]["entries"].setData(entries);
+            cursor["params"]["width"].setData(static_cast<uint32_t>(one->bounds().width()));
+            cursor["params"]["stride"].setData(static_cast<uint32_t>(one->stride()));
+        });
+        REQUIRE(second.submit(true));
+        uint32_t seen[2] = {0, 0};
+        REQUIRE(counts->read(library.device(), 0, sizeof(seen), seen));
+        std::printf("  %u entries compared, %u differ\n", seen[0], seen[1]);
+        CHECK(seen[0] == entries);
+        CHECK(seen[1] == 0);
     }));
 }

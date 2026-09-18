@@ -16,6 +16,7 @@
 #include <pxr/usd/usdGeom/xformCommonAPI.h>
 #include <pxr/usd/usdVol/particleField3DGaussianSplat.h>
 
+#include "lrt/core/Log.h"
 #include "lrt/gpu/Buffer.h"
 #include "lrt/gpu/CommandBatch.h"
 #include "lrt/gpu/ComputeKernel.h"
@@ -67,6 +68,7 @@ Result<void> writeParticleFieldStage(gpu::ShaderLibrary& library, const io::RawS
     positions.reserve(raw.count);
     const uint32_t perRecord = 1 + keep;
     GfVec3d lo(1e30), hi(-1e30);
+    uint32_t empty = 0;   ///< slots kept that hold no splat
 
     // Slices, as the loader does, so a very large cloud still fits a buffer.
     const uint64_t recordBytes = uint64_t{e.floatsPerRecord} * 4;
@@ -101,9 +103,11 @@ Result<void> writeParticleFieldStage(gpu::ShaderLibrary& library, const io::RawS
             return Error(ErrorCode::DeviceFailure, "cannot read export values back");
         }
         for (uint32_t i = 0; i < n; ++i) {
-            if ((*sv)[size_t{i} * 4 + 3] < 0.5F) {
-                continue;
-            }
+            // Every slot is written, whether or not there is a splat in it
+            // (splat_export.slang says why). What an empty one does not do is
+            // stretch the cloud's extent to wherever it stands.
+            const bool there = (*sv)[size_t{i} * 4 + 3] >= 0.5F;
+            empty += there ? 0u : 1u;
             const float* pp = po->data() + size_t{i} * 4;
             const float* rr = ro->data() + size_t{i} * 4;
             const float* ss = sv->data() + size_t{i} * 4;
@@ -124,14 +128,22 @@ Result<void> writeParticleFieldStage(gpu::ShaderLibrary& library, const io::RawS
                 transmissions.push_back(
                     e.transmission != io::SplatEncoding::kNoField ? record[e.transmission] : 0.0F);
             }
-            for (int axis = 0; axis < 3; ++axis) {
-                lo[axis] = std::min(lo[axis], static_cast<double>(pp[axis]));
-                hi[axis] = std::max(hi[axis], static_cast<double>(pp[axis]));
+            if (there) {
+                for (int axis = 0; axis < 3; ++axis) {
+                    lo[axis] = std::min(lo[axis], static_cast<double>(pp[axis]));
+                    hi[axis] = std::max(hi[axis], static_cast<double>(pp[axis]));
+                }
             }
         }
     }
     if (positions.empty()) {
         return Error(ErrorCode::InvalidArgument, "no splat survived export");
+    }
+    if (empty == raw.count) {
+        return Error(ErrorCode::InvalidArgument, "no splat survived export");
+    }
+    if (empty > 0) {
+        log::info("export: {} of {} slots hold no splat and are written empty", empty, raw.count);
     }
 
     UsdStageRefPtr stage = UsdStage::CreateNew(path.string());

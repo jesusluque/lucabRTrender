@@ -73,10 +73,10 @@ struct M2sParams {
     float4 materialColour;    // multiplied into the albedo; w unused
     float4 transmissionColour;
 
-    float pad0;           // was minOpacity, which the renderer decides instead
+    uint  countWidth;     // the per-triangle cell counts, one uint a triangle
     float metallic;       // the material's own, multiplied into the map where there is one
     float roughness;
-    uint  pad1;
+    uint  countStride;
 
     uint  hasAlbedo;
     uint  albedoWidth;
@@ -99,6 +99,7 @@ StructuredBuffer<float4>   albedo;
 StructuredBuffer<float4>   normalMap;
 StructuredBuffer<float4>   metallicRoughness;
 RWStructuredBuffer<uint>   counters;    // [wanted, written, degenerate, dropped]
+RWStructuredBuffer<uint>   cellCounts;  // a triangle's covered cells, then where they start
 RWStructuredBuffer<float4> records;     // the output plane
 ConstantBuffer<M2sParams>  params;
 
@@ -125,6 +126,15 @@ uint recordAt(uint slot, uint component) {
     const uint x = entry % params.dstWidth;
     const uint y = entry / params.dstWidth;
     return y * params.dstStride + x;
+}
+
+/// A triangle's entry in the cell-count picture. Four to a pixel, addressed
+/// the way every other picture here is.
+uint countAt(uint triangle) {
+    const uint pixel = triangle / 4;
+    const uint x = pixel % max(params.countWidth, 1u);
+    const uint y = pixel / max(params.countWidth, 1u);
+    return (y * params.countStride + x) * 4 + (triangle % 4);
 }
 
 float4 meshEntry(uint index) {
@@ -203,6 +213,222 @@ float2 orthogonalUv(float3 p, uint2 axes, float range) {
     return float2((axisOf(p, axes.x) - axisOf(params.boundsMin.xyz, axes.x)) / range,
                   (axisOf(p, axes.y) - axisOf(params.boundsMin.xyz, axes.y)) / range);
 }
+/// EVERYTHING A TRIANGLE DECIDES FOR EVERY GAUSSIAN THAT STANDS ON IT,
+/// worked out in one place so that the pass that counts and the pass that
+/// writes cannot disagree about a single bit.
+///
+/// Why there are two passes at all: the slot used to be taken with
+/// `InterlockedAdd`, and this file said so -- "the order of the output is
+/// nobody's business". Two runs over the same mesh gave the same gaussians in
+/// a different order, so "gaussian `i` is the same gaussian" was false before
+/// any animation was in the picture. Counting first and then writing at
+/// `where this triangle starts + k` makes the order the mesh's own, which is
+/// what lets a gaussian be followed from one frame to the next -- and it is
+/// also what makes a budget too small keep the *first* splats rather than
+/// whichever ones won a race.
+struct M2sTriangle {
+    bool   valid;          ///< a plane, and a Jacobian over its projection
+    float4 p0, n0, p1, n1, p2, n2;
+    float3 a, b, c;
+    float3 geometric;
+    float3 tangent;
+    float3 scale;
+    float2 oa;
+    float2 edge1, edge2;
+    float  inverseTwice;
+    float  cell;
+    int2   first;
+    uint2  span;
+    uint   cells;          ///< walked, after the per-triangle bound
+    uint   beyond;         ///< what that bound left out
+};
+
+M2sTriangle m2sTriangleOf(uint triangle) {
+    M2sTriangle t;
+    t.valid = false;
+    t.beyond = 0;
+    t.cells = 0;
+    t.span = uint2(1, 1);
+    t.first = int2(0, 0);
+    t.cell = 1.0;
+    t.oa = float2(0.0);
+    t.edge1 = float2(0.0);
+    t.edge2 = float2(0.0);
+    t.inverseTwice = 0.0;
+    t.geometric = float3(0.0, 0.0, 1.0);
+    t.tangent = float3(1.0, 0.0, 0.0);
+    t.scale = float3(0.0);
+
+    const uint base = triangle * 6;
+    t.p0 = meshEntry(base + 0);
+    t.n0 = meshEntry(base + 1);
+    t.p1 = meshEntry(base + 2);
+    t.n1 = meshEntry(base + 3);
+    t.p2 = meshEntry(base + 4);
+    t.n2 = meshEntry(base + 5);
+
+    t.a = t.p0.xyz;
+    t.b = t.p1.xyz;
+    t.c = t.p2.xyz;
+    const float3 e1 = t.b - t.a;
+    const float3 e2 = t.c - t.a;
+    const float3 crossed = cross(e1, e2);
+    const float area2 = length(crossed);
+    if (!(area2 > 1.0e-20)) {
+        return t;   // no plane, no frame, nothing to place
+    }
+    t.geometric = crossed / area2;
+
+    // THE PLANE THE TRIANGLE IS DRAWN IN, which is their triplanar choice:
+    // the two axes its normal points along least, the position in them taken
+    // relative to the model's box and divided by the wider of the two ranges.
+    // That is their `orthogonalUvs`, and it is what their render target
+    // rasterises -- so a cell of it is `range / resolution` of the world.
+    const uint2 axes = projectionAxes(t.geometric);
+    const float rangeU = axisOf(params.boundsExtent.xyz, axes.x);
+    const float rangeV = axisOf(params.boundsExtent.xyz, axes.y);
+    const float range = max(max(rangeU, rangeV), 1.0e-20);
+    t.oa = orthogonalUv(t.a, axes, range);
+    const float2 ob = orthogonalUv(t.b, axes, range);
+    const float2 oc = orthogonalUv(t.c, axes, range);
+
+    // The Jacobian of THAT map to space -- `J = V (O)^-1`, their
+    // `computeUv3DJacobian` over `orthogonalUvs` and not over the texture's
+    // coordinates. Its columns are how far a step of one unit of the
+    // projection moves in the world; a step of one cell is that over the
+    // resolution, and a gaussian is `sigma` of one cell.
+    const float2 duv1 = ob - t.oa;
+    const float2 duv2 = oc - t.oa;
+    const float determinant = duv1.x * duv2.y - duv2.x * duv1.y;
+    if (!(abs(determinant) > 1.0e-24)) {
+        return t;   // edge on to its own projection: no cell of it is covered
+    }
+    const float inverse = 1.0 / determinant;
+    const float3 ju = (e1 * duv2.y - e2 * duv1.y) * inverse;
+    const float3 jv = (e2 * duv1.x - e1 * duv2.x) * inverse;
+    const float perCell = 1.0 / float(max(params.resolution, 1u));
+    t.scale = float3(length(ju) * params.sigmaX * perCell,
+                     length(jv) * params.sigmaY * perCell, params.flatness);
+
+    // THE FRAME every gaussian of this triangle shares, and theirs: along the
+    // triangle's longest edge, with the surface normal as the short axis and
+    // the third made square to both. Not along the Jacobian's columns -- the
+    // gaussian is a disc in the triangle's plane however that plane was
+    // parametrised.
+    float3 longest = e1;
+    const float3 e3 = t.c - t.b;
+    if (dot(e2, e2) > dot(e1, e1) && dot(e2, e2) > dot(e3, e3)) {
+        longest = e2;
+    } else if (dot(e3, e3) > dot(e1, e1) && dot(e3, e3) > dot(e2, e2)) {
+        longest = e3;
+    }
+    t.tangent = normalize(longest);
+
+    // The barycentric solve, in the plane the triangle is walked in.
+    t.edge1 = ob - t.oa;
+    t.edge2 = oc - t.oa;
+    const float twice = t.edge1.x * t.edge2.y - t.edge2.x * t.edge1.y;
+    t.inverseTwice = 1.0 / twice;
+    const float2 lowest = min(t.oa, min(ob, oc));
+    const float2 highest = max(t.oa, max(ob, oc));
+    t.cell = perCell;
+    t.first = int2(floor(lowest / t.cell));
+    const int2 last = int2(floor(highest / t.cell));
+    t.span = uint2(max(last.x - t.first.x + 1, 1), max(last.y - t.first.y + 1, 1));
+    const uint wanted = t.span.x * t.span.y;
+    t.cells = min(wanted, max(params.maxCells, 1u));
+    t.beyond = wanted > params.maxCells ? wanted - params.maxCells : 0u;
+    t.valid = true;
+    return t;
+}
+
+/// The k-th cell of a triangle's walk: where it is in barycentric
+/// coordinates, and whether its centre is inside the triangle at all.
+bool m2sCellInside(M2sTriangle t, uint k, out float3 bary) {
+    const uint cx = k % t.span.x;
+    const uint cy = k / t.span.x;
+    const float2 at = (float2(float(t.first.x + int(cx)), float(t.first.y + int(cy))) + 0.5) * t.cell;
+    const float2 relative = at - t.oa;
+    const float beta = (relative.x * t.edge2.y - t.edge2.x * relative.y) * t.inverseTwice;
+    const float gamma = (t.edge1.x * relative.y - relative.x * t.edge1.y) * t.inverseTwice;
+    const float alpha = 1.0 - beta - gamma;
+    bary = float3(alpha, beta, gamma);
+    return !(alpha < 0.0 || beta < 0.0 || gamma < 0.0);
+}
+
+/// How many gaussians this triangle stands, one thread a triangle.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void m2sCount(uint3 tid: SV_DispatchThreadID) {
+    const uint triangle = tid.x;
+    if (triangle >= params.triangles) {
+        return;
+    }
+    const M2sTriangle t = m2sTriangleOf(triangle);
+    if (!t.valid) {
+        InterlockedAdd(counters[2], 1u);
+        cellCounts[countAt(triangle)] = 0;
+        return;
+    }
+    if (t.beyond > 0) {
+        InterlockedAdd(counters[3], t.beyond);
+    }
+    uint inside = 0;
+    for (uint k = 0; k < t.cells; ++k) {
+        float3 bary;
+        if (m2sCellInside(t, k, bary)) {
+            ++inside;
+        }
+    }
+    cellCounts[countAt(triangle)] = inside;
+}
+
+/// Where each triangle's gaussians start: the exclusive running sum of the
+/// counts, written back over them.
+///
+/// One workgroup, three phases: each thread adds up a slice, thread zero runs
+/// the two hundred and fifty six slice totals into a running sum, and each
+/// thread walks its slice again laying its own running sum down. A serial
+/// scan over the whole mesh in one thread was the other option and is what
+/// this avoids: the pawn has 42892 triangles and the fox will have more.
+static const uint kScanThreads = 256;
+groupshared uint gScanPartial[kScanThreads];
+
+[shader("compute")]
+[numthreads(256, 1, 1)]
+void m2sScan(uint3 gid: SV_GroupThreadID) {
+    const uint thread = gid.x;
+    const uint total = params.triangles;
+    const uint slice = (total + kScanThreads - 1) / kScanThreads;
+    const uint from = min(thread * slice, total);
+    const uint to = min(from + slice, total);
+
+    uint sum = 0;
+    for (uint i = from; i < to; ++i) {
+        sum += cellCounts[countAt(i)];
+    }
+    gScanPartial[thread] = sum;
+    GroupMemoryBarrierWithGroupSync();
+
+    if (thread == 0) {
+        uint running = 0;
+        for (uint t = 0; t < kScanThreads; ++t) {
+            const uint here = gScanPartial[t];
+            gScanPartial[t] = running;
+            running += here;
+        }
+        counters[0] = running;                              // wanted
+        counters[1] = min(running, params.maxSplats);       // written
+    }
+    GroupMemoryBarrierWithGroupSync();
+
+    uint running = gScanPartial[thread];
+    for (uint i = from; i < to; ++i) {
+        const uint here = cellCounts[countAt(i)];
+        cellCounts[countAt(i)] = running;
+        running += here;
+    }
+}
 
 [shader("compute")]
 [numthreads(64, 1, 1)]
@@ -211,100 +437,39 @@ void m2sEmit(uint3 tid: SV_DispatchThreadID) {
     if (triangle >= params.triangles) {
         return;
     }
-    const uint base = triangle * 6;
-    const float4 p0 = meshEntry(base + 0);
-    const float4 n0 = meshEntry(base + 1);
-    const float4 p1 = meshEntry(base + 2);
-    const float4 n1 = meshEntry(base + 3);
-    const float4 p2 = meshEntry(base + 4);
-    const float4 n2 = meshEntry(base + 5);
-
-    const float3 a = p0.xyz;
-    const float3 b = p1.xyz;
-    const float3 c = p2.xyz;
-    const float3 e1 = b - a;
-    const float3 e2 = c - a;
-    const float3 crossed = cross(e1, e2);
-    const float area2 = length(crossed);
-    if (!(area2 > 1.0e-20)) {
-        InterlockedAdd(counters[2], 1u);
-        return;   // no plane, no frame, nothing to place
+    const M2sTriangle t = m2sTriangleOf(triangle);
+    if (!t.valid) {
+        return;
     }
-    const float3 geometric = crossed / area2;
+    const float3 a = t.a;
+    const float3 b = t.b;
+    const float3 c = t.c;
+    const float4 p0 = t.p0;
+    const float4 n0 = t.n0;
+    const float4 p1 = t.p1;
+    const float4 n1 = t.n1;
+    const float4 p2 = t.p2;
+    const float4 n2 = t.n2;
+    const float3 geometric = t.geometric;
+    const float3 tangent = t.tangent;
+    const float3 scale = t.scale;
 
-    // THE PLANE THE TRIANGLE IS DRAWN IN, which is their triplanar choice:
-    // the two axes its normal points along least, the position in them taken
-    // relative to the model's box and divided by the wider of the two ranges.
-    // That is their `orthogonalUvs`, and it is what their render target
-    // rasterises -- so a cell of it is `range / resolution` of the world.
-    const uint2 axes = projectionAxes(geometric);
-    const float rangeU = axisOf(params.boundsExtent.xyz, axes.x);
-    const float rangeV = axisOf(params.boundsExtent.xyz, axes.y);
-    const float range = max(max(rangeU, rangeV), 1.0e-20);
-    const float2 oa = orthogonalUv(a, axes, range);
-    const float2 ob = orthogonalUv(b, axes, range);
-    const float2 oc = orthogonalUv(c, axes, range);
+    // Where this triangle's gaussians go, which the scan settled. A budget
+    // too small then keeps the first of them, in the mesh's own order, and
+    // not whichever ones won a race.
+    uint slot = cellCounts[countAt(triangle)];
 
-    // The Jacobian of THAT map to space -- `J = V (O)^-1`, their
-    // `computeUv3DJacobian` over `orthogonalUvs` and not over the texture's
-    // coordinates. Its columns are how far a step of one unit of the
-    // projection moves in the world; a step of one cell is that over the
-    // resolution, and a gaussian is `sigma` of one cell.
-    const float2 duv1 = ob - oa;
-    const float2 duv2 = oc - oa;
-    const float determinant = duv1.x * duv2.y - duv2.x * duv1.y;
-    if (!(abs(determinant) > 1.0e-24)) {
-        InterlockedAdd(counters[2], 1u);
-        return;   // edge on to its own projection: no cell of it is covered
-    }
-    const float inverse = 1.0 / determinant;
-    const float3 ju = (e1 * duv2.y - e2 * duv1.y) * inverse;
-    const float3 jv = (e2 * duv1.x - e1 * duv2.x) * inverse;
-    const float perCell = 1.0 / float(max(params.resolution, 1u));
-    const float3 scale = float3(length(ju) * params.sigmaX * perCell,
-                                length(jv) * params.sigmaY * perCell, params.flatness);
-
-    // THE FRAME every gaussian of this triangle shares, and theirs: along the
-    // triangle's longest edge, with the surface normal as the short axis and
-    // the third made square to both. Not along the Jacobian's columns -- the
-    // gaussian is a disc in the triangle's plane however that plane was
-    // parametrised.
-    float3 longest = e1;
-    const float3 e3 = c - b;
-    if (dot(e2, e2) > dot(e1, e1) && dot(e2, e2) > dot(e3, e3)) {
-        longest = e2;
-    } else if (dot(e3, e3) > dot(e1, e1) && dot(e3, e3) > dot(e2, e2)) {
-        longest = e3;
-    }
-    const float3 tangent = normalize(longest);
-
-    // The barycentric solve, in the plane the triangle is walked in.
-    const float2 edge1 = ob - oa;
-    const float2 edge2 = oc - oa;
-    const float twice = edge1.x * edge2.y - edge2.x * edge1.y;
-    const float inverseTwice = 1.0 / twice;
-    const float2 lowest = min(oa, min(ob, oc));
-    const float2 highest = max(oa, max(ob, oc));
-    const float cell = perCell;
-    const int2 first = int2(floor(lowest / cell));
-    const int2 last = int2(floor(highest / cell));
-    const uint2 span = uint2(max(last.x - first.x + 1, 1), max(last.y - first.y + 1, 1));
-    const uint cells = min(span.x * span.y, max(params.maxCells, 1u));
-    if (span.x * span.y > params.maxCells) {
-        InterlockedAdd(counters[3], span.x * span.y - params.maxCells);
-    }
-
-    for (uint k = 0; k < cells; ++k) {
-        const uint cx = k % span.x;
-        const uint cy = k / span.x;
-        const float2 at = (float2(float(first.x + int(cx)), float(first.y + int(cy))) + 0.5) * cell;
-        const float2 relative = at - oa;
-        const float beta = (relative.x * edge2.y - edge2.x * relative.y) * inverseTwice;
-        const float gamma = (edge1.x * relative.y - relative.x * edge1.y) * inverseTwice;
-        const float alpha = 1.0 - beta - gamma;
-        if (alpha < 0.0 || beta < 0.0 || gamma < 0.0) {
+    for (uint k = 0; k < t.cells; ++k) {
+        float3 bary;
+        if (!m2sCellInside(t, k, bary)) {
             continue;   // the cell's centre is outside this triangle
         }
+        if (slot >= params.maxSplats) {
+            return;
+        }
+        const float alpha = bary.x;
+        const float beta = bary.y;
+        const float gamma = bary.z;
         const float3 position = a * alpha + b * beta + c * gamma;
         const float2 uv = float2(p0.w, n0.w) * alpha + float2(p1.w, n1.w) * beta +
                           float2(p2.w, n2.w) * gamma;
@@ -361,18 +526,6 @@ void m2sEmit(uint3 tid: SV_DispatchThreadID) {
         alongU = normalize(alongU);
         const float3 alongV = cross(shortAxis, alongU);
         const float4 rotation = quaternionOfFrame(alongU, alongV, shortAxis);
-
-        // The slot is taken whether or not there is room for it, so that the
-        // count of what was wanted survives a budget too small -- which is
-        // what lets the host say how much room to give next time. Written is
-        // counted separately, and their `u_maxGaussians` discard is the
-        // `continue`.
-        uint slot = 0;
-        InterlockedAdd(counters[0], 1u, slot);
-        if (slot >= params.maxSplats) {
-            continue;
-        }
-        InterlockedAdd(counters[1], 1u);
         records[recordAt(slot, 0)] = float4(position, keptOpacity);
         records[recordAt(slot, 1)] = float4(scale, 0.0);
         records[recordAt(slot, 2)] = rotation;
@@ -381,5 +534,6 @@ void m2sEmit(uint3 tid: SV_DispatchThreadID) {
             records[recordAt(slot, 4)] = float4(shading, metallic);
             records[recordAt(slot, 5)] = float4(roughness, params.transmission, uv.x, uv.y);
         }
+        ++slot;
     }
 }

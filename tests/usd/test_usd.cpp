@@ -6098,3 +6098,56 @@ TEST_CASE("a Lambertian surface bakes to the same constant at every degree", "[u
         CHECK(seen[1] == 0);
     }
 }
+
+// A SLOT WITH NOTHING IN IT IS STILL A SLOT.
+//
+// The writer used to skip a record that decoded to nothing -- a scale that
+// overflowed, an opacity below a 255th -- so the file came out shorter than
+// the conversion that made it. That is harmless for one still frame and
+// impossible for a sequence: a gaussian is followed from one pose to the next
+// by being the same element of the array, and a triangle that goes degenerate
+// in one pose alone would put every later gaussian out of step in that frame
+// and in no other. The slot is kept now, written with no opacity and no size.
+TEST_CASE("a splat that decodes to nothing keeps its place in the written cloud", "[usd][gpu][export]") {
+    LRT_REQUIRE_GPU(gpu);
+    io::RawSplats raw = cloud(512);
+    // Three of them asked to be dropped: one with no opacity, one whose scale
+    // overflows, one whose position is not a number.
+    raw.records[size_t{7} * 23 + 3] = -40.0F;
+    raw.records[size_t{100} * 23 + 4] = 200.0F;
+    raw.records[size_t{300} * 23 + 0] = std::numeric_limits<float>::quiet_NaN();
+
+    const fs::path path = scratch("export-keeps-slots.usda");
+    fs::remove(path);
+    REQUIRE(usd::writeParticleFieldStage(*gpu->library, raw, path, {.addCamera = false}));
+
+    UsdStageRefPtr stage = UsdStage::Open(path.string());
+    REQUIRE(stage);
+    const UsdVolParticleField3DGaussianSplat splats(stage->GetPrimAtPath(SdfPath("/World/Splats")));
+    REQUIRE(splats);
+    VtVec3fArray positions;
+    VtFloatArray opacities;
+    VtVec3fArray scales;
+    REQUIRE(splats.GetPositionsAttr().Get(&positions));
+    REQUIRE(splats.GetOpacitiesAttr().Get(&opacities));
+    REQUIRE(splats.GetScalesAttr().Get(&scales));
+
+    // Counts and slots, which is what the processor is for.
+    CHECK(positions.size() == raw.count);
+    CHECK(opacities.size() == raw.count);
+    CHECK(scales.size() == raw.count);
+    for (const uint32_t at : {7u, 100u, 300u}) {
+        CHECK(opacities[at] == 0.0F);
+        CHECK(scales[at] == GfVec3f(0.0F, 0.0F, 0.0F));
+        CHECK(std::isfinite(positions[at][0]));
+        CHECK(std::isfinite(positions[at][1]));
+        CHECK(std::isfinite(positions[at][2]));
+    }
+    // And the extent is the cloud's, not stretched to where an empty slot
+    // happens to stand.
+    VtVec3fArray extent;
+    REQUIRE(splats.GetExtentAttr().Get(&extent));
+    REQUIRE(extent.size() == 2);
+    CHECK(std::isfinite(extent[0][0]));
+    CHECK(extent[1][0] >= extent[0][0]);
+}

@@ -4780,3 +4780,54 @@ cells, so on a pawn 66 mm tall it is a thousandth of a cell -- a disc a ray
 meeting it side on is barely stopped by. Widened three hundred times, the dark
 minimum at the edge was **just as deep** (0.027 against 0.033), so the razor
 was not what made the fringe, and EA's number stands.
+
+## The conversion's order is the mesh's, and a slot with nothing in it is kept
+
+Two changes to the static conversion that nothing animated can do without, and
+that are worth having on their own.
+
+**The same mesh now writes the same array.** The slot a gaussian went into came
+from `InterlockedAdd(counters[0], 1u, slot)`, and the shader said so in its
+header: *"it keeps the atomic append, which is what makes the order of the
+output nobody's business"*. Measured rather than assumed: two conversions of
+the chess pawn, same options, same stage, wrote `.usdc` files that **differ
+from byte 1001**. The same 729073 gaussians, in a different order.
+
+That is fine for one still frame and impossible for a sequence, because a
+gaussian is followed from one pose to the next by being the same element of the
+array. So the emit is now three passes: a thread counts each triangle's covered
+cells, one workgroup settles where each triangle's gaussians start, and a
+thread writes each triangle's at that offset. Two conversions now give files
+that are **identical byte for byte**.
+
+The scan is one workgroup of 256 in three phases -- each thread adds up a
+slice, thread zero runs the 256 slice totals into a running sum, each thread
+lays its own running sum down. A serial scan in one thread was the other
+option; the pawn has 42892 triangles in one of its two meshes and a character
+will have more.
+
+Two things fall out of it. The per-triangle geometry is worked out by one
+function, `m2sTriangleOf`, that both the counting pass and the writing pass
+call, so they cannot disagree about a single bit. And **a budget too small now
+keeps the first splats in the mesh's own order** rather than whichever ones won
+a race.
+
+**A slot with nothing in it is still a slot.** The writer skipped a record that
+decoded to nothing -- a scale that overflowed, an opacity under a 255th, a
+position that was not a number (`splat_export.slang`) -- so the file came out
+shorter than the conversion that made it. In a sequence that is worse than
+untidy: a triangle that goes degenerate in one pose alone would take its
+gaussians out of that frame's array and put every later gaussian out of step,
+in that frame and in no other. The slot is kept now and written empty: no
+opacity, no size, a position that is at least a number, and zero coefficients.
+Nothing draws. The cloud's extent is folded over the splats that are there, not
+over where an empty slot happens to stand, and the writer says how many it
+wrote empty.
+
+Measured on the pawn: a bake at 16 paths leaves 10 gaussians of 729073 with no
+surface under them, and the file now carries 729073 where it carried 729063.
+
+**What checks them**: `tests/aofx/test_mesh2splat.cpp` runs the conversion twice
+and counts, in a kernel, the entries that differ bitwise (0 of 1024); and
+`tests/usd/test_usd.cpp` writes a cloud with three records that decode to
+nothing and reads back the array lengths, which are the conversion's.

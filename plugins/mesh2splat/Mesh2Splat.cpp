@@ -57,10 +57,10 @@ struct Mesh2SplatUniforms {
     float materialColour[4] = {1.0F, 1.0F, 1.0F, 1.0F};
     float transmissionColour[4] = {1.0F, 1.0F, 1.0F, 1.0F};
 
-    float    pad0 = 0.0F;
+    uint32_t countWidth = 1;
     float    metallic = 0.0F;
     float    roughness = 0.5F;
-    uint32_t pad1 = 0;
+    uint32_t countStride = 1;
 
     uint32_t hasAlbedo = 0;
     uint32_t albedoWidth = 0;
@@ -254,6 +254,8 @@ public:
 
     [[nodiscard]] std::vector<aofx::KernelDesc> kernels() const override {
         return {aofx::KernelDesc{"m2sClear", "m2sClear", k_mesh2splat, k_mesh2splatBytes},
+                aofx::KernelDesc{"m2sCount", "m2sCount", k_mesh2splat, k_mesh2splatBytes},
+                aofx::KernelDesc{"m2sScan", "m2sScan", k_mesh2splat, k_mesh2splatBytes},
                 aofx::KernelDesc{"m2sEmit", "m2sEmit", k_mesh2splat, k_mesh2splatBytes}};
     }
 
@@ -360,9 +362,26 @@ public:
             request.complaint = "mesh2splat could not take the four numbers it counts with";
             return false;
         }
+        // And one number a triangle: how many gaussians it stands, and then
+        // where they start. Four to a pixel, in rows no wider than a picture
+        // comfortably is.
+        const uint32_t countPixels = (triangles + 3) / 4;
+        const uint32_t countWidth = std::min<uint32_t>(countPixels, 4096);
+        const uint32_t countHeight = (countPixels + countWidth - 1) / countWidth;
+        const aofx::Buffer cellCounts = request.gpu->scratch(countWidth, countHeight);
+        if (!cellCounts.isValid()) {
+            request.complaint = "mesh2splat could not take a number for each of its triangles";
+            return false;
+        }
+        uniforms.countWidth = static_cast<uint32_t>(cellCounts.width);
+        uniforms.countStride = static_cast<uint32_t>(cellCounts.stride);
+
         const aofx::KernelId clear = request.gpu->load("m2sClear");
+        const aofx::KernelId count = request.gpu->load("m2sCount");
+        const aofx::KernelId scan = request.gpu->load("m2sScan");
         const aofx::KernelId emit = request.gpu->load("m2sEmit");
-        if (clear == aofx::kInvalidKernel || emit == aofx::kInvalidKernel) {
+        if (clear == aofx::kInvalidKernel || count == aofx::kInvalidKernel ||
+            scan == aofx::kInvalidKernel || emit == aofx::kInvalidKernel) {
             return false;
         }
         const std::vector<aofx::Buffer> buffers{
@@ -371,8 +390,19 @@ public:
             normal != nullptr && normal->buffer.isValid() ? normal->buffer : meshPlane->buffer,
             mr != nullptr && mr->buffer.isValid() ? mr->buffer : meshPlane->buffer,
             counters,
+            cellCounts,
             target->buffer};
+        // Count, then settle where each triangle's gaussians start, then
+        // write. The order of the output is the mesh's own, which is what
+        // lets a gaussian be followed from one frame to the next.
         if (!request.gpu->run(clear, aofx::Grid{1, 1, 1}, buffers, &uniforms, sizeof(uniforms))) {
+            return false;
+        }
+        if (!request.gpu->run(count, aofx::Grid{triangles, 1, 1}, buffers, &uniforms,
+                              sizeof(uniforms))) {
+            return false;
+        }
+        if (!request.gpu->run(scan, aofx::Grid{256, 1, 1}, buffers, &uniforms, sizeof(uniforms))) {
             return false;
         }
         if (!request.gpu->run(emit, aofx::Grid{triangles, 1, 1}, buffers, &uniforms,

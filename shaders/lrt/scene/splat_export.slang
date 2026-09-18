@@ -34,9 +34,20 @@ void splatExport(uint3 tid: SV_DispatchThreadID) {
     const float qLength = length(q);
     q = qLength > 1e-8 ? q / qLength : float4(0, 0, 0, 1);
 
-    posOpacity[i] = float4(p, saturate(a));
+    // A RECORD THAT IS NOT A SPLAT IS STILL A SLOT.
+    //
+    // It used to be dropped -- the writer skipped it and the file came out
+    // shorter than the conversion. That is fine for one still frame and
+    // impossible for a sequence: a gaussian is followed from one frame to the
+    // next by being the same element, and a triangle that goes degenerate in
+    // one pose would take its gaussians out of that frame's array alone and
+    // put every later one out of step. So the slot is kept and written with
+    // nothing in it: no opacity, no size, and a position that is at least a
+    // number. Nothing draws, and the count is the conversion's.
+    const float3 safe = all(isfinite(p)) ? p : float3(0.0);
+    posOpacity[i] = valid ? float4(p, saturate(a)) : float4(safe, 0.0);
     rotation[i] = q;
-    scaleValid[i] = float4(exp(ls), valid ? 1.0 : 0.0);
+    scaleValid[i] = valid ? float4(exp(ls), 1.0) : float4(0.0, 0.0, 0.0, 0.0);
 
     const uint row = i * (1 + params.keepPerColour);
     float3 dc = float3(fieldOf(raw, i, s, params.dc0), fieldOf(raw, i, s, params.dc1),
@@ -51,7 +62,7 @@ void splatExport(uint3 tid: SV_DispatchThreadID) {
     } else if (params.colourMode == 3) {
         dc = (dc / 255.0 - 0.5) / 0.15;   // SPZ's DC scale
     }
-    coefficients[row] = float4(dc, 0.0);
+    coefficients[row] = valid ? float4(dc, 0.0) : float4(0.0, 0.0, 0.0, 0.0);
     for (uint basis = 0; basis < params.keepPerColour; ++basis) {
         float3 c = float3(0.0);
         for (uint colour = 0; colour < 3; ++colour) {
@@ -61,6 +72,6 @@ void splatExport(uint3 tid: SV_DispatchThreadID) {
             c[colour] = decodeRest(fieldOf(raw, i, s, field), params.restMode) *
                         (params.flipYZ != 0 ? restFlipSign(basis) : 1.0);
         }
-        coefficients[row + 1 + basis] = float4(c, 0.0);
+        coefficients[row + 1 + basis] = valid ? float4(c, 0.0) : float4(0.0, 0.0, 0.0, 0.0);
     }
 }
