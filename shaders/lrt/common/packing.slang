@@ -68,6 +68,39 @@ public float4 decodeQuaternion(uint word) {
     return q;
 }
 
+/// A rotation matrix whose columns are the axes, as (x, y, z, w).
+///
+/// It lives here beside the quaternion's own packing because two things now
+/// need it: the LOD merge, which takes the eigenframe of a merged covariance,
+/// and the splat skinner, which takes the frame a joint left a gaussian in.
+public float4 quaternionOfAxes(float3x3 m) {
+    const float trace = m[0][0] + m[1][1] + m[2][2];
+    float4 q;
+    if (trace > 0.0) {
+        const float s = 0.5 / sqrt(trace + 1.0);
+        q = float4((m[2][1] - m[1][2]) * s, (m[0][2] - m[2][0]) * s, (m[1][0] - m[0][1]) * s, 0.25 / s);
+    } else if (m[0][0] > m[1][1] && m[0][0] > m[2][2]) {
+        const float s = 2.0 * sqrt(1.0 + m[0][0] - m[1][1] - m[2][2]);
+        q = float4(0.25 * s, (m[1][0] + m[0][1]) / s, (m[0][2] + m[2][0]) / s, (m[2][1] - m[1][2]) / s);
+    } else if (m[1][1] > m[2][2]) {
+        const float s = 2.0 * sqrt(1.0 - m[0][0] + m[1][1] - m[2][2]);
+        q = float4((m[1][0] + m[0][1]) / s, 0.25 * s, (m[2][1] + m[1][2]) / s, (m[0][2] - m[2][0]) / s);
+    } else {
+        const float s = 2.0 * sqrt(1.0 - m[0][0] - m[1][1] + m[2][2]);
+        q = float4((m[0][2] + m[2][0]) / s, (m[2][1] + m[1][2]) / s, 0.25 * s, (m[1][0] - m[0][1]) / s);
+    }
+    return normalize(q);
+}
+
+/// The other way: the three axes a quaternion turns the basis into, as the
+/// columns of a matrix.
+public float3x3 axesOfQuaternion(float4 q) {
+    const float x = q.x, y = q.y, z = q.z, w = q.w;
+    return float3x3(1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y - z * w), 2.0 * (x * z + y * w),
+                    2.0 * (x * y + z * w), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z - x * w),
+                    2.0 * (x * z - y * w), 2.0 * (y * z + x * w), 1.0 - 2.0 * (x * x + y * y));
+}
+
 public uint packHalves(float a, float b) {
     return (f32tof16(a) & 0xFFFFu) | ((f32tof16(b) & 0xFFFFu) << 16);
 }

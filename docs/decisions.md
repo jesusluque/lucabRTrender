@@ -4924,3 +4924,50 @@ nothing in the other three slots and the weights summing to one
 
 **Not done here**: nothing yet deforms those gaussians. The cloud carries its
 joints and the file does not write them.
+
+## A cloud carried by a skeleton, on the device
+
+`scene::SplatSkinner` is `geom::Skinner`'s counterpart for gaussians, and it
+takes the same inputs in the same layout because they come from the same
+place: the joints each gaussian is held by, the skeleton's transforms at this
+instant, and the three matrices that take a point from the cloud's own space
+to the skeleton's and back. One thread a gaussian
+(`shaders/lrt/scene/splat_skin.slang`).
+
+**The position is exactly the mesh's arithmetic.** The same linear blend, the
+same `geomBindTransform` then `skelLocalToWorld` then `primWorldToLocal`, the
+same transposition on the host -- `GfMatrix4f` is row-major with vectors on
+the left and the kernel multiplies rows by a column, so the matrix goes over
+turned, as a mesh's does.
+
+**The frame is the same chain's linear part.** The two axes a gaussian spreads
+along are carried by `worldToPrim . skelToWorld . (sum of w_j X_j) . geomBind`
+-- which is the Jacobian of the position map, so a gaussian stretches with its
+triangle instead of sliding along beside it. They are squared up again
+afterwards, because a joint may shear where a rotation would not, and the
+third axis is a disc's and is left alone. The two sizes in the plane come out
+as the lengths of the carried axes.
+
+**What is not touched** is everything else a gaussian carries: its opacity,
+its colour, its harmonics, its PBR channels, and the word that holds its third
+size. A frame therefore costs one kernel over the cloud and no re-decode of
+anything -- and, because the deformed cloud is written into buffers that
+outlive it, the cloud's identity never changes from one frame to the next.
+That is what will let a ray tracer refit rather than rebuild.
+
+`quaternionOfAxes` moved into `common/packing.slang`, beside the quaternion's
+own packing, since the LOD merge and the skinner both want it; the LOD build
+now calls the one in common rather than its own copy.
+
+**Measured** (`tests/scene/test_loading.cpp`, 4096 gaussians on a helix, each
+turned differently and each a different size): a skeleton at rest leaves every
+one of them where it was, and a skeleton given a rigid turn of 1.2 radians
+about a slanted axis and a slide carries every one of them rigidly -- the
+position by the transform, the frame turned with it, the sizes not at all.
+Nothing is read back but four counters.
+
+The tolerance is the format's and not the arithmetic's: a frame is a
+smallest-three quaternion at ten bits a component, so an axis cannot be pinned
+closer than about `sqrt(2)/1023`. At rest the frame written is the frame read,
+and re-encoding a value that was already a word's decode lands on that word --
+except at the boundary of the rounding, where two gaussians of 4096 did.

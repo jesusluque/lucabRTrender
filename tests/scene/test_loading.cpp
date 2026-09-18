@@ -6,6 +6,7 @@
 
 #include <catch2/catch_approx.hpp>
 
+#include <array>
 #include <cmath>
 #include <cstring>
 #include <cstdio>
@@ -20,6 +21,7 @@
 
 #include "lrt/io/Readers.h"
 #include "lrt/scene/GpuClouds.h"
+#include "lrt/scene/SplatSkinner.h"
 
 using namespace lrt;
 using Catch::Approx;
@@ -388,4 +390,123 @@ TEST_CASE("a trained cloud from openFXplayer's examples loads", "[scene][io][gpu
     std::printf("%s: %u of %u splats, bounds x %.2f..%.2f\n", train.c_str(), splats->count,
                 splats->declared, static_cast<double>(splats->bounds.min[0]),
                 static_cast<double>(splats->bounds.max[0]));
+}
+
+// A SKELETON AT REST LEAVES A CLOUD WHERE IT WAS, AND A SKELETON THAT MOVES
+// RIGIDLY CARRIES IT RIGIDLY.
+//
+// Those are the two invariants a cloud carried by a rig stands on, and they
+// are enough to catch every way the transform chain can be wrong: a matrix
+// transposed, a translation dropped, the frame turned by the wrong part of
+// the chain, a size scaled when it should not be. Both the cloud and the
+// answer are made and compared on the device; only four counters come back.
+TEST_CASE("a skinned cloud follows its joints, and nothing else moves", "[scene][gpu][skinning]") {
+    LRT_REQUIRE_GPU(gpu);
+    auto make = gpu::ComputeKernel::create(*gpu->library, "lrt/test/splat_skin_check", "splatSkinMake");
+    auto joints = gpu::ComputeKernel::create(*gpu->library, "lrt/test/splat_skin_check", "splatSkinJoints");
+    auto compare = gpu::ComputeKernel::create(*gpu->library, "lrt/test/splat_skin_check", "splatSkinCompare");
+    auto skinner = scene::SplatSkinner::create(*gpu->library);
+    if (!make) FAIL(make.error().toString());
+    if (!joints) FAIL(joints.error().toString());
+    if (!compare) FAIL(compare.error().toString());
+    if (!skinner) FAIL(skinner.error().toString());
+
+    constexpr uint32_t kCount = 4096;
+    constexpr uint32_t kPerSplat = 4;
+    constexpr uint32_t kJoints = 3;
+    const auto buffer = [&](uint64_t bytes, uint32_t element, const char* label) {
+        gpu::BufferDesc desc;
+        desc.bytes = bytes;
+        desc.elementBytes = element;
+        desc.label = label;
+        auto made = gpu::Buffer::create(gpu->library->device(), desc);
+        REQUIRE(made);
+        return std::move(*made);
+    };
+    gpu::Buffer restPositions = buffer(uint64_t{kCount} * 16, 16, "skin.restPositions");
+    gpu::Buffer restShape = buffer(uint64_t{kCount} * 4 * 4, 4, "skin.restShape");
+    gpu::Buffer influences = buffer(uint64_t{kCount} * kPerSplat * 8, 8, "skin.influences");
+    gpu::Buffer xforms = buffer(uint64_t{kJoints} * 4 * 16, 16, "skin.xforms");
+    gpu::Buffer positions = buffer(uint64_t{kCount} * 16, 16, "skin.positions");
+    gpu::Buffer shape = buffer(uint64_t{kCount} * 4 * 4, 4, "skin.shape");
+    gpu::Buffer counts = buffer(8 * 4, 4, "skin.counts");
+
+    scene::GpuSplats rest;
+    rest.count = kCount;
+    rest.positions = std::move(restPositions);
+    rest.shape = std::move(restShape);
+
+    struct Case {
+        const char*          name;
+        std::array<float, 4> rotation;      // x, y, z, w
+        std::array<float, 3> translation;
+        float                tolerance;
+    };
+    const float half = 0.6F;   // a turn of 1.2 radians about a slanted axis
+    const float s = std::sin(half);
+    const float axis[3] = {0.4082483F, 0.8164966F, 0.4082483F};
+    // The tolerance is what the format can hold, not what the arithmetic can:
+    // a frame is stored as a smallest-three quaternion at ten bits a
+    // component, so an axis cannot be pinned closer than about `sqrt(2)/1023`.
+    // At rest the frame written is the frame read, and re-encoding a value
+    // that was already the decode of a word lands on that word -- except at
+    // the boundary of the rounding, where two gaussians of 4096 did.
+    constexpr float kQuantised = 4.0e-3F;
+    const std::array<Case, 2> cases{
+        Case{"at rest", {0.0F, 0.0F, 0.0F, 1.0F}, {0.0F, 0.0F, 0.0F}, kQuantised},
+        Case{"turned and slid",
+             {axis[0] * s, axis[1] * s, axis[2] * s, std::cos(half)},
+             {1.5F, -0.75F, 0.25F},
+             kQuantised}};
+
+    for (const Case& one : cases) {
+        const auto bind = [&](rhi::ShaderCursor cursor) {
+            cursor["restPositions"].setBinding(rest.positions.rhi());
+            cursor["restShape"].setBinding(rest.shape.rhi());
+            cursor["influences"].setBinding(influences.rhi());
+            cursor["xforms"].setBinding(xforms.rhi());
+            cursor["positions"].setBinding(positions.rhi());
+            cursor["shape"].setBinding(shape.rhi());
+            cursor["counts"].setBinding(counts.rhi());
+            rhi::ShaderCursor p = cursor["params"];
+            p["count"].setData(kCount);
+            p["perSplat"].setData(kPerSplat);
+            p["joints"].setData(kJoints);
+            p["rotation"].setData(one.rotation.data(), 16);
+            const std::array<float, 4> slide{one.translation[0], one.translation[1], one.translation[2], 0.0F};
+            p["translation"].setData(slide.data(), 16);
+            p["tolerance"].setData(one.tolerance);
+        };
+        {
+            gpu::CommandBatch batch(gpu->library->device());
+            make->dispatch(batch, {kCount, 1, 1}, bind);
+            joints->dispatch(batch, {kJoints, 1, 1}, bind);
+            REQUIRE(batch.submit(true));
+        }
+        {
+            gpu::CommandBatch batch(gpu->library->device());
+            scene::SplatSkinInput input;
+            input.rest = &rest;
+            input.influences = &influences;
+            input.perSplat = kPerSplat;
+            input.skinningXforms = &xforms;
+            REQUIRE(skinner->skin(batch, input, positions, shape));
+            REQUIRE(batch.submit(true));
+        }
+        {
+            const uint32_t zero[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+            REQUIRE(counts.write(gpu->library->device(), 0, sizeof(zero), zero));
+            gpu::CommandBatch batch(gpu->library->device());
+            compare->dispatch(batch, {kCount, 1, 1}, bind);
+            REQUIRE(batch.submit(true));
+        }
+        uint32_t seen[4] = {0, 0, 0, 0};
+        REQUIRE(counts.read(gpu->library->device(), 0, sizeof(seen), seen));
+        std::printf("  %-16s %u compared, %u misplaced, %u resized, %u misturned\n", one.name, seen[0],
+                    seen[1], seen[2], seen[3]);
+        CHECK(seen[0] == kCount);
+        CHECK(seen[1] == 0);
+        CHECK(seen[2] == 0);
+        CHECK(seen[3] == 0);
+    }
 }

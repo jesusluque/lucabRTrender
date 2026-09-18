@@ -39,26 +39,6 @@ void jacobi(inout float3x3 a, out float3x3 v) {
     }
 }
 
-/// A rotation matrix (columns the axes) to (x, y, z, w).
-float4 quaternionOf(float3x3 m) {
-    const float trace = m[0][0] + m[1][1] + m[2][2];
-    float4 q;
-    if (trace > 0.0) {
-        const float s = 0.5 / sqrt(trace + 1.0);
-        q = float4((m[2][1] - m[1][2]) * s, (m[0][2] - m[2][0]) * s, (m[1][0] - m[0][1]) * s, 0.25 / s);
-    } else if (m[0][0] > m[1][1] && m[0][0] > m[2][2]) {
-        const float s = 2.0 * sqrt(1.0 + m[0][0] - m[1][1] - m[2][2]);
-        q = float4(0.25 * s, (m[1][0] + m[0][1]) / s, (m[0][2] + m[2][0]) / s, (m[2][1] - m[1][2]) / s);
-    } else if (m[1][1] > m[2][2]) {
-        const float s = 2.0 * sqrt(1.0 - m[0][0] + m[1][1] - m[2][2]);
-        q = float4((m[1][0] + m[0][1]) / s, 0.25 * s, (m[2][1] + m[1][2]) / s, (m[0][2] - m[2][0]) / s);
-    } else {
-        const float s = 2.0 * sqrt(1.0 - m[0][0] - m[1][1] + m[2][2]);
-        q = float4((m[0][2] + m[2][0]) / s, (m[2][1] + m[1][2]) / s, 0.25 * s, (m[1][0] - m[0][1]) / s);
-    }
-    return normalize(q);
-}
-
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void lodFinalize(uint3 tid: SV_DispatchThreadID) {
@@ -89,7 +69,7 @@ void lodFinalize(uint3 tid: SV_DispatchThreadID) {
     positions[g] = float4(mu, opacity);
     const uint row = g * 4;
     const float3 ls = log(s);
-    shape[row] = encodeQuaternion(quaternionOf(axes));
+    shape[row] = encodeQuaternion(quaternionOfAxes(axes));
     shape[row + 1] = packHalves(halfSafe(ls.x), halfSafe(ls.y));
     shape[row + 2] = packHalves(halfSafe(ls.z), halfSafe(base.x));
     shape[row + 3] = packHalves(halfSafe(base.y), halfSafe(base.z));
