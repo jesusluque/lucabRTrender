@@ -56,6 +56,9 @@
 namespace lrt::cli {
 namespace {
 
+/// Rest coefficients a colour, by degree: (degree + 1)^2 - 1.
+constexpr uint32_t kRestPerDegree[4] = {0, 3, 8, 15};
+
 /// Entries a row of every picture this command makes. A multiple of four, so
 /// that the padding an image adds to its rows is none -- and small enough that
 /// a mesh of a few triangles is not a picture one pixel tall and a million
@@ -107,6 +110,10 @@ struct Options {
     bool                     bake = true;
     uint32_t                 bakeSamples = 64;
     uint32_t                 bakeBounces = 3;
+    /// How much of the direction the light leaves in the cloud carries: 0 is
+    /// a colour, 1 to 3 are harmonics. Two is where a highlight starts to
+    /// look like one.
+    uint32_t                 bakeDegree = 2;
     bool                     defaultLights = false;
     double                   time = 0.0;
     std::vector<std::string> paths;
@@ -386,19 +393,24 @@ public:
         raw.encoding.rotW = 7; raw.encoding.rotX = 8; raw.encoding.rotY = 9; raw.encoding.rotZ = 10;
         raw.encoding.dc0 = 11; raw.encoding.dc1 = 12; raw.encoding.dc2 = 13;
         raw.encoding.restBase = 17;
-        raw.encoding.restPerColour = 0;
+        raw.encoding.restPerColour = options_->bake ? kRestPerDegree[std::min(options_->bakeDegree, 3u)] : 0;
+        raw.encoding.restColourOuter = 0;   // rgb per basis, which is how the bake writes them
         // What the gaussian reflects with, which is what lets a relit cloud
         // show the sheen its mesh had: two more floats a record.
         raw.encoding.metallic = 14;
         raw.encoding.roughness = 15;
         raw.encoding.transmission = 16;
-        raw.encoding.floatsPerRecord = 17;
+        raw.encoding.floatsPerRecord = 17 + raw.encoding.restPerColour * 3;
         raw.encoding.opacity_ = io::SplatEncoding::Opacity::Linear;
         raw.encoding.scale_ = io::SplatEncoding::Scale::Linear;
-        // The conversion's colours come from a material, in linear light; a
-        // cloud carries and blends its colours in the space it was trained
-        // in, which for every trainer there is means sRGB.
-        raw.encoding.colour = io::SplatEncoding::Colour::LinearLight;
+        // Not baked, the colours come from a material in linear light and the
+        // export encodes them into the space a cloud is blended in. Baked,
+        // the harmonics are already fitted in that space and already in the
+        // form a cloud keeps them (the kernel shifted the constant term), so
+        // they pass through as they are.
+        raw.encoding.colour = options_->bake ? io::SplatEncoding::Colour::ShDc
+                                             : io::SplatEncoding::Colour::LinearLight;
+        raw.encoding.rest = io::SplatEncoding::Rest::Float;
         raw.encoding.rotation = io::SplatEncoding::Rotation::Float;
 
         uint64_t written = 0;
@@ -447,6 +459,12 @@ public:
 private:
     static constexpr uint32_t kChunkEntries = 1024;
     static constexpr uint32_t kNoPrimvar = 0xFFFFFFFF;
+
+    /// Floats a record: the canonical fourteen, the three the material
+    /// reflects with, and the harmonics where a bake writes them.
+    [[nodiscard]] uint32_t recordFloats() const {
+        return 17 + (options_->bake ? kRestPerDegree[std::min(options_->bakeDegree, 3u)] : 0) * 3;
+    }
 
     struct OneMesh {
         uint64_t           written = 0;
@@ -537,9 +555,10 @@ private:
         const auto floats = out.floats();
         const auto stride = static_cast<size_t>(out.stride());
         const auto width = static_cast<size_t>(out.bounds().width());
-        answer.records.resize(answer.written * 17);
+        const uint32_t perRecord = recordFloats();
+        answer.records.resize(answer.written * perRecord);
         for (uint64_t splat = 0; splat < answer.written; ++splat) {
-            float* record = answer.records.data() + splat * 17;
+            float* record = answer.records.data() + splat * perRecord;
             const auto entry = [&](uint32_t component) {
                 const uint64_t index = splat * kRecordEntries + component;
                 return floats.data() + ((index / width) * stride + index % width) * 4;
@@ -609,7 +628,7 @@ private:
 /// costs is the highlight that would only be seen from elsewhere.
 [[nodiscard]] Result<void> bakeInto(io::RawSplats& raw, const std::vector<float>& normals,
                                     const std::string& stage, double time, uint32_t samples,
-                                    uint32_t bounces, bool defaultLights) {
+                                    uint32_t bounces, bool defaultLights, uint32_t degree) {
     if (raw.count == 0 || normals.size() < size_t{raw.count} * 3) {
         return Error(ErrorCode::InternalError, "bake: a normal a gaussian is what it stands on");
     }
@@ -638,21 +657,31 @@ private:
     if (defaultLights) {
         LRT_TRY((*renderer)->setDefaultLights(true));
     }
-    auto baked = (*renderer)->bakePoints(rays, raw.count, time, samples, bounces);
+    auto baked = (*renderer)->bakePoints(rays, raw.count, time, samples, bounces, degree);
     if (!baked) return std::move(baked).error();
-    // Straight into the record's colour. It is light, which is what the
-    // encoding already says these records carry.
+    const uint32_t coefficients = (degree + 1) * (degree + 1);
+    // Straight into the record. The constant term is the DC the cloud keeps
+    // its colour in -- the kernel already shifted it to where 3DGS keeps its
+    // own -- and the rest are the harmonics, rgb per basis, which is the
+    // layout the encoding below declares. Nothing is computed here.
     uint32_t lit = 0;
     for (uint32_t k = 0; k < raw.count; ++k) {
         float* record = raw.records.data() + size_t{k} * raw.encoding.floatsPerRecord;
-        const float* colour = baked->data() + size_t{k} * 4;
-        record[raw.encoding.dc0] = colour[0];
-        record[raw.encoding.dc1] = colour[1];
-        record[raw.encoding.dc2] = colour[2];
-        lit += colour[3] > 0.0F ? 1u : 0u;
+        const float* point = baked->data() + size_t{k} * coefficients * 4;
+        record[raw.encoding.dc0] = point[0];
+        record[raw.encoding.dc1] = point[1];
+        record[raw.encoding.dc2] = point[2];
+        for (uint32_t c = 1; c < coefficients; ++c) {
+            const float* value = point + size_t{c} * 4;
+            float* rest = record + raw.encoding.restBase + (c - 1) * 3;
+            rest[0] = value[0];
+            rest[1] = value[1];
+            rest[2] = value[2];
+        }
+        lit += point[3] > 0.0F ? 1u : 0u;
     }
-    std::printf("mesh2splat: baked %u of %u gaussians (%u paths each, %u bounces)\n", lit, raw.count,
-                samples, bounces);
+    std::printf("mesh2splat: baked %u of %u gaussians (%u paths each, %u bounces, degree %u)\n", lit,
+                raw.count, samples, bounces, degree);
     if (lit * 2 < raw.count) {
         std::fprintf(stderr,
                      "mesh2splat: more than half the gaussians found no surface under them; the bake "
@@ -692,6 +721,9 @@ void addMesh2Splat(CLI::App& app) {
                   "light; what it loses is the bounce, the shadows and the exactness");
     cmd->add_option("--bake-samples", o->bakeSamples, "paths a gaussian the bake traces");
     cmd->add_option("--bake-bounces", o->bakeBounces, "bounces after the first hit, in the bake");
+    cmd->add_option("--bake-degree", o->bakeDegree,
+                    "harmonics the bake fits, 0 to 3: 0 is one colour a gaussian and cannot hold a "
+                    "reflection, and each degree costs a pass over the paths");
     cmd->add_flag("--default-lights", o->defaultLights,
                   "bake under a dome and a sun in the session layer, for a stage that brings no "
                   "lights of its own (what lrt view offers)");
@@ -755,18 +787,34 @@ void addMesh2Splat(CLI::App& app) {
             // put under another.
             if (o->bake) {
                 LRT_TRY(bakeInto(*raw, converter.normals(), o->stage, o->time, o->bakeSamples,
-                                 o->bakeBounces, o->defaultLights));
+                                 o->bakeBounces, o->defaultLights, std::min(o->bakeDegree, 3u)));
             }
 
             usd::ExportOptions options;
-            options.maxDegree = 0;
+            options.maxDegree = o->bake ? std::min(o->bakeDegree, 3u) : 0;
             options.addCamera = o->addCamera;
             // Both baked and not, the cloud is relit -- what differs is what
             // its colours are. Baked, they are the light on the material's
             // body and the frame adds the polish; not baked, they are an
             // albedo and the frame lights them whole.
-            options.relight = true;
-            options.litBody = o->bake;
+            // A cloud that carries harmonics carries the light whole, and a
+            // frame adds nothing to it. One baked to a single colour has no
+            // room for a reflection, so it keeps the material's body and the
+            // frame puts the polish back. Not baked at all, the colours are an
+            // albedo and the frame lights them.
+            // What the cloud is asked to hold, and what is left to the frame:
+            //
+            // - baked with harmonics: the body's light and how it changes with
+            //   the direction, which is what they are for. Nothing is added --
+            //   measured, the frame's own reflection has no occlusion in it
+            //   and lifts the pawn from 0.096 to 0.135 against the mesh's
+            //   0.085, washing the marble out again.
+            // - baked to one colour: the body alone, and the frame puts the
+            //   polish back, since one colour cannot hold a reflection.
+            // - not baked: an albedo, and the frame lights it whole.
+            const bool harmonics = o->bake && std::min(o->bakeDegree, 3u) > 0;
+            options.relight = !harmonics;
+            options.litBody = o->bake && !harmonics;
             return usd::writeParticleFieldStage(library, *raw, o->output, options);
         };
         auto ran = context->run([&] { inside = work(); });

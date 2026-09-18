@@ -81,10 +81,14 @@ struct PathAux {
 /// Where a bake starts from: one ray a point, and the grid they are dispatched
 /// over (the kernel indexes them as it indexes pixels).
 struct BakePoints {
-    const gpu::Buffer* rays = nullptr;   ///< 2 float4 a point: origin + tMin, direction
+    const gpu::Buffer* rays = nullptr;   ///< 2 float4 a point: the point + how far off to start, its normal
     uint32_t           count = 0;
     uint32_t           width = 0;        ///< the grid; `count` <= width * height
     uint32_t           height = 0;
+    /// How many spherical harmonics to fit: 1 is a colour alone, 4, 9 and 16
+    /// are degrees 1 to 3. They come back one plane a coefficient, in
+    /// `evaluateRest`'s order, the constant term first.
+    uint32_t           coefficients = 1;
 };
 
 class PathTracer {

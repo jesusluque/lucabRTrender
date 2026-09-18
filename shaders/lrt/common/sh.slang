@@ -50,6 +50,42 @@ public float3 evaluateRest(StructuredBuffer<uint> sh, uint row, uint degree, flo
     return result;
 }
 
+/// One basis function of the same set, by index: 0 is the constant term and
+/// 1..15 are the rest coefficients in the order `evaluateRest` reads them.
+///
+/// It exists for the other direction -- projecting a radiance somebody
+/// measured onto these harmonics (`lrt mesh2splat --bake`) -- and it must
+/// agree with `evaluateRest` term for term, which is why the two sit
+/// together.
+public float shBasisValue(uint k, float3 dir) {
+    const float x = dir.x, y = dir.y, z = dir.z;
+    const float xx = x * x, yy = y * y, zz = z * z;
+    switch (k) {
+    case 0: return kSH0;
+    case 1: return -kC1 * y;
+    case 2: return kC1 * z;
+    case 3: return -kC1 * x;
+    case 4: return kC2[0] * x * y;
+    case 5: return kC2[1] * y * z;
+    case 6: return kC2[2] * (2.0 * zz - xx - yy);
+    case 7: return kC2[3] * x * z;
+    case 8: return kC2[4] * (xx - yy);
+    case 9: return kC3[0] * y * (3.0 * xx - yy);
+    case 10: return kC3[1] * x * y * z;
+    case 11: return kC3[2] * y * (4.0 * zz - xx - yy);
+    case 12: return kC3[3] * z * (2.0 * zz - 3.0 * xx - 3.0 * yy);
+    case 13: return kC3[4] * x * (4.0 * zz - xx - yy);
+    case 14: return kC3[5] * z * (xx - yy);
+    case 15: return kC3[6] * x * (xx - 3.0 * yy);
+    default: return 0.0;
+    }
+}
+
+/// What the constant term has to be shifted by, because a cloud stores its DC
+/// the way 3DGS trains it: `colour = 0.5 + kSH0 * dc`, while a projection
+/// gives `colour = c0 * kSH0`. So `dc = c0 - kShDcOffset`.
+public static const float kShDcOffset = 0.5 / kSH0;
+
 public uint degreeOf(uint restPerColour) {
     return restPerColour >= 15 ? 3 : restPerColour >= 8 ? 2 : restPerColour >= 3 ? 1 : 0;
 }

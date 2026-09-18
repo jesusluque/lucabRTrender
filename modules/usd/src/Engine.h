@@ -175,6 +175,9 @@ struct BakeRequest {
     uint32_t           count = 0;
     uint32_t           samples = 64;
     uint32_t           bounces = 3;
+    /// How many spherical harmonics to fit: 1 is a colour alone, 4, 9 and 16
+    /// are degrees 1 to 3 (technique::BakePoints).
+    uint32_t           coefficients = 1;
     /// Where the answer lands: one `float4` a point, the radiance in rgb.
     render::RenderTargets* out = nullptr;
 };

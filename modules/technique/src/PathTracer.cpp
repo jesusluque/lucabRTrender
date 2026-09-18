@@ -20,6 +20,9 @@ namespace {
 const char* kPrelude = R"(
 import lrt.light.lights_image;
 import lrt.light.light_bvh;
+// The harmonics a bake projects onto, and the space a cloud is blended in.
+import lrt.common.sh;
+import lrt.common.color;
 
 struct PathParams {
     uint samples;      // paths a pixel this call
@@ -29,6 +32,7 @@ struct PathParams {
     uint chooseLights;
     uint headlight;    // 1: with no lights, the first vertex is lit from the eye, as the raster lights it
     uint writeAux;     // 1: write the first hit's albedo and normal
+    uint bakeCount;    // a bake: how many harmonics it fits, 1 (a colour) to 16
     uint adaptive;     // 1: a converged pixel takes no more paths
     float errorTarget; // relative standard error of the mean a pixel stops at
     uint minSamples;   // and not before this many
@@ -440,43 +444,99 @@ LobeStack bakeBody(LobeStack stack) {
 /// One direction a sample, so the mean over the paths is the mean over the
 /// hemisphere. The ray still starts where the caller put it and still ends on
 /// the surface it named.
-Found foundBaked(uint at, uint sample, uint mask) {
-    const float4 o = bakeRays[at * 2];       // the point, and how far off the surface to start
-    const float4 d = bakeRays[at * 2 + 1];   // its normal
+/// Which way this sample looks at the point, in the world.
+float3 bakeDirection(uint at, uint sample) {
+    const float4 d = bakeRays[at * 2 + 1];
     const float3 n = normalize(d.xyz);
     const uint2 pixel = uint2(at % max(camera.width, 1u), at / max(camera.width, 1u));
     // Stratified, not drawn: the radiance leaving a glossy surface swings by
     // orders of magnitude across the hemisphere, so directions taken at
     // random leave one gaussian in the mirror of the sun and its neighbour
     // nowhere near it -- salt and pepper that more paths barely touch. A
-    // grid with a jitter in each cell covers the hemisphere evenly, and the
-    // same count then answers a different question.
+    // grid with a jitter in each cell covers it evenly, and the same count
+    // then answers a different question.
     const uint side = max(uint(sqrt(float(max(path.samples, 1u))) + 0.5), 1u);
     const uint2 cell = uint2(sample % side, (sample / side) % side);
     const float2 u = saturate((float2(cell) + random2(pixel, sample, 0u, 41u)) / float(side));
-    // Cosine about the normal, in a frame built on it.
-    const float r = sqrt(u.x);
+    // UNIFORM, and over the half of the sphere the surface faces.
+    //
+    // These directions are what the harmonics are projected over, and the
+    // harmonics are orthonormal over the sphere and over nothing else: fitted
+    // a coefficient at a time over a hemisphere they are not orthogonal, each
+    // one explains the same light again, and their sum overshoots -- measured,
+    // the pawn came back ten times too bright. So the integral is over the
+    // sphere with the far half taken as nothing, which is what a one-sided
+    // surface sends there. Drawing only from the near half and measuring it
+    // with 2 pi is the same integral with none of the samples thrown away.
+    //
+    // Not cosine weighted: the cosine belongs to a reflection integral, and
+    // this one is a projection.
+    const float z = u.x;
+    const float r = sqrt(max(1.0 - z * z, 0.0));
     const float phi = 2.0 * 3.14159265358979 * u.y;
     float3 tangent = abs(n.z) < 0.999 ? normalize(cross(float3(0.0, 0.0, 1.0), n))
                                       : float3(1.0, 0.0, 0.0);
     const float3 bitangent = cross(n, tangent);
-    const float3 towards =
-        normalize(tangent * (r * cos(phi)) + bitangent * (r * sin(phi)) + n * sqrt(max(1.0 - u.x, 0.0)));
-    // Off the surface ALONG the direction it is seen from, not along the
-    // normal: a ray that starts above the point and travels sideways misses
-    // its own surface at grazing angles, and the gaussians it misses come
-    // back black. That was salt and pepper over the whole model, and no
-    // number of paths took it out -- it was not noise.
-    const float3 from = o.xyz + towards * o.w;
-    const PathHit hit = traceNearestFrom(from, -towards, o.w * 0.01, mask);
-    return foundHit(hit, from, -towards);
+    return normalize(tangent * (r * cos(phi)) + bitangent * (r * sin(phi)) + n * z);
 }
+
+/// Whether a sample looks at the surface from the side it faces. Every one of
+/// them does now that they are drawn from that half, and the test stands for
+/// a normal that is not quite the one the ray was built on.
+bool bakeInFront(uint at, uint sample) {
+    return dot(bakeDirection(at, sample), normalize(bakeRays[at * 2 + 1].xyz)) > 0.0;
+}
+
+Found foundBaked(uint at, uint sample, uint mask) {
+    const float4 o = bakeRays[at * 2];   // the point, and how far off the surface to start
+    if (!bakeInFront(at, sample)) {
+        return foundNothing();   // behind the surface: this sample is a zero, and costs no ray
+    }
+    // WHICH SURFACE, and FROM WHERE, are two questions.
+    //
+    // The surface is found by a ray straight down the normal, which always
+    // meets the point it was built from. Aiming the ray along the direction
+    // the sample looks from was tried instead, and at grazing angles it
+    // travels beside the surface rather than onto it: on the pawn 55000
+    // gaussians of 729073 found nothing, came back black, and speckled the
+    // model in a way no number of paths touched.
+    //
+    // The direction is the sample's, and it is set afterwards: the geometry
+    // is the same point either way, and what the material is asked is what it
+    // sends towards the eye -- which for a bake is wherever this sample looks
+    // from.
+    const float3 n = normalize(bakeRays[at * 2 + 1].xyz);
+    const float3 from = o.xyz + n * o.w;
+    const PathHit hit = traceNearestFrom(from, -n, o.w * 0.01, mask);
+    Found f = foundHit(hit, from, -n);
+    if (f.valid) {
+        f.eye = f.positionWorld + bakeDirection(at, sample) * o.w;
+        f.rayOrigin = f.eye;
+        f.rayT = o.w;
+    }
+    return f;
+}
+
+/// One basis function where a sample looks from.
+///
+/// The cloud stores its colours as harmonics of the direction from the eye to
+/// the splat, so the basis is read at `-towards`: the sample looks from the
+/// surface out, and the renderer looks the other way along the same line.
+float bakeBasisAt(uint at, uint sample, uint basis) {
+    return shBasisValue(basis, -bakeDirection(at, sample));
+}
+
+/// The measure a uniform sample of the sphere stands for: the estimator of
+/// `integral(L * Y)` over N of them is `(4 pi / N) * sum(L * Y)`.
+static const float kBakeMeasure = 2.0 * 3.14159265358979;
 )";
 
 const char* kNoBake = R"(
 static const bool kBake = false;
 Found foundBaked(uint at, uint sample, uint mask) { return foundNothing(); }
 LobeStack bakeBody(LobeStack stack) { return stack; }
+float bakeBasisAt(uint at, uint sample, uint basis) { return 0.0; }
+static const float kBakeMeasure = 0.0;
 )";
 
 const char* kNoAux = R"(
@@ -1221,6 +1281,16 @@ void tracePathsAt(uint2 group, uint index) {
         writeAuxAt(at, pixels, float4(0.0), float4(0.0));
     }
     float3 total = float3(0.0);
+    // A bake fits every harmonic in the one pass: the paths are the same for
+    // all of them and only the weight differs, so tracing them once and
+    // weighing them sixteen ways is sixteen times less work than tracing them
+    // sixteen times. Measured before this, the pawn took 5m43 at degree 2.
+    float3 coefficients[16];
+    if (kBake) {
+        for (uint c = 0; c < 16; ++c) {
+            coefficients[c] = float3(0.0);
+        }
+    }
     float  alpha = 0.0;
     float  hitDepth = 0.0;
     float  squares = 0.0;   // sum of each sample's luminance squared
@@ -1330,8 +1400,14 @@ void tracePathsAt(uint2 group, uint index) {
             } else {
                 cur = shaded;
                 if (kBake && bounce == 0) {
-                    // The first vertex is the gaussian's own surface, and what
-                    // it is asked for is the light on it (bakeBody says why).
+                    // The body of the material, never its polish (bakeBody
+                    // says why). Baking the polish into harmonics was tried:
+                    // a reflection off a surface of roughness 0.1 is far too
+                    // sharp for sixteen coefficients, and the pawn came back
+                    // silver -- 0.276 where the mesh reads 0.085. What the
+                    // harmonics hold is how the body's own light changes with
+                    // the direction; the reflection stays a lobe, which knows
+                    // where the eye is.
                     cur.stack = bakeBody(cur.stack);
                 }
                 if (kAux && bounce == 0 && path.writeAux != 0 && !auxWritten) {
@@ -1465,8 +1541,18 @@ void tracePathsAt(uint2 group, uint index) {
         }
         hitDepth = depthHere;
         alpha += opacity;
-        total += carried * opacity;
-        const float lum = dot(carried * opacity, kPathLuminance);
+        // A bake fits harmonics: each sample is weighed by the basis where it
+        // looked from, and it is fitted in the space a cloud is blended in
+        // (frame.slang), so that what the renderer decodes is what the tracer
+        // answered.
+        const float3 sampleColour = kBake ? linearToSrgb(carried) : carried;
+        if (kBake) {
+            for (uint c = 0; c < min(path.bakeCount, 16u); ++c) {
+                coefficients[c] += sampleColour * opacity * bakeBasisAt(at, sample, c);
+            }
+        }
+        total += sampleColour * opacity;
+        const float lum = dot(sampleColour * opacity, kPathLuminance);
         squares += lum * lum;
     }
     // A mean of products, not a product of means: `total` already carries each
@@ -1475,7 +1561,24 @@ void tracePathsAt(uint2 group, uint index) {
     // there is today -- and differ as soon as opacity varies per sample, and
     // the product form also broke the invariant that 256 paths in one pass
     // must equal 64 in each of four.
-    const float4 added = float4(total, alpha) / float(samples);
+    // A frame wants the mean of its samples; a bake wants the coefficient,
+    // which is the same sum over the basis against itself rather than over
+    // the count. The constant term is shifted to where a cloud keeps its DC.
+    float4 added = float4(total, alpha) / float(samples);
+    if (kBake) {
+        // Each coefficient into a plane of its own, and the first one shifted
+        // to where a cloud keeps its DC: it stores the constant term the way
+        // 3DGS trains it, `colour = 0.5 + kSH0 * dc`, while a projection gives
+        // `colour = c0 * kSH0`.
+        for (uint c = 0; c < min(path.bakeCount, 16u); ++c) {
+            float3 value = coefficients[c] * (kBakeMeasure / float(samples));
+            if (c == 0) {
+                value -= float3(kShDcOffset);
+            }
+            colour[c * pixels + at] = float4(value, alpha / float(samples));
+        }
+        return;
+    }
     const float before = float(path.accumulated);
     const float4 kept = path.accumulated != 0 ? sum[at] : float4(0.0);
     const float4 now = kept + added * float(samples);
@@ -1720,10 +1823,13 @@ Result<void> PathTracer::trace(gpu::CommandBatch& batch, const VisibilityTargets
     }
     const uint32_t groupCount = std::min(frame.groups.count, kMaxLightGroups);
     const uint64_t pixels = uint64_t{width} * height;
-    const bool resized = out.width != width || out.height != height || !out.colour.valid();
+    // A bake writes one plane a coefficient into the same buffer.
+    const uint64_t planesOut = bake != nullptr ? std::clamp(bake->coefficients, 1u, 16u) : 1u;
+    const bool resized = out.width != width || out.height != height || !out.colour.valid() ||
+                         out.colour.bytes() < pixels * 16 * planesOut;
     if (resized) {
         gpu::BufferDesc colour;
-        colour.bytes = pixels * 16;
+        colour.bytes = pixels * 16 * planesOut;
         colour.elementBytes = 16;
         colour.label = "path.colour";
         auto madeColour = gpu::Buffer::create(*device_, colour);
@@ -1831,6 +1937,7 @@ Result<void> PathTracer::trace(gpu::CommandBatch& batch, const VisibilityTargets
             cursor["volumeWords"].setBinding(frame.volumes->rhi());
         }
         cursor["path"]["adaptive"].setData(uint32_t{settings.adaptive ? 1u : 0u});
+        cursor["path"]["bakeCount"].setData(bake != nullptr ? std::clamp(bake->coefficients, 1u, 16u) : 1u);
         cursor["path"]["headlight"].setData(uint32_t{settings.headlight ? 1u : 0u});
         cursor["path"]["mis"].setData(uint32_t{settings.mis ? 1u : 0u});
         // The emitting triangles, where the kernel samples them: their table,

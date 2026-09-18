@@ -673,7 +673,8 @@ Result<StageImage> StageRenderer::render(const std::string& camera, double time,
 }
 
 Result<std::vector<float>> StageRenderer::bakePoints(const std::vector<float>& rays, uint32_t count,
-                                                     double time, uint32_t samples, uint32_t bounces) {
+                                                     double time, uint32_t samples, uint32_t bounces,
+                                                     uint32_t degree) {
     Impl& impl = *impl_;
     if (count == 0 || rays.size() < size_t{count} * 8) {
         return Error(ErrorCode::InvalidArgument, "bake: two float4 a point, and at least one point");
@@ -699,25 +700,36 @@ Result<std::vector<float>> StageRenderer::bakePoints(const std::vector<float>& r
     auto buffer = gpu::Buffer::create(device, desc, rays.data());
     if (!buffer) return std::move(buffer).error();
 
+    render::RenderSettings settings;
+    settings.width = 1;
+    settings.height = 1;
+    const render::Projection projection = render::projectionFor(*framing, 1, 1);
+    const uint32_t coefficients = (std::min(degree, 3u) + 1) * (std::min(degree, 3u) + 1);
     render::RenderTargets out;
     lrt::usd::BakeRequest bake;
     bake.rays = &*buffer;
     bake.count = count;
     bake.samples = samples;
     bake.bounces = bounces;
+    bake.coefficients = coefficients;
     bake.out = &out;
-    render::RenderSettings settings;
-    settings.width = 1;
-    settings.height = 1;
-    const render::Projection projection = render::projectionFor(*framing, 1, 1);
     LRT_TRY(engine.bakePoints(bake, projection, settings));
     if (!out.colour.valid()) {
         return Error(ErrorCode::InternalError, "bake: the frame wrote nothing");
     }
     auto baked = out.colour.readAll<float>(device);
     if (!baked) return std::move(baked).error();
-    baked->resize(size_t{count} * 4);
-    return std::move(*baked);
+    // The kernel writes a plane a coefficient over the whole grid; what comes
+    // back is gathered per point, in the order a record keeps them.
+    const size_t plane = size_t{out.width} * out.height;
+    std::vector<float> all(size_t{count} * coefficients * 4, 0.0F);
+    for (uint32_t k = 0; k < count; ++k) {
+        for (uint32_t c = 0; c < coefficients; ++c) {
+            std::copy_n(baked->data() + (c * plane + k) * 4, 4,
+                        all.data() + (size_t{k} * coefficients + c) * 4);
+        }
+    }
+    return all;
 }
 
 Result<StageImage> StageRenderer::render(const render::Camera& camera, double time, uint32_t width, uint32_t height,

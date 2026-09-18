@@ -64,10 +64,12 @@ void rtShade(uint3 tid: SV_DispatchThreadID) {
         SplatSurface surface;
         surface.position = relightToWorld(w0, w1, w2, p.xyz);
         surface.normal = relightDirectionToWorld(w0, w1, w2, cloudNormal);
-        // The stored colour is in the space the cloud is blended in; an
-        // albedo is light. Every cloud needs this, not only a converted one:
-        // a capture's trained colour is sRGB too.
-        surface.albedo = params.linearise != 0 ? srgbToLinear(base) : max(base, 0.0);
+        // What the cloud shows in this direction, decoded: the stored colours
+        // are in the space a cloud is blended in and an albedo is light. The
+        // harmonics are part of it -- a baked cloud keeps the body's own
+        // change with direction in them -- so it is the evaluated colour and
+        // not the constant term alone.
+        surface.albedo = params.linearise != 0 ? srgbToLinear(colour) : max(colour, 0.0);
         surface.metallic = params.hasPbr != 0 ? pbrMetallic(pbr[i]) : 0.0;
         surface.roughness = params.hasPbr != 0 ? pbrRoughness(pbr[i]) : 1.0;
         surface.transmission = params.hasPbr != 0 ? pbrTransmission(pbr[i]) : 0.0;

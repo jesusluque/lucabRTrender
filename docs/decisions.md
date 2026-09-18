@@ -4523,3 +4523,57 @@ onto the basis, and the renderer would need nothing added at all. Apple's
 LiTo calls the same thing a surface light field and learns a latent for it;
 the classical version is four to sixteen numbers a gaussian, and the format
 has room for them.
+
+## The bake fits harmonics: what a colour could not hold
+
+A gaussian carries one colour and a reflection is a function of direction, so
+the bake now fits **spherical harmonics** -- the same ones a trained cloud
+carries and this engine already reads to degree 3. Apple's LiTo calls the
+thing they stand for a surface light field; the classical version is four to
+sixteen numbers a gaussian, and the format has room for them.
+
+**How it is fitted.** The path tracer's bake already looks at every gaussian
+from many directions; each sample is now weighed by a basis function where it
+looked from (`shBasisValue`, beside `evaluateRest` so the two cannot drift)
+and the coefficients come out of one pass, a plane each. Three things had to
+be got right, and each was got wrong first:
+
+- **Over the sphere, not the hemisphere.** Harmonics are orthonormal over the
+  sphere and over nothing else. Fitted a coefficient at a time over the
+  hemisphere a surface faces, each one explains the same light again and their
+  sum overshoots: **ten times too bright**, measured. The integral is over the
+  sphere with the far half taken as nothing -- which is what a one-sided
+  surface sends there -- and drawn from the near half with a measure of 2 pi,
+  so no sample is thrown away.
+- **One pass, not one a coefficient.** The paths are the same for every
+  coefficient and only the weight differs. Tracing them once and weighing them
+  sixteen ways took the pawn from **5m43 to 32 seconds** at degree 2.
+- **Which surface and from where are two questions.** The ray that finds the
+  surface goes straight down the normal, which always meets the point it was
+  built from; the direction the sample looks from is set afterwards, on the
+  hit. Aiming the ray along that direction instead leaves it travelling beside
+  the surface at grazing angles: **55000 gaussians of 729073 found nothing**,
+  came back black, and speckled the model in a way no number of paths touched.
+
+**What is baked and what is not.** The body of the material -- its diffuse, what
+it transmits, a conductor's reflection -- and not its polish. Baking the polish
+was tried: a reflection off a surface of roughness 0.1 is far too sharp for
+sixteen coefficients, and the pawn came back **silver, 0.276 where the mesh
+reads 0.085**. Adding the polish back at render time was tried too, and the
+frame's own reflection has no occlusion in it: **0.135**, and the marble washed
+out again. So a cloud with harmonics carries the body and nothing is added; a
+cloud baked to a single colour keeps `litBody` and the frame puts the polish
+back, which is the best a colour can do.
+
+**Where it lands.** The pawn, 729073 gaussians, 1024 paths each at degree 3:
+**6m45 in release**, and over the same patch of its body the cloud reads
+**0.095 / 0.093 / 0.081** against the mesh's **0.085 / 0.099 / 0.098**. The
+marble is marble again: its texture, its shading and its tone, from a cloud.
+
+**What is still wrong.** The glass head. Nearly all of what it shows is a
+mirror reflection of the sky and a refraction of what stands behind, and
+neither is a low-frequency function of direction: degree 3 cannot hold the
+first, and the second arrives through a lobe that bends every sample somewhere
+else. It comes back mottled. What would answer it is either far more
+coefficients than a cloud carries or the thing LiTo went after -- a learned
+latent instead of a basis -- and neither is this conversion's business today.

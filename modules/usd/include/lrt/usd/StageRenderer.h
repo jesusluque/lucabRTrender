@@ -132,9 +132,15 @@ public:
     ///
     /// What it is for: `lrt mesh2splat`, which turns a mesh into gaussians
     /// that carry the light the mesh had.
+    /// `degree` asks for spherical harmonics rather than a colour: 0 gives one
+    /// `float4` a point, and 1, 2 or 3 give (degree + 1)^2 of them, the
+    /// constant term first and the rest in `evaluateRest`'s order. What a
+    /// single colour cannot hold is the direction the light leaves in, which
+    /// is what makes a converted mesh look like polished plastic; the
+    /// harmonics are what a trained cloud carries for the same reason.
     [[nodiscard]] Result<std::vector<float>> bakePoints(const std::vector<float>& rays, uint32_t count,
                                                         double time, uint32_t samples = 64,
-                                                        uint32_t bounces = 3);
+                                                        uint32_t bounces = 3, uint32_t degree = 0);
 
     /// Samples per light per pixel: one for an interactive frame, more where
     /// an area light's noise would be read as error.

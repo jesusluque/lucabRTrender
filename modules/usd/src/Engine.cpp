@@ -1852,6 +1852,7 @@ Result<void> Engine::render(const render::Projection& projection, const render::
                 points.count = bake->count;
                 points.width = std::min(bake->count, 4096u);
                 points.height = (bake->count + points.width - 1) / points.width;
+                points.coefficients = bake->coefficients;
                 paths.accumulate = false;
                 paths.adaptive = false;
                 // A bake has no camera, so it cannot have a headlight: what
