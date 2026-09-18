@@ -89,10 +89,13 @@ struct Options {
     std::string              prim;
     uint32_t                 resolution = 512;
     uint64_t                 maxSplats = 2000000;
-    double                   sigma = 0.65;
+    // Their 0.65 is the width they chose for their own renderer; traced here
+    // it leaves a converted surface 30% transparent (docs/decisions.md has
+    // the table). 1.0 closes it to 91%, 1.2 to 96%.
+    double                   sigma = 1.0;
     double                   flatness = 1.0e-7;
     double                   opacity = 1.0;
-    double                   minOpacity = 0.25;
+    double                   minOpacity = 0.15;
     uint32_t                 maxCells = 1u << 18;
     uint32_t                 textureSize = 0;
     bool                     noTextures = false;
@@ -375,16 +378,20 @@ public:
         raw.encoding.scale0 = 4; raw.encoding.scale1 = 5; raw.encoding.scale2 = 6;
         raw.encoding.rotW = 7; raw.encoding.rotX = 8; raw.encoding.rotY = 9; raw.encoding.rotZ = 10;
         raw.encoding.dc0 = 11; raw.encoding.dc1 = 12; raw.encoding.dc2 = 13;
-        raw.encoding.restBase = 16;
+        raw.encoding.restBase = 17;
         raw.encoding.restPerColour = 0;
         // What the gaussian reflects with, which is what lets a relit cloud
         // show the sheen its mesh had: two more floats a record.
         raw.encoding.metallic = 14;
         raw.encoding.roughness = 15;
-        raw.encoding.floatsPerRecord = 16;
+        raw.encoding.transmission = 16;
+        raw.encoding.floatsPerRecord = 17;
         raw.encoding.opacity_ = io::SplatEncoding::Opacity::Linear;
         raw.encoding.scale_ = io::SplatEncoding::Scale::Linear;
-        raw.encoding.colour = io::SplatEncoding::Colour::Linear;
+        // The conversion's colours come from a material, in linear light; a
+        // cloud carries and blends its colours in the space it was trained
+        // in, which for every trainer there is means sRGB.
+        raw.encoding.colour = io::SplatEncoding::Colour::LinearLight;
         raw.encoding.rotation = io::SplatEncoding::Rotation::Float;
 
         uint64_t written = 0;
@@ -489,6 +496,8 @@ private:
         // what it reflects with.
         number("writePbr", 1.0);
         number("transmission", static_cast<double>(material.transmission));
+        number("metallic", static_cast<double>(material.metallic));
+        number("roughness", static_cast<double>(material.roughness));
         job.params.push_back(aofx::ParamValue{"sigma", {options_->sigma, options_->sigma}, {}});
         const auto colour = [&job](const char* name, const std::array<float, 3>& rgb) {
             job.params.push_back(aofx::ParamValue{name,
@@ -519,9 +528,9 @@ private:
         const auto floats = out.floats();
         const auto stride = static_cast<size_t>(out.stride());
         const auto width = static_cast<size_t>(out.bounds().width());
-        answer.records.resize(answer.written * 16);
+        answer.records.resize(answer.written * 17);
         for (uint64_t splat = 0; splat < answer.written; ++splat) {
-            float* record = answer.records.data() + splat * 16;
+            float* record = answer.records.data() + splat * 17;
             const auto entry = [&](uint32_t component) {
                 const uint64_t index = splat * kRecordEntries + component;
                 return floats.data() + ((index / width) * stride + index % width) * 4;
@@ -544,6 +553,7 @@ private:
             const float* surface = entry(5);
             record[14] = shading[3];
             record[15] = surface[0];
+            record[16] = surface[1];
         }
         return answer;
     }
@@ -574,7 +584,9 @@ void addMesh2Splat(CLI::App& app) {
     cmd->add_option("--resolution", o->resolution,
                     "cells across the model's longest side: the density of the conversion");
     cmd->add_option("--max-splats", o->maxSplats, "the budget, over the whole stage");
-    cmd->add_option("--sigma", o->sigma, "how wide a gaussian is against its texel (mesh2splat's 0.65)");
+    cmd->add_option("--sigma", o->sigma,
+                    "how wide a gaussian is against its cell; mesh2splat's own number is 0.65, which "
+                    "leaves a traced surface 30% transparent");
     cmd->add_option("--flatness", o->flatness, "the third size, across the surface");
     cmd->add_option("--opacity", o->opacity, "the opacity every gaussian starts from");
     cmd->add_option("--glass-opacity", o->minOpacity,

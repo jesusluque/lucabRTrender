@@ -408,7 +408,7 @@ Result<void> GaussianRayTracer::buildBvh(const Cloud& cloud, gpu::Buffer& boxes,
 
 Result<void> GaussianRayTracer::prepareFrame(std::span<const SplatInstance> instances,
                                              const Vec3& eyeWorld, uint32_t shLimit,
-                                             const SplatLights* lights) {
+                                             const SplatLights* lights, bool linearise) {
     gpu::Device& device = *device_;
     const bool hardware = settings_.route == RayTracingRoute::Hardware;
     std::vector<rhi::AccelerationStructureInstanceDescGeneric> generic;
@@ -556,6 +556,10 @@ Result<void> GaussianRayTracer::prepareFrame(std::span<const SplatInstance> inst
             p["eyeWorldX"].setData(static_cast<float>(eyeWorld.x));
             p["eyeWorldY"].setData(static_cast<float>(eyeWorld.y));
             p["eyeWorldZ"].setData(static_cast<float>(eyeWorld.z));
+            // Which space this kernel's answer goes into. The blend reads it
+            // too, and a relit colour that did not know about it was put
+            // through the sRGB curve twice.
+            p["linearise"].setData(uint32_t{linearise ? 1u : 0u});
         });
     }
     return batch.submit(false);
@@ -598,7 +602,7 @@ Result<RayTracerStats> GaussianRayTracer::prepare(const Projection& projection,
     for (const Cloud& cloud : clouds_) {
         stats.chunks += cloud.chunks;
     }
-    LRT_TRY(prepareFrame(instances, projection.eyeWorld, maxShDegree, lights));
+    LRT_TRY(prepareFrame(instances, projection.eyeWorld, maxShDegree, lights, true));
     stats.buildMs = msSince(start);
     stats.totalMs = stats.buildMs;
     return stats;
@@ -658,7 +662,7 @@ Result<RayTracerStats> GaussianRayTracer::render(const Projection& projection,
         targets.width = settings.width;
         targets.height = settings.height;
     }
-    LRT_TRY(prepareFrame(instances, projection.eyeWorld, settings.maxShDegree, lights));
+    LRT_TRY(prepareFrame(instances, projection.eyeWorld, settings.maxShDegree, lights, settings.linearise));
     stats.buildMs = msSince(start);
 
     const auto renderStart = Clock::now();

@@ -34,6 +34,7 @@ struct ParticleFieldArrays {
     /// Empty for a capture, which was trained with its light already in it.
     pxr::VtValue metallic;         ///< VtFloatArray or VtHalfArray
     pxr::VtValue roughness;
+    pxr::VtValue transmission;
 };
 
 /// A volume's field asset, as UsdVolOpenVDBAsset names it.

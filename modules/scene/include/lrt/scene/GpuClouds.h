@@ -97,6 +97,7 @@ struct SplatStreams {
     /// so (`primvars:lrt:splat:metallic` and `:roughness`). Empty otherwise.
     FloatStream metallic;
     FloatStream roughness;
+    FloatStream transmission;
 };
 
 /// A point cloud as separate arrays, the way UsdGeomPoints stores one.

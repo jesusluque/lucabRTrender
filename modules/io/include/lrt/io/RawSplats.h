@@ -29,6 +29,9 @@ struct SplatEncoding {
     /// trainer writes.
     uint32_t metallic = kNoField;
     uint32_t roughness = kNoField;
+    /// What it lets through: a gaussian cannot refract, so this is what stops
+    /// glass being lit as though it were paint.
+    uint32_t transmission = kNoField;
     /// First rest coefficient and how many basis functions per colour the file
     /// carries (0, 3, 8 or 15).
     uint32_t restBase = 0;
@@ -40,7 +43,11 @@ struct SplatEncoding {
     /// SpzByte: log scale = byte / 16 - 10.
     enum class Scale : uint32_t { Log = 0, Linear = 1, SpzByte = 2 };
     /// SpzByte: SH DC = (byte / 255 - 0.5) / 0.15.
-    enum class Colour : uint32_t { ShDc = 0, Linear = 1, Byte = 2, SpzByte = 3 };
+    /// LinearLight: the record holds light, not a trained colour. A cloud is
+    /// carried and blended in the space it was trained in -- sRGB for every
+    /// trainer there is -- so a conversion, whose colours come from a
+    /// material in linear light, says so here and the decode encodes them.
+    enum class Colour : uint32_t { ShDc = 0, Linear = 1, Byte = 2, SpzByte = 3, LinearLight = 4 };
     /// Byte: w x y z bytes, (v - 128) / 128.
     /// FirstThree: x y z bytes at rotX..rotZ, v / 127.5 - 1, w from unit length (SPZ v2).
     /// SmallestThree: one uint32 split into its low 16 bits at rotX and high 16

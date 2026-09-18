@@ -18,6 +18,7 @@ import lrt.common.packing;
 import lrt.common.sh;
 import lrt.scene.splat_encoding;
 import lrt.splat.splat_relight;
+import lrt.common.color;
 import rt_common;
 
 StructuredBuffer<float4>   positions;
@@ -63,14 +64,20 @@ void rtShade(uint3 tid: SV_DispatchThreadID) {
         SplatSurface surface;
         surface.position = relightToWorld(w0, w1, w2, p.xyz);
         surface.normal = relightDirectionToWorld(w0, w1, w2, cloudNormal);
-        surface.albedo = max(base, 0.0);
+        // The stored colour is in the space the cloud is blended in; an
+        // albedo is light. Every cloud needs this, not only a converted one:
+        // a capture's trained colour is sRGB too.
+        surface.albedo = params.linearise != 0 ? srgbToLinear(base) : max(base, 0.0);
         surface.metallic = params.hasPbr != 0 ? pbrMetallic(pbr[i]) : 0.0;
         surface.roughness = params.hasPbr != 0 ? pbrRoughness(pbr[i]) : 1.0;
+        surface.transmission = params.hasPbr != 0 ? pbrTransmission(pbr[i]) : 0.0;
         // No shadow factors on this route: the rasteriser measures them in a
         // pass of its own before it projects, and a traced frame has no such
         // pass. Every light is taken whole.
-        colour = relitSplat(surface, normalize(eyeWorld - surface.position), lights, params.lightCount,
-                            params.categoriesLo, params.categoriesHi, shadowFactors, 0, 0);
+        colour = relitForBlend(relitSplat(surface, normalize(eyeWorld - surface.position), lights,
+                                          params.lightCount, params.categoriesLo, params.categoriesHi,
+                                          shadowFactors, 0, 0),
+                               params.linearise != 0);
     }
     if (fate.graded) {
         colour = editGrade(params.edit, colour);

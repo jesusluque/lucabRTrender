@@ -183,8 +183,10 @@ void HdLrtParticleField::Sync(HdSceneDelegate* delegate, HdRenderParam* renderPa
         // not. Primvars, so they arrive without the namespace.
         static const TfToken kMetallic("lrt:splat:metallic");
         static const TfToken kRoughness("lrt:splat:roughness");
+        static const TfToken kTransmission("lrt:splat:transmission");
         arrays.metallic = delegate->Get(id, kMetallic);
         arrays.roughness = delegate->Get(id, kRoughness);
+        arrays.transmission = delegate->Get(id, kTransmission);
         raw = std::move(arrays);
     }
     std::optional<lrt::render::SplatEdit> edit;

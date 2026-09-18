@@ -48,10 +48,11 @@ void splatDecode(uint3 tid: SV_DispatchThreadID) {
     shape[row + 2] = packHalves(halfSafe(ls.z), halfSafe(base.x));
     shape[row + 3] = packHalves(halfSafe(base.y), halfSafe(base.z));
 
-    if (params.metallic != kNoField || params.roughness != kNoField) {
+    if (params.metallic != kNoField || params.roughness != kNoField || params.transmission != kNoField) {
         const float metallic = params.metallic != kNoField ? fieldOf(raw, i, s, params.metallic) : 0.0;
         const float roughness = params.roughness != kNoField ? fieldOf(raw, i, s, params.roughness) : 1.0;
-        pbr[j] = packPbr(metallic, roughness);
+        const float through = params.transmission != kNoField ? fieldOf(raw, i, s, params.transmission) : 0.0;
+        pbr[j] = packPbr(metallic, roughness, through);
     }
 
     if (params.keepPerColour == 0) {

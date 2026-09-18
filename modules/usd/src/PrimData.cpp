@@ -130,11 +130,15 @@ scene::SplatStreams splatStreams(const ParticleFieldArrays& a, std::string sourc
     // harmonics above are.
     s.metallic = streamOf(a.metallic);
     s.roughness = streamOf(a.roughness);
+    s.transmission = streamOf(a.transmission);
     if (s.metallic.values() < s.count) {
         s.metallic = {};
     }
     if (s.roughness.values() < s.count) {
         s.roughness = {};
+    }
+    if (s.transmission.values() < s.count) {
+        s.transmission = {};
     }
     return s;
 }

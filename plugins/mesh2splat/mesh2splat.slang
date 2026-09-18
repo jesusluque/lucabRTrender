@@ -74,9 +74,9 @@ struct M2sParams {
     float4 transmissionColour;
 
     float minOpacity;     // what a fully transmitting material still keeps
+    float metallic;       // the material's own, multiplied into the map where there is one
+    float roughness;
     uint  pad1;
-    uint  pad2;
-    uint  pad3;
 
     uint  hasAlbedo;
     uint  albedoWidth;
@@ -319,15 +319,19 @@ void m2sEmit(uint3 tid: SV_DispatchThreadID) {
                                                params.albedoStride, uv);
             colour *= texel.xyz;
         }
-        float metallic = 0.1;
-        float roughness = 0.5;
+        // The material's own values, and the map where there is one: glTF
+        // multiplies the two and so does this, which is also what leaves a
+        // material with no map at the values it authored. Theirs defaulted to
+        // (0.1, 0.5) and ignored the material, so every conversion came out
+        // of the same plastic.
+        float metallic = params.metallic;
+        float roughness = params.roughness;
         if (params.hasMetallicRoughness != 0) {
-            // glTF's packing, which is what their shader reads: blue is
-            // metallic, green is roughness.
+            // Blue is metallic, green is roughness: their packing.
             const float4 texel = sampleWrapped(metallicRoughness, params.mrWidth, params.mrHeight,
                                                params.mrStride, uv);
-            metallic = texel.z;
-            roughness = texel.y;
+            metallic *= texel.z;
+            roughness *= texel.y;
         }
         float3 shading = normal;
         if (params.hasNormal != 0) {

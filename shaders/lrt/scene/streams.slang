@@ -29,6 +29,7 @@ static const uint kSh = 16;
 static const uint kColours = 32;
 static const uint kMetallic = 64;
 static const uint kRoughness = 128;
+static const uint kTransmission = 256;
 
 struct StreamParams {
     uint count;          // records in this slice
@@ -53,6 +54,7 @@ StructuredBuffer<uint>     sh;          // rgb per coefficient
 StructuredBuffer<uint>     colours;     // rgb
 StructuredBuffer<uint>     metallic;    // one a splat, where the stage carries it
 StructuredBuffer<uint>     roughness;
+StructuredBuffer<uint>     transmission;
 RWStructuredBuffer<float>  records;
 ConstantBuffer<StreamParams> params;
 
@@ -100,6 +102,8 @@ void splatStreams(uint3 tid: SV_DispatchThreadID) {
     if (params.pbrBase != kNoPbr) {
         records[r + params.pbrBase] = present(kMetallic) ? streamValue(metallic, isHalf(kMetallic), e) : 0.0;
         records[r + params.pbrBase + 1] = present(kRoughness) ? streamValue(roughness, isHalf(kRoughness), e) : 1.0;
+        records[r + params.pbrBase + 2] =
+            present(kTransmission) ? streamValue(transmission, isHalf(kTransmission), e) : 0.0;
     }
 }
 

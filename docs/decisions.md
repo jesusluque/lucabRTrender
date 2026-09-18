@@ -4345,3 +4345,83 @@ names a roughness map and no metallic map had its roughness written into all
 four channels of the packed map, so metallic came out equal to roughness --
 the chess set's glass, whose only map is a roughness. The defaults are laid
 down first now, and each file writes only its own channel.
+
+## What a converted surface is worth, measured against the mesh it came from
+
+The relit pawn was still half the mesh's brightness, so it was measured
+properly rather than argued about: a unit quad, one material (base colour 0.5,
+roughness 0.3, metallic 0), one distant light of intensity 1 head on, rendered
+as a mesh and as the cloud converted from it. The mesh reads **0.5032**. The
+cloud read **0.0358**. Four things were wrong, each found by taking the next
+number apart.
+
+**The colour was put through the sRGB curve twice.** A cloud is blended in the
+space it was trained in and the finished pixel is linearised
+(`frame.slang`); relighting produces light, which was then linearised again.
+0.5 came out 0.214, and where the curve is steepest a dark material came out
+ten times too dark -- that is what made the pawn black. A relit colour now
+goes into the blend encoded (`relitForBlend`), and the blend's own linearise
+gives back exactly the light that was computed. The same applies the other
+way: the **albedo** a relit splat uses is the stored colour decoded, which no
+relight had been doing -- a capture's trained colour is sRGB too.
+
+**A conversion's colours are light, and a cloud's are not.** So
+`io::SplatEncoding::Colour::LinearLight` says which, and the export encodes
+them into the cloud's space on the way in. A baked converted quad now reads
+0.3508 against a coverage of 0.7016: 0.5 exactly.
+
+**The traced route never set `linearise`.** The shade pass writes the colours
+the rays read and did not know which space it was writing into.
+
+**And the conversion never passed the material's own metallic and
+roughness.** mesh2splat's shader defaults to (0.1, 0.5) and reads the rest
+from a map; a material that names no map got that plastic, whatever it
+authored. They are parameters of the effect now, multiplied into the map where
+there is one, as glTF multiplies its factors.
+
+**With all four, the quad reads 0.5009 against the mesh's 0.5032** -- 0.5%,
+which is what is left of MIS weighting the surface's own specular sample.
+
+## Translucency: what a gaussian can do about glass
+
+A gaussian cannot refract. What it can do is three things, and with them glass
+reads as glass:
+
+- **Let what is behind it through**, which is its opacity: a transmitting
+  material keeps `lerp(1, minOpacity, transmission)` of it (0.15 by default),
+  so the collar is visible through the pawn's head.
+- **Reflect**, which is the specular lobe, and which is most of what a real
+  glass surface shows.
+- **Send on the light that arrives from behind it.** This is the translucent
+  half and it is new: the body of the material is split, `1 - transmission` of
+  it facing the light and `transmission` of it facing away, so a light behind
+  a glass splat lights it instead of leaving it black. Under a dome, which is
+  on both sides at once, the two halves sum to the whole body -- a glass ball
+  under a sky is its own colour, not a dark shell. `transmission` travels per
+  splat, in the third byte of the packed word beside metallic and roughness.
+
+Killing the diffuse outright was tried first and is wrong: the pawn's head
+went grey, because what makes it mint green is exactly the light that goes in
+and comes back out.
+
+## The width of a converted gaussian, and what it covers
+
+mesh2splat's `sigma` is 0.65 of a cell. Traced here, that leaves a converted
+surface **30% transparent**: the ray meets a gaussian 0.7 of a cell from its
+centre and takes what the falloff leaves. Measured on the quad, the coverage
+(and the pixel, against the mesh's 0.5032):
+
+| sigma | coverage | pixel |
+|---|---|---|
+| 0.65 | 0.702 | 0.351 |
+| 0.85 | 0.848 | 0.425 |
+| 1.0  | 0.911 | 0.456 |
+| 1.2  | 0.957 | 0.479 |
+| 1.5  | 0.986 | 0.493 |
+
+So `lrt mesh2splat` defaults to **1.0** and `--sigma 0.65` asks for theirs.
+It is a departure from their number and it is deliberate: their renderer
+composites its own way, and a surface you can see 30% through is not what a
+conversion of a solid mesh means. The rasteriser is less affected than the ray
+tracer (0.94 against 0.70 at 0.65), which is the two integrations differing,
+not the cloud.

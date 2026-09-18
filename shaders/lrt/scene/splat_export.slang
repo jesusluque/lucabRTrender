@@ -7,6 +7,7 @@
 module splat_export;
 import lrt.common.packing;
 import splat_encoding;
+import lrt.common.color;
 
 StructuredBuffer<float>      raw;
 RWStructuredBuffer<float4>   posOpacity;   // xyz, opacity
@@ -40,7 +41,10 @@ void splatExport(uint3 tid: SV_DispatchThreadID) {
     const uint row = i * (1 + params.keepPerColour);
     float3 dc = float3(fieldOf(raw, i, s, params.dc0), fieldOf(raw, i, s, params.dc1),
                        fieldOf(raw, i, s, params.dc2));
-    if (params.colourMode == 1) {
+    if (params.colourMode == 4) {
+        // Light, which the cloud carries in the space it is blended in.
+        dc = (linearToSrgb(dc) - 0.5) / kSH0;
+    } else if (params.colourMode == 1) {
         dc = (dc - 0.5) / kSH0;
     } else if (params.colourMode == 2) {
         dc = (dc / 255.0 - 0.5) / kSH0;

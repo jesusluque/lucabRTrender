@@ -58,9 +58,9 @@ struct Mesh2SplatUniforms {
     float transmissionColour[4] = {1.0F, 1.0F, 1.0F, 1.0F};
 
     float    minOpacity = 0.25F;
+    float    metallic = 0.0F;
+    float    roughness = 0.5F;
     uint32_t pad1 = 0;
-    uint32_t pad2 = 0;
-    uint32_t pad3 = 0;
 
     uint32_t hasAlbedo = 0;
     uint32_t albedoWidth = 0;
@@ -190,6 +190,28 @@ public:
         transmission.hardMax = {1.0};
         into.params.push_back(transmission);
 
+        aofx::ParamDesc metallic;
+        metallic.name = "metallic";
+        metallic.label = "Metallic";
+        metallic.hint =
+            "What the material is worth on its own, multiplied into the map where there is one, as "
+            "glTF multiplies its factors.";
+        metallic.type = aofx::ParamType::Double;
+        metallic.defaults = {0.0};
+        metallic.hardMin = {0.0};
+        metallic.hardMax = {1.0};
+        into.params.push_back(metallic);
+
+        aofx::ParamDesc roughness;
+        roughness.name = "roughness";
+        roughness.label = "Roughness";
+        roughness.hint = "The same, for how rough the surface is. A gaussian with none is plastic.";
+        roughness.type = aofx::ParamType::Double;
+        roughness.defaults = {0.5};
+        roughness.hardMin = {0.0};
+        roughness.hardMax = {1.0};
+        into.params.push_back(roughness);
+
         aofx::ParamDesc floor;
         floor.name = "minOpacity";
         floor.label = "Glass opacity";
@@ -315,6 +337,8 @@ public:
         uniforms.useNormalMap = request.number("useNormalMap", 0.0) >= 0.5 ? 1U : 0U;
         uniforms.minOpacity =
             static_cast<float>(std::clamp(request.number("minOpacity", 0.25), 0.0, 1.0));
+        uniforms.metallic = static_cast<float>(std::clamp(request.number("metallic", 0.0), 0.0, 1.0));
+        uniforms.roughness = static_cast<float>(std::clamp(request.number("roughness", 0.5), 0.0, 1.0));
         for (int k = 0; k < 3; ++k) {
             uniforms.materialColour[k] =
                 static_cast<float>(request.number("materialColour", 1.0, static_cast<size_t>(k)));

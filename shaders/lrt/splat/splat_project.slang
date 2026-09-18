@@ -12,6 +12,7 @@ import lrt.common.edit;
 // What a relit splat does with those lights is splat_relight's, shared with
 // the ray traced route so that the two cannot drift.
 import splat_relight;
+import lrt.common.color;
 import lrt.scene.splat_encoding;
 // A shadow ray against the cloud's own proxies, where the caller built them.
 
@@ -181,13 +182,18 @@ void splatProject(uint3 tid: SV_DispatchThreadID) {
         SplatSurface surface;
         surface.position = relightToWorld(w0, w1, w2, posOpacity.xyz);
         surface.normal = relightDirectionToWorld(w0, w1, w2, cloudNormal);
-        surface.albedo = max(base, 0.0);
+        // The stored colour is in the space the cloud is blended in; an
+        // albedo is light. Every cloud needs this, not only a converted one:
+        // a capture's trained colour is sRGB too.
+        surface.albedo = params.linearise != 0 ? srgbToLinear(base) : max(base, 0.0);
         surface.metallic = params.hasPbr != 0 ? pbrMetallic(pbr[i]) : 0.0;
         surface.roughness = params.hasPbr != 0 ? pbrRoughness(pbr[i]) : 1.0;
+        surface.transmission = params.hasPbr != 0 ? pbrTransmission(pbr[i]) : 0.0;
         const uint shadowLights = params.shadowRays != 0 ? params.shadowLights : 0;
-        colour = relitSplat(surface, normalize(eye - surface.position), lights, params.lightCount,
-                            params.categoriesLo, params.categoriesHi, shadowFactors,
-                            slot * params.shadowLights, shadowLights);
+        colour = relitForBlend(relitSplat(surface, normalize(eye - surface.position), lights,
+                                          params.lightCount, params.categoriesLo, params.categoriesHi,
+                                          shadowFactors, slot * params.shadowLights, shadowLights),
+                               params.linearise != 0);
     }
     if (fate.graded) {
         colour = editGrade(params.edit, colour);

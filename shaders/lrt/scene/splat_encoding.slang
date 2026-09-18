@@ -3,6 +3,7 @@
 // Where a raw record's fields are and how they are encoded. Mirrors
 // lrt::io::SplatEncoding and lrt::scene's DecodeUniforms field for field.
 module splat_encoding;
+import lrt.common.color;
 import lrt.common.packing;
 
 public struct DecodeParams {
@@ -18,7 +19,7 @@ public struct DecodeParams {
     public uint rotationMode; public uint shWords; public uint restMode; public uint flipYZ;
     // What a gaussian reflects with, where the file carries it: 0xFFFFFFFF
     // means it does not, which is every file a trainer writes.
-    public float positionScale; public uint metallic; public uint roughness; public uint pad0;
+    public float positionScale; public uint metallic; public uint roughness; public uint transmission;
 };
 
 public float fieldOf(StructuredBuffer<float> raw, uint record, uint stride, uint field) {
@@ -48,6 +49,7 @@ public float decodeColour(float v, uint mode) {
     if (mode == 0) return 0.5 + kSH0 * v;          // SH DC coefficient
     if (mode == 2) return v / 255.0;
     if (mode == 3) return 0.5 + kSH0 * ((v / 255.0 - 0.5) / 0.15);   // SPZ byte: its DC scale
+    if (mode == 4) return linearToSrgb(v);         // light, into the space a cloud is blended in
     return v;
 }
 
@@ -108,13 +110,15 @@ public float4 decodeQuaternion(StructuredBuffer<float> raw, uint record, DecodeP
 
 public static const uint kNoField = 0xFFFFFFFFu;
 
-/// Metallic and roughness as a splat carries them: a byte each, the rest
-/// spare. Nothing is decoded here -- both are already 0 to 1.
-public uint packPbr(float metallic, float roughness) {
+/// What a splat reflects with: metallic, roughness and transmission, a byte
+/// each and one spare. Nothing is decoded here -- all three are already 0 to 1.
+public uint packPbr(float metallic, float roughness, float transmission) {
     const uint m = uint(saturate(metallic) * 255.0 + 0.5);
     const uint r = uint(saturate(roughness) * 255.0 + 0.5);
-    return m | (r << 8);
+    const uint t = uint(saturate(transmission) * 255.0 + 0.5);
+    return m | (r << 8) | (t << 16);
 }
 
 public float pbrMetallic(uint word) { return float(word & 0xFFu) / 255.0; }
 public float pbrRoughness(uint word) { return float((word >> 8) & 0xFFu) / 255.0; }
+public float pbrTransmission(uint word) { return float((word >> 16) & 0xFFu) / 255.0; }

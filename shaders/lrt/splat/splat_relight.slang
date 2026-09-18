@@ -30,6 +30,20 @@
 // no BSDF to importance sample and no ray of its own in the rasteriser.
 module splat_relight;
 __exported import lrt.light.lights;
+import lrt.common.color;
+
+/// Relit light put where the blend expects a splat's colour.
+///
+/// A cloud is blended in the encoded space it was trained in and the finished
+/// pixel is linearised (frame.slang). Relighting does not produce a trained
+/// colour, it produces light -- so it goes in encoded, and the blend's own
+/// linearise gives back exactly this. Without it every relit cloud was put
+/// through the sRGB curve a second time: 0.5 came out 0.214 and a dark
+/// material, where the curve is steepest, came out ten times too dark. That
+/// is what made a converted mesh black.
+public float3 relitForBlend(float3 lit, bool linearising) {
+    return linearising ? linearToSrgb(lit) : lit;
+}
 
 /// What a splat reflects with.
 public struct SplatSurface {
@@ -38,6 +52,15 @@ public struct SplatSurface {
     public float3 albedo;
     public float  metallic;    ///< 0 for a capture, which carries no such thing
     public float  roughness;   ///< 1 is the Lambert-only answer this had before
+    /// What the material lets through, and the reason a splat can be
+    /// translucent at all. A gaussian cannot refract; what it can do is send
+    /// on the light that arrives from **behind** it, which is what glass lit
+    /// from the far side does and what a purely reflective lobe never does.
+    /// So the body of the material is split: `1 - transmission` of it faces
+    /// the light, and `transmission` of it faces away. What stands behind the
+    /// splat is seen through its own opacity, which the conversion lowers for
+    /// the same reason.
+    public float  transmission;
 };
 
 /// GGX, as the surface lobes write it: D, Smith's height-correlated V, and
@@ -95,20 +118,36 @@ float3 relitByDome(SplatSurface s, float3 wo, LightRecord light) {
     const LightHit above = lightHit(light, s.position, s.normal);
     const LightHit reflected = lightHit(light, s.position, mirror);
     const float3 f0 = lerp(float3(0.04), s.albedo, s.metallic);
-    return s.albedo * (1.0 - s.metallic) * above.radiance +
+    // A dome is on both sides of a splat at once, so the translucent half
+    // sees exactly what the facing half sees and the two sum to the whole
+    // body: a glass ball under a sky is its own colour, not a dark shell.
+    const LightHit behind = lightHit(light, s.position, -s.normal);
+    const float3 body = s.albedo * (1.0 - s.metallic);
+    return body * ((1.0 - s.transmission) * above.radiance + s.transmission * behind.radiance) +
            environmentBrdf(f0, s.roughness, nDotV) * reflected.radiance;
 }
 
 /// The light `light` puts on `s`, seen from `wo`, with `through` of it
-/// arriving. Diffuse and specular, energy split by the metallic.
+/// arriving.
+///
+/// Three terms: the body of the material facing the light, the body of it
+/// facing away -- which is the translucent half, and is why a light behind a
+/// glass splat lights it instead of leaving it black -- and the reflection,
+/// which is on the lit side only.
 public float3 relitByOne(SplatSurface s, float3 wo, LightSample ls, float through) {
-    const float nDotL = max(dot(s.normal, ls.wi), 0.0);
-    if (nDotL <= 0.0 || ls.pdf <= 0.0) {
+    if (ls.pdf <= 0.0) {
         return float3(0.0);
     }
-    const float3 diffuse = s.albedo * (1.0 - s.metallic) * (1.0 / 3.14159265358979);
-    const float3 specular = specularLobe(s, wo, ls.wi);
-    return through * (diffuse + specular) * nDotL * ls.radiance / ls.pdf;
+    const float nDotL = dot(s.normal, ls.wi);
+    const float front = max(nDotL, 0.0);
+    const float back = max(-nDotL, 0.0);
+    if (front <= 0.0 && back <= 0.0) {
+        return float3(0.0);
+    }
+    const float3 body = s.albedo * (1.0 - s.metallic) * (1.0 / 3.14159265358979);
+    const float3 diffuse = body * ((1.0 - s.transmission) * front + s.transmission * back);
+    const float3 specular = specularLobe(s, wo, ls.wi) * front;
+    return through * (diffuse + specular) * ls.radiance / ls.pdf;
 }
 
 /// Every light this splat is linked to, one sample each at its centre.

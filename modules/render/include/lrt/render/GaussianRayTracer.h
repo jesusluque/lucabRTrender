@@ -133,7 +133,7 @@ private:
                                         gpu::Buffer& leaves);
     [[nodiscard]] Result<void> prepareFrame(std::span<const SplatInstance> instances,
                                             const Vec3& eyeWorld, uint32_t shLimit,
-                                            const SplatLights* lights);
+                                            const SplatLights* lights, bool linearise);
     [[nodiscard]] const Cloud* find(const scene::GpuSplats& splats) const;
 
     gpu::Device*       device_ = nullptr;

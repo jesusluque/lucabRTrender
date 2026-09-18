@@ -60,7 +60,10 @@ Result<void> writeParticleFieldStage(gpu::ShaderLibrary& library, const io::RawS
     VtVec3fArray coefficients;
     VtFloatArray metallics;
     VtFloatArray roughnesses;
-    const bool pbr = e.metallic != io::SplatEncoding::kNoField || e.roughness != io::SplatEncoding::kNoField;
+    VtFloatArray transmissions;
+    const bool pbr = e.metallic != io::SplatEncoding::kNoField ||
+                     e.roughness != io::SplatEncoding::kNoField ||
+                     e.transmission != io::SplatEncoding::kNoField;
     positions.reserve(raw.count);
     const uint32_t perRecord = 1 + keep;
     GfVec3d lo(1e30), hi(-1e30);
@@ -118,6 +121,8 @@ Result<void> writeParticleFieldStage(gpu::ShaderLibrary& library, const io::RawS
                 const float* record = raw.records.data() + size_t{first + i} * e.floatsPerRecord;
                 metallics.push_back(e.metallic != io::SplatEncoding::kNoField ? record[e.metallic] : 0.0F);
                 roughnesses.push_back(e.roughness != io::SplatEncoding::kNoField ? record[e.roughness] : 1.0F);
+                transmissions.push_back(
+                    e.transmission != io::SplatEncoding::kNoField ? record[e.transmission] : 0.0F);
             }
             for (int axis = 0; axis < 3; ++axis) {
                 lo[axis] = std::min(lo[axis], static_cast<double>(pp[axis]));
@@ -156,11 +161,14 @@ Result<void> writeParticleFieldStage(gpu::ShaderLibrary& library, const io::RawS
         // and says nothing about a surface, while LrtSplatLightingAPI is ours.
         static const TfToken kMetallic("primvars:lrt:splat:metallic");
         static const TfToken kRoughness("primvars:lrt:splat:roughness");
+        static const TfToken kTransmission("primvars:lrt:splat:transmission");
         UsdGeomPrimvarsAPI primvars(splats.GetPrim());
         primvars.CreatePrimvar(kMetallic, SdfValueTypeNames->FloatArray, UsdGeomTokens->vertex)
             .Set(VtValue(metallics));
         primvars.CreatePrimvar(kRoughness, SdfValueTypeNames->FloatArray, UsdGeomTokens->vertex)
             .Set(VtValue(roughnesses));
+        primvars.CreatePrimvar(kTransmission, SdfValueTypeNames->FloatArray, UsdGeomTokens->vertex)
+            .Set(VtValue(transmissions));
     }
 
     if (options.relight) {

@@ -62,6 +62,7 @@ void setDecodeParams(rhi::ShaderCursor cursor, const io::SplatEncoding& e, uint3
     p["shWords"].setData(shWords);
     p["metallic"].setData(e.metallic);
     p["roughness"].setData(e.roughness);
+    p["transmission"].setData(e.transmission);
 }
 
 
@@ -203,7 +204,9 @@ Result<GpuSplats> CloudLoader::upload(const io::RawSplats& raw, uint32_t maxDegr
     }
     static constexpr uint32_t kPerDegree[] = {0, 3, 8, 15};
     const uint32_t keep = std::min(e.restPerColour, kPerDegree[std::min(maxDegree, 3u)]);
-    const bool pbr = e.metallic != io::SplatEncoding::kNoField || e.roughness != io::SplatEncoding::kNoField;
+    const bool pbr = e.metallic != io::SplatEncoding::kNoField ||
+                     e.roughness != io::SplatEncoding::kNoField ||
+                     e.transmission != io::SplatEncoding::kNoField;
     auto splats = startSplats(raw.source, raw.count, keep, pbr);
     if (!splats) return std::move(splats).error();
 
@@ -454,7 +457,7 @@ Result<gpu::Buffer> CloudLoader::streamBuffer(const FloatStream& stream, const c
 namespace {
 
 constexpr uint32_t kPositions = 1, kRotations = 2, kScales = 4, kOpacities = 8, kSh = 16, kColours = 32,
-                   kMetallic = 64, kRoughness = 128;
+                   kMetallic = 64, kRoughness = 128, kTransmission = 256;
 
 }   // namespace
 
@@ -473,9 +476,9 @@ Result<GpuSplats> CloudLoader::upload(const SplatStreams& in, uint32_t maxDegree
     static constexpr uint32_t kPerDegree[] = {0, 3, 8, 15};
     const uint32_t keep = haveSh ? std::min(in.coefficients - 1, kPerDegree[std::min(maxDegree, 3u)]) : 0;
 
-    const bool havePbr = !in.metallic.empty() || !in.roughness.empty();
+    const bool havePbr = !in.metallic.empty() || !in.roughness.empty() || !in.transmission.empty();
     io::SplatEncoding e;
-    e.floatsPerRecord = 14 + keep * 3 + (havePbr ? 2 : 0);
+    e.floatsPerRecord = 14 + keep * 3 + (havePbr ? 3 : 0);
     e.x = 0; e.y = 1; e.z = 2; e.opacity = 3;
     e.scale0 = 4; e.scale1 = 5; e.scale2 = 6;
     e.rotW = 7; e.rotX = 8; e.rotY = 9; e.rotZ = 10;
@@ -484,6 +487,7 @@ Result<GpuSplats> CloudLoader::upload(const SplatStreams& in, uint32_t maxDegree
     if (havePbr) {
         e.metallic = 14 + keep * 3;
         e.roughness = e.metallic + 1;
+        e.transmission = e.metallic + 2;
     }
     e.opacity_ = io::SplatEncoding::Opacity::Linear;
     e.scale_ = io::SplatEncoding::Scale::Linear;
@@ -501,6 +505,7 @@ Result<GpuSplats> CloudLoader::upload(const SplatStreams& in, uint32_t maxDegree
     note(in.opacities, kOpacities);
     note(in.metallic, kMetallic);
     note(in.roughness, kRoughness);
+    note(in.transmission, kTransmission);
     if (haveSh) {
         note(in.sh, kSh);
     }
@@ -521,6 +526,8 @@ Result<GpuSplats> CloudLoader::upload(const SplatStreams& in, uint32_t maxDegree
     if (!metallic) return std::move(metallic).error();
     auto roughness = streamBuffer(in.roughness, "splats.stream.roughness");
     if (!roughness) return std::move(roughness).error();
+    auto transmission = streamBuffer(in.transmission, "splats.stream.transmission");
+    if (!transmission) return std::move(transmission).error();
     auto splats = startSplats(in.source, n, keep, havePbr);
     if (!splats) return std::move(splats).error();
     const uint32_t perSlice = static_cast<uint32_t>(std::max<uint64_t>(1, kSliceBytes / (uint64_t{e.floatsPerRecord} * 4)));
@@ -540,6 +547,7 @@ Result<GpuSplats> CloudLoader::upload(const SplatStreams& in, uint32_t maxDegree
                 cursor["colours"].setBinding(none->rhi());
                 cursor["metallic"].setBinding(metallic->rhi());
                 cursor["roughness"].setBinding(roughness->rhi());
+                cursor["transmission"].setBinding(transmission->rhi());
                 cursor["records"].setBinding(records->rhi());
                 rhi::ShaderCursor p = cursor["params"];
                 p["count"].setData(count);
@@ -598,7 +606,8 @@ Result<GpuPoints> CloudLoader::upload(const PointStreams& in, float detail) {
             pointStreams_.dispatch(batch, {count, 1, 1}, [&](rhi::ShaderCursor cursor) {
                 cursor["positions"].setBinding(positions->rhi());
                 cursor["colours"].setBinding(colourStream->rhi());
-                for (const char* unused : {"rotations", "scales", "opacities", "sh", "metallic", "roughness"}) {
+                for (const char* unused :
+                     {"rotations", "scales", "opacities", "sh", "metallic", "roughness", "transmission"}) {
                     cursor[unused].setBinding(none->rhi());
                 }
                 cursor["records"].setBinding(records->rhi());
