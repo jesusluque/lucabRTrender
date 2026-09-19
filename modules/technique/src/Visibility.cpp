@@ -28,12 +28,18 @@ gpu::RasterDesc visibilityDesc(const std::string& module, const char* vertexEntr
 }
 
 /// How many samples one pixel's ray may have removed from it before it gives
-/// up and shows what it last found: enough for the layers of leaves a cutout
-/// texture is usually drawn for.
-const char* kCutoutSteps = "static const uint kCutoutSteps = 16;\n";
+/// up and shows what it last found. Sixteen was enough for the layers of
+/// leaves a cutout texture is usually drawn for, and not for a sparrow's
+/// belly: dozens of feather cards, clear where the ray crosses them, and the
+/// body behind them was never reached -- a hole in the bird. Only a pixel
+/// with that many layers pays for the rest.
+const char* kCutoutSteps = "static const uint kCutoutSteps = 64;\n";
 
-/// Past the sample a cutout removed, in the ray's own units.
-const char* kCutoutAdvance = "max(1.0e-4, t * 1.0e-5)";
+/// Past the sample a cutout removed, in the ray's own units: relative to how
+/// far the ray has come (a float's spacing there is 1e-7 of it), with a floor
+/// well under a feather card's distance from the body it lies on -- at a
+/// floor of 1e-4 a card a tenth of a millimetre off the body hid it.
+const char* kCutoutAdvance = "max(1.0e-6, t * 1.0e-5)";
 
 std::string cutoutRasterSource(const std::string& materials) {
     return "import lrt.technique.visibility_geometry;\n"

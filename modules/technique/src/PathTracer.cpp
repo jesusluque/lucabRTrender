@@ -1622,12 +1622,12 @@ void tracePathsAt(uint2 group, uint index) {
                 carried += lightScale * shaded.stack.emission;
                 lightStep = false;
             } else {
-                if (kTraces && shaded.coverage && shaded.stack.opacity < 1.0 && passed < 32 &&
+                if (kTraces && shaded.coverage && shaded.stack.opacity < 1.0 && passed < 64 &&
                     random(tid, sample, bounce, 29u + passed) >= shaded.stack.opacity) {
                     // Coverage: for this sample the surface is not there.
                     // The ray goes on from the hit along its own direction,
-                    // and that is neither a bounce nor a step: a wing is a
-                    // dozen cards deep, most of each card clear. A feather's
+                    // and that is neither a bounce nor a step: a belly is
+                    // dozens of cards deep, most of each card clear. A feather's
                     // soft edge is the card behind it as often as the edge;
                     // escaping, the sample is transparent and the background
                     // is composited behind it, as a lens ray's that found

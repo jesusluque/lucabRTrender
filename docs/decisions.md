@@ -5736,11 +5736,15 @@ not, and a rasteriser blends by a. The engine now:
   path tracer's visibility cuts only what is fully clear, and the tracer draws
   a lot a sample at every flagged vertex, camera hit or bounce: a losing
   surface is passed along the ray from the hit, neither a bounce nor a step,
-  up to 32 deep (a wing is a dozen cards, most of each clear). A ray that
+  up to 64 deep (a belly is dozens of cards, most of each clear). A ray that
   escapes this way gathers the lights at infinity along it, since the
   background pass draws only where the visibility pass found nothing. The
   margin off a passed hit is 1e-5 of the scale: at a bounce's 1e-4 the body a
-  feather card lies on was skipped.
+  feather card lies on was skipped. The visibility passes' own cutout walk
+  had the same two limits, sixteen steps and a floor of 1e-4, and the hole
+  in the sparrow's belly was theirs: with every card cut the body came out
+  eaten under the ray routes and whole under the raster's (a fragment
+  discard has no step count). Sixty-four steps and a floor of 1e-6 now.
 - reads half of each: a red card of opacity 0.5 over a white one, 256 paths,
   centre (1, 0.5, 0.5) within a binomial's three sigma; opacity 0 is cut by
   the visibility pass on both routes; opacity 1 hides the white
@@ -5754,9 +5758,9 @@ feather normal map's colour is premultiplied by its alpha (unpremultiplied,
 its maximum is exactly 1; the clear corner is black), so every soft edge's
 normal came out as (-1, -1, -1) -- the flakes. `UV2_treesparrow_normal_fixed.png`
 is the same map composited over a flat normal by its alpha, its alpha kept
-for the opacity. The belly's holes that remain are the asset's: the body
-mesh ends above them and the cards there are strand edges over nothing
-(with the body's material made emissive red, no red behind them).
+for the opacity. The belly's holes were taken for the asset's at first (the body's
+material made emissive red showed no red behind them); they were the
+sixteen-step limit above.
 
 ### Storm beside the engine
 
