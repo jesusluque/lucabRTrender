@@ -5884,3 +5884,32 @@ through Vulkan it dies where Metal did -- the largest part, some 3.3 M
 gaussians, takes the tracer's proxies to 20 GB of the L4's 23 (a BLAS of
 1.17 GB is what it could not allocate), and `--parts 24` leaves that part as
 it is. Baking a part in chunks of proxies is what it would take; not done.
+
+## A shadow catcher by composition, and the film on two machines
+
+The user asked for a ground that shows nothing but the bird's shadow. The
+engine has no holdout material, and a white plane under a sky is not one (it
+is lit, and the sky is not white). Four renders a frame, composited
+(`scripts/film/sparrow-shadow-*.sh`, the stages `FilmGsWhite`, `FilmGsGround`,
+`FilmGsBird`, `FilmGsMask` beside the assets):
+
+- A: the bird over a white plane, `--splat-shadows`; B: the plane alone; C:
+  the bird alone over the sky; M: the bird alone with no dome, whose alpha
+  is its coverage (with a dome the background pass writes alpha 1 -- there
+  is no other way to the coverage from the command line today).
+- `final = C + (1 - M) * sky * (A / B - 1)`: where the plane is, the sky times
+  the shadow's ratio; where the bird is, C; where the sky is, A = B = C. The
+  plane's pass is traced too (raster, with one light sample, put its dome
+  noise into the ratio as specks).
+
+The 410 frames at 1920x1080, 64 paths: the Mac (Metal) 95-100 s a frame,
+the 94 (Vulkan: the splat shadows trace inline rays, which CUDA has not, and
+Mac asset paths resolved by a symlink) 30-45 s. Split 1-99 / 100-410 as they
+went, the 94's frames pulled over as they finished so the Mac skipped them.
+The same frame drawn by both differs by a mean of 4.9e-6 and at most 11/255
+in one pixel (frame 206): the same kernels and seeds, and the seams are not
+there. Two hours and a half in all. `Film_shadow.mp4`, 13.7 s.
+
+Not done: a holdout material in the engine (one render a frame instead of
+four); the four passes each reopen a 457 MB cloud, which is most of a frame's
+time on the 94.
