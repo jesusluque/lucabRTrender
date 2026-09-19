@@ -5652,7 +5652,19 @@ Sparrow, 4 269 858 gaussians, 609 joints, 12 parts, grid 24, octave 16:
 | viewer, `rt`, 400 frames playing | 193.88 ms median, 51.65 ms warm (178.99 / 55.05 without) |
 
 The warm frame does not move: the read is a table lookup a part a light a
-gaussian, and it is not what a frame costs. The shadow lands where the mesh's
+gaussian, and it is not what a frame costs.
+
+On the 94's L4, reading the fields the Mac baked (`lrt stage --frames 8`,
+1280x720, the same command as the morning's baseline):
+
+| L4, CUDA | without | with the field |
+|---|---|---|
+| raster | 67.48 ms | 73.04 ms |
+| `rt` | 121.48 ms | 128.77 ms |
+
+Five to seven milliseconds a frame for 4.27 M gaussians x 2 lights x 11
+parts of lookups, the same 21.3 % of factors under a half as on the Mac, and
+the bake module saying plainly that it has no inline ray there. The shadow lands where the mesh's
 does -- the far wing, the flank under the raised wing, the tail root -- and
 follows the wings from frame to frame.
 
