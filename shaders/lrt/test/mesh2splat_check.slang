@@ -34,7 +34,7 @@ struct CheckParams {
     uint  albedoStride;
     uint  checker;        ///< cells across the checker, 0 for none
     float joint;          ///< the joint every gaussian should be carried by
-    uint  pad0;
+    uint  parity;         ///< which cells the cut keeps: 0 the even ones, 1 the odd
     uint  pad1;
 };
 
@@ -71,6 +71,28 @@ void m2sQuad(uint3 tid: SV_DispatchThreadID) {
             const float3 p = corners[faces[t][k]];
             mesh[meshAt((t * 3 + k) * 2)] = float4(p, p.x);
             mesh[meshAt((t * 3 + k) * 2 + 1)] = float4(0.0, 0.0, 1.0, p.y);
+        }
+    }
+}
+
+/// A second set of texture coordinates for the quad, in a picture of the
+/// stream's shape: the first set moved down by one checker cell, so a cut
+/// read by it keeps the cells the first set's cut removes.
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void m2sQuadUv2(uint3 tid: SV_DispatchThreadID) {
+    if (tid.x != 0) {
+        return;
+    }
+    const float3 corners[4] = {float3(0.0, 0.0, 0.0), float3(1.0, 0.0, 0.0), float3(1.0, 1.0, 0.0),
+                               float3(0.0, 1.0, 0.0)};
+    const uint3 faces[2] = {uint3(0, 1, 2), uint3(0, 2, 3)};
+    const float cell = 1.0 / float(max(params.checker, 1u));
+    for (uint t = 0; t < 2; ++t) {
+        for (uint k = 0; k < 3; ++k) {
+            const float3 p = corners[faces[t][k]];
+            mesh[meshAt((t * 3 + k) * 2)] = float4(p.x, p.y + cell, 0.0, 0.0);
+            mesh[meshAt((t * 3 + k) * 2 + 1)] = float4(0.0);
         }
     }
 }
@@ -181,7 +203,7 @@ void m2sCheckCut(uint3 tid: SV_DispatchThreadID) {
     const float2 uv = records[recordAt(splat, 5)].zw;
     const uint cellX = uint(clamp(uv.x, 0.0, 0.999) * float(params.checker));
     const uint cellY = uint(clamp(uv.y, 0.0, 0.999) * float(params.checker));
-    const bool even = ((cellX + cellY) & 1u) == 0u;
+    const bool even = (((cellX + cellY) & 1u) == 0u) != (params.parity != 0u);
     const float2 inCell = frac(uv * float(params.checker));
     const bool wellInside = all(inCell > 0.15) && all(inCell < 0.85);
     if (wellInside && !even) {

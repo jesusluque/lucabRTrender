@@ -100,8 +100,13 @@ struct M2sParams {
 
     uint  opacityStride;
     float opacityCut;
-    uint  pad3;
-    uint  pad4;
+    uint  hasUv2;         // the Texcoord2 picture is there: the mesh's second set of coordinates
+    uint  albedoUv2;      // which maps read by it (1) rather than by the mesh picture's own (0)
+
+    uint  normalUv2;
+    uint  mrUv2;
+    uint  opacityUv2;
+    uint  pad5;
 };
 
 StructuredBuffer<float4>   mesh;        // per triangle: (position, u) and (normal, v), three corners
@@ -113,6 +118,7 @@ StructuredBuffer<float4>   influences;  // 2 entries a corner: (joint, weight) t
 RWStructuredBuffer<uint>   counters;    // [wanted, written, degenerate, dropped]
 RWStructuredBuffer<uint>   cellCounts;  // a triangle's covered cells, then where they start
 RWStructuredBuffer<float4> records;     // the output plane
+StructuredBuffer<float4>   texcoord2;   // the mesh picture's shape: (u2, v2) a corner, where there is a second set
 ConstantBuffer<M2sParams>  params;
 
 /// The counters start a render, and a buffer the host handed over holds
@@ -161,6 +167,13 @@ float4 influenceEntry(uint index) {
     const uint x = index % params.meshWidth;
     const uint y = index / params.meshWidth;
     return influences[y * params.meshStride + x];
+}
+
+/// The second set of texture coordinates, the mesh picture's shape as well.
+float2 texcoord2Entry(uint index) {
+    const uint x = index % params.meshWidth;
+    const uint y = index / params.meshWidth;
+    return texcoord2[y * params.meshStride + x].xy;
 }
 
 /// THE JOINTS A GAUSSIAN IS CARRIED BY: the barycentric blend of the three
@@ -301,6 +314,7 @@ float2 orthogonalUv(float3 p, uint2 axes, float range) {
 struct M2sTriangle {
     bool   valid;          ///< a plane, and a Jacobian over its projection
     float4 p0, n0, p1, n1, p2, n2;
+    float2 t0, t1, t2;     ///< the second set of texture coordinates, zero without one
     float3 a, b, c;
     float3 geometric;
     float3 tangent;
@@ -338,6 +352,14 @@ M2sTriangle m2sTriangleOf(uint triangle) {
     t.n1 = meshEntry(base + 3);
     t.p2 = meshEntry(base + 4);
     t.n2 = meshEntry(base + 5);
+    t.t0 = float2(0.0);
+    t.t1 = float2(0.0);
+    t.t2 = float2(0.0);
+    if (params.hasUv2 != 0) {
+        t.t0 = texcoord2Entry(base + 0);
+        t.t1 = texcoord2Entry(base + 2);
+        t.t2 = texcoord2Entry(base + 4);
+    }
 
     t.a = t.p0.xyz;
     t.b = t.p1.xyz;
@@ -457,19 +479,6 @@ bool m2sCellInside(M2sTriangle t, uint k, out float3 bary) {
 /// gaussian is counted and none is written -- and the count and the emit must
 /// agree on that or the slots a triangle was given do not match the slots it
 /// fills.
-bool m2sCovered(float2 uv) {
-    if (params.opacityChannel == 0) {
-        return true;
-    }
-    const float4 texel = sampleWrapped(opacityMask, params.opacityWidth, params.opacityHeight,
-                                       params.opacityStride, uv);
-    const float mask = params.opacityChannel == 1 ? texel.x
-                     : params.opacityChannel == 2 ? texel.y
-                     : params.opacityChannel == 3 ? texel.z
-                                                  : texel.w;
-    return mask >= params.opacityCut;
-}
-
 /// The uv a cell's centre stands at, which is the same barycentric blend the
 /// emit does -- they must see the same texel.
 float2 m2sUvAt(const M2sTriangle t, float3 bary) {
@@ -477,6 +486,25 @@ float2 m2sUvAt(const M2sTriangle t, float3 bary) {
     const float2 uv1 = float2(t.p1.w, t.n1.w);
     const float2 uv2 = float2(t.p2.w, t.n2.w);
     return uv0 * bary.x + uv1 * bary.y + uv2 * bary.z;
+}
+
+/// The same in the second set.
+float2 m2sUv2At(const M2sTriangle t, float3 bary) {
+    return t.t0 * bary.x + t.t1 * bary.y + t.t2 * bary.z;
+}
+
+bool m2sCovered(const M2sTriangle t, float3 bary) {
+    if (params.opacityChannel == 0) {
+        return true;
+    }
+    const float2 uv = params.opacityUv2 != 0 ? m2sUv2At(t, bary) : m2sUvAt(t, bary);
+    const float4 texel = sampleWrapped(opacityMask, params.opacityWidth, params.opacityHeight,
+                                       params.opacityStride, uv);
+    const float mask = params.opacityChannel == 1 ? texel.x
+                     : params.opacityChannel == 2 ? texel.y
+                     : params.opacityChannel == 3 ? texel.z
+                                                  : texel.w;
+    return mask >= params.opacityCut;
 }
 
 /// How many gaussians this triangle stands, one thread a triangle.
@@ -499,7 +527,7 @@ void m2sCount(uint3 tid: SV_DispatchThreadID) {
     uint inside = 0;
     for (uint k = 0; k < t.cells; ++k) {
         float3 bary;
-        if (m2sCellInside(t, k, bary) && m2sCovered(m2sUvAt(t, bary))) {
+        if (m2sCellInside(t, k, bary) && m2sCovered(t, bary)) {
             ++inside;
         }
     }
@@ -602,7 +630,7 @@ void m2sEmit(uint3 tid: SV_DispatchThreadID) {
     bool caught = false;
     for (uint k = 0; k < t.cells; ++k) {
         float3 bary;
-        if (m2sCellInside(t, k, bary) && m2sCovered(m2sUvAt(t, bary))) {
+        if (m2sCellInside(t, k, bary) && m2sCovered(t, bary)) {
             caught = true;
             break;
         }
@@ -613,7 +641,7 @@ void m2sEmit(uint3 tid: SV_DispatchThreadID) {
         if (caught && !m2sCellInside(t, k, bary)) {
             continue;   // the cell's centre is outside this triangle
         }
-        if (caught && !m2sCovered(m2sUvAt(t, bary))) {
+        if (caught && !m2sCovered(t, bary)) {
             continue;   // the cut-out says there is no surface here
         }
         if (slot >= params.maxSplats) {
@@ -625,6 +653,7 @@ void m2sEmit(uint3 tid: SV_DispatchThreadID) {
         const float3 position = a * alpha + b * beta + c * gamma;
         const float2 uv = float2(p0.w, n0.w) * alpha + float2(p1.w, n1.w) * beta +
                           float2(p2.w, n2.w) * gamma;
+        const float2 uv2 = m2sUv2At(t, bary);
         float3 normal = normalize(n0.xyz * alpha + n1.xyz * beta + n2.xyz * gamma);
         if (!(dot(normal, normal) > 0.5)) {
             normal = geometric;
@@ -633,7 +662,7 @@ void m2sEmit(uint3 tid: SV_DispatchThreadID) {
         float3 colour = params.materialColour.xyz;
         if (params.hasAlbedo != 0) {
             const float4 texel = sampleWrapped(albedo, params.albedoWidth, params.albedoHeight,
-                                               params.albedoStride, uv);
+                                               params.albedoStride, params.albedoUv2 != 0 ? uv2 : uv);
             colour *= texel.xyz;
         }
         // The material's own values, and the map where there is one: glTF
@@ -646,14 +675,14 @@ void m2sEmit(uint3 tid: SV_DispatchThreadID) {
         if (params.hasMetallicRoughness != 0) {
             // Blue is metallic, green is roughness: their packing.
             const float4 texel = sampleWrapped(metallicRoughness, params.mrWidth, params.mrHeight,
-                                               params.mrStride, uv);
+                                               params.mrStride, params.mrUv2 != 0 ? uv2 : uv);
             metallic *= texel.z;
             roughness *= texel.y;
         }
         float3 shading = normal;
         if (params.hasNormal != 0) {
             const float4 texel = sampleWrapped(normalMap, params.normalWidth, params.normalHeight,
-                                               params.normalStride, uv);
+                                               params.normalStride, params.normalUv2 != 0 ? uv2 : uv);
             const float3 fromMap = normalize(texel.xyz * 2.0 - 1.0);
             const float3 bitangent = normalize(cross(normal, tangent));
             const float3 straight = normalize(cross(bitangent, normal));

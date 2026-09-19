@@ -54,6 +54,9 @@ struct StageTexture {
     /// whose shape lives entirely in the alpha of the map that also holds
     /// their normals.
     char        channel = 0;
+    /// The primvar the texture's coordinates are read from (`inputs:st` back
+    /// to a primvar reader's `varname`); empty where nothing says.
+    std::string uvSet;
 
     [[nodiscard]] bool empty() const noexcept { return file.empty(); }
 };
@@ -116,6 +119,10 @@ struct StageMesh {
     /// Filled when `MeshStageOptions::skinned` asked for it and the mesh is
     /// bound to a skeleton.
     StageSkinning         skinning;
+    /// The primvar carried as the mesh's second set of texture coordinates
+    /// (`st2`), where a map of its material reads by one that is not the
+    /// first; empty otherwise.
+    std::string           uv2;
 };
 
 struct MeshStageOptions {

@@ -185,6 +185,7 @@ public:
         gpu::Device& device = library_->device();
         streams_.resize(meshes.size());
         skins_.resize(meshes.size());
+        uv2s_.resize(meshes.size());
         triangles_.resize(meshes.size());
         uint64_t chunkTotal = 0;
         std::vector<uint32_t> chunkFirst(meshes.size(), 0);
@@ -244,6 +245,18 @@ public:
 
             const geom::GpuPrimvar* normals = mesh.primvar("normals");
             const geom::GpuPrimvar* uvs = mesh.primvar("st");
+            // The second set of texture coordinates, where a material reads
+            // some of its maps by one: a third picture of the same shape.
+            const geom::GpuPrimvar* uvs2 = mesh.primvar("st2");
+            std::optional<gpu::Buffer> uv2View;
+            if (uvs2 != nullptr) {
+                auto third = image::Image::create(pictureFor(entries));
+                if (!third) return std::move(third).error();
+                uv2s_[k] = *third;
+                auto held3 = viewOf(*context_, uv2s_[k], "mesh2splat.uv2");
+                if (!held3) return std::move(held3).error();
+                uv2View = std::move(*held3);
+            }
             const uint32_t stride = static_cast<uint32_t>(streams_[k]->stride());
             const uint32_t chunkThreads = chunkCount[k];
             const auto bind = [&](rhi::ShaderCursor cursor) {
@@ -257,9 +270,11 @@ public:
                 cursor["normals"].setBinding(normals != nullptr ? normals->values.rhi()
                                                                 : mesh.positions.rhi());
                 cursor["uvs"].setBinding(uvs != nullptr ? uvs->values.rhi() : mesh.positions.rhi());
+                cursor["uvs2"].setBinding(uvs2 != nullptr ? uvs2->values.rhi() : mesh.positions.rhi());
                 cursor["influences"].setBinding(influences.valid() ? influences.rhi()
                                                                    : mesh.positions.rhi());
                 cursor["skinStream"].setBinding(skinView ? skinView->rhi() : view->rhi());
+                cursor["uv2Stream"].setBinding(uv2View ? uv2View->rhi() : view->rhi());
                 cursor["stream"].setBinding(view->rhi());
                 cursor["extents"].setBinding(extents->rhi());
                 cursor["pack"]["triangles"].setData(mesh.triangles);
@@ -271,6 +286,9 @@ public:
                 cursor["pack"]["uvMode"].setData(uvs != nullptr ? static_cast<uint32_t>(uvs->interpolation)
                                                                 : kNoPrimvar);
                 cursor["pack"]["uvCount"].setData(uvs != nullptr ? uvs->count : 0U);
+                cursor["pack"]["uv2Mode"].setData(uvs2 != nullptr ? static_cast<uint32_t>(uvs2->interpolation)
+                                                                  : kNoPrimvar);
+                cursor["pack"]["uv2Count"].setData(uvs2 != nullptr ? uvs2->count : 0U);
                 cursor["pack"]["points"].setData(mesh.points);
                 cursor["pack"]["corners"].setData(mesh.corners);
                 cursor["pack"]["destWidth"].setData(kRowEntries);
@@ -313,6 +331,11 @@ public:
                 skin->deviceWrote();
             }
         }
+        for (const image::ImagePtr& uv2 : uv2s_) {
+            if (uv2) {
+                uv2->deviceWrote();
+            }
+        }
         auto box = bounds->readAll<float>(device);
         if (!box) return std::move(box).error();
         for (int axis = 0; axis < 3; ++axis) {
@@ -338,6 +361,11 @@ public:
             ask(mesh.material.normal);
             ask(mesh.material.metallicMap);
             ask(mesh.material.roughnessMap);
+            // The cut-out too: it was never asked for, and passed only while
+            // it happened to be the normal map's file (the sparrow's feathers
+            // read their alpha off it). With the normal map repaired into a
+            // file of its own, the cut silently went.
+            ask(mesh.material.opacityMap);
         }
         if (ids_.empty()) {
             return ok();
@@ -643,6 +671,7 @@ private:
         if (*mr) job.inputs.push_back({"MetallicRoughness", *mr});
         if (cutMap) job.inputs.push_back({"Opacity", cutMap});
         if (carried) job.inputs.push_back({"Influences", skins_[at]});
+        if (uv2s_[at]) job.inputs.push_back({"Texcoord2", uv2s_[at]});
 
         const auto number = [&job](const char* name, double value) {
             job.params.push_back(aofx::ParamValue{name, {value}, {}});
@@ -668,6 +697,16 @@ private:
         // what it reflects with.
         number("writePbr", 1.0);
         number("writeInfluences", carried ? 1.0 : 0.0);
+        if (uv2s_[at]) {
+            // Which maps the material reads by the second set of coordinates.
+            const auto bySecond = [&mesh](const usd::StageTexture& texture) {
+                return !texture.empty() && texture.uvSet == mesh.uv2 ? 1.0 : 0.0;
+            };
+            number("albedoUv2", bySecond(material.albedo));
+            number("normalUv2", bySecond(material.normal));
+            number("mrUv2", bySecond(material.metallicMap.empty() ? material.roughnessMap : material.metallicMap));
+            number("opacityUv2", bySecond(material.opacityMap));
+        }
         number("transmission", static_cast<double>(material.transmission));
         number("metallic", static_cast<double>(material.metallic));
         number("roughness", static_cast<double>(material.roughness));
@@ -767,6 +806,7 @@ private:
     std::map<MapKey, image::ImagePtr>        maps_;
     std::vector<image::ImagePtr>             streams_;
     std::vector<image::ImagePtr>             skins_;
+    std::vector<image::ImagePtr>             uv2s_;
     std::vector<uint32_t>                    triangles_;
     uint32_t                                 sampler_ = 0;
     std::array<float, 3>                     boundsMin_{0.0F, 0.0F, 0.0F};

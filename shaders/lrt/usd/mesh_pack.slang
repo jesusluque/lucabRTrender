@@ -42,7 +42,12 @@ struct PackParams {
     uint  entries;        ///< float4 entries the whole stream holds
     uint  chunkSize;      ///< for the bounds fold below
     uint  chunkCount;
+    uint  uv2Mode;        ///< a second set of texture coordinates, or kNoPrimvar
+
+    uint  uv2Count;
     uint  pad0;
+    uint  pad1;
+    uint  pad2;
 };
 
 static const uint kConstant = 0;
@@ -58,8 +63,10 @@ StructuredBuffer<uint>     triangleCorners;   // 3 a triangle: face-vertex corne
 StructuredBuffer<uint>     triangleFaces;     // 1 a triangle: the authored face
 StructuredBuffer<float4>   normals;           // a primvar, float4 an element
 StructuredBuffer<float4>   uvs;
+StructuredBuffer<float4>   uvs2;              // the second set, where a material reads its maps by one
 StructuredBuffer<float2>   influences;        // (joint, weight), perPoint a point
 RWStructuredBuffer<float4> skinStream;        // the same shape as `stream`, 2 entries a corner
+RWStructuredBuffer<float4> uv2Stream;         // the same shape again: (u2, v2, 0, 0) then zeros, a corner
 RWStructuredBuffer<float4> stream;
 RWStructuredBuffer<float4> extents;   // chunkCount * 2: low, high
 ConstantBuffer<PackParams> pack;
@@ -166,6 +173,19 @@ void meshPack(uint3 tid: SV_DispatchThreadID) {
         const uint entry = pack.destFirst + triangle * 6 + k * 2;
         stream[streamAt(entry)] = float4(corner[k], uv.x);
         stream[streamAt(entry + 1)] = float4(normal, uv.y);
+        // THE SECOND SET, where the mesh has one: the sparrow's feather cards
+        // read their colour off one atlas by `st` and their shape and normal
+        // off another by `UVMap_001`. Its own stream, the mesh stream's
+        // shape, so the effect addresses the two alike.
+        if (pack.uv2Mode != kNoPrimvar) {
+            float2 uv2 = float2(0.0, 0.0);
+            const uint atUv2 = elementAt(pack.uv2Mode, pack.uv2Count, triangle, k, point);
+            if (atUv2 != kNoPrimvar) {
+                uv2 = uvs2[atUv2].xy;
+            }
+            uv2Stream[streamAt(entry)] = float4(uv2, 0.0, 0.0);
+            uv2Stream[streamAt(entry + 1)] = float4(0.0);
+        }
     }
 }
 

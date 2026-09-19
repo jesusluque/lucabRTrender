@@ -293,9 +293,11 @@ TEST_CASE("a cut-out map leaves no gaussian where there is no surface",
 
     REQUIRE(gpu->run([&] {
         auto quad = gpu::ComputeKernel::create(library, "lrt/test/mesh2splat_check", "m2sQuad");
+        auto quadUv2 = gpu::ComputeKernel::create(library, "lrt/test/mesh2splat_check", "m2sQuadUv2");
         auto checker = gpu::ComputeKernel::create(library, "lrt/test/mesh2splat_check", "m2sChecker");
         auto check = gpu::ComputeKernel::create(library, "lrt/test/mesh2splat_check", "m2sCheckCut");
         REQUIRE(quad);
+        REQUIRE(quadUv2);
         REQUIRE(checker);
         REQUIRE(check);
 
@@ -303,8 +305,10 @@ TEST_CASE("a cut-out map leaves no gaussian where there is no surface",
         constexpr uint32_t kChecker = 8;
         constexpr int32_t  kMapSize = 64;
         const image::ImagePtr mesh = pictureOf(kMeshWidth, 1);
+        const image::ImagePtr uv2 = pictureOf(kMeshWidth, 1);
         const image::ImagePtr mask = pictureOf(kMapSize, kMapSize);
         const gpu::Buffer meshView = viewOf(*gpu, mesh);
+        const gpu::Buffer uv2View = viewOf(*gpu, uv2);
         const gpu::Buffer maskView = viewOf(*gpu, mask);
         const uint32_t budget = kResolution * kResolution * 2;
         const image::ImagePtr records = pictureOf(static_cast<int32_t>(budget * 6), 1);
@@ -317,6 +321,15 @@ TEST_CASE("a cut-out map leaves no gaussian where there is no surface",
             cursor["counts"].setBinding(meshView.rhi());
             cursor["params"]["meshWidth"].setData(kMeshWidth);
             cursor["params"]["meshStride"].setData(static_cast<uint32_t>(mesh->stride()));
+        });
+        quadUv2->dispatch(batch, {1, 1, 1}, [&](rhi::ShaderCursor cursor) {
+            cursor["mesh"].setBinding(uv2View.rhi());
+            cursor["albedo"].setBinding(maskView.rhi());
+            cursor["records"].setBinding(meshView.rhi());
+            cursor["counts"].setBinding(meshView.rhi());
+            cursor["params"]["meshWidth"].setData(kMeshWidth);
+            cursor["params"]["meshStride"].setData(static_cast<uint32_t>(uv2->stride()));
+            cursor["params"]["checker"].setData(kChecker);
         });
         // Red on an even cell, green on an odd one: read on the red channel it
         // is a mask that keeps exactly half the quad.
@@ -332,15 +345,21 @@ TEST_CASE("a cut-out map leaves no gaussian where there is no surface",
         });
         REQUIRE(batch.submit(true));
         mesh->deviceWrote();
+        uv2->deviceWrote();
         mask->deviceWrote();
         mesh->attach("bounds", {0.0F, 0.0F, 0.0F, 1.0F, 1.0F, 0.0F});
 
-        const auto convert = [&](bool withCut) {
+        const auto convert = [&](bool withCut, bool bySecond = false) {
             aofx_host::EffectJob job;
             job.bounds = records->bounds();
             job.inputs.push_back({"Mesh", mesh});
             if (withCut) {
                 job.inputs.push_back({"Opacity", mask});
+            }
+            if (bySecond) {
+                // The cut read by the second set of coordinates.
+                job.inputs.push_back({"Texcoord2", uv2});
+                number(job, "opacityUv2", 1.0);
             }
             number(job, "triangles", 2);
             number(job, "resolution", kResolution);
@@ -374,30 +393,52 @@ TEST_CASE("a cut-out map leaves no gaussian where there is no surface",
         CHECK(ratio > 0.45);
         CHECK(ratio < 0.55);
 
-        const gpu::Buffer recordView = viewOf(*gpu, *cut);
-        gpu::BufferDesc desc;
-        desc.bytes = 8 * 4;
-        desc.elementBytes = 4;
-        desc.label = "test.counts";
-        auto counts = gpu::Buffer::create(library.device(), desc);
-        REQUIRE(counts);
-        gpu::CommandBatch second(library.device());
-        check->dispatch(second, {kept, 1, 1}, [&](rhi::ShaderCursor cursor) {
-            cursor["mesh"].setBinding(meshView.rhi());
-            cursor["albedo"].setBinding(maskView.rhi());
-            cursor["records"].setBinding(recordView.rhi());
-            cursor["counts"].setBinding(counts->rhi());
-            cursor["params"]["splats"].setData(kept);
-            cursor["params"]["recordPixels"].setData(uint32_t{6});
-            cursor["params"]["dstWidth"].setData(static_cast<uint32_t>((*cut)->bounds().width()));
-            cursor["params"]["dstStride"].setData(static_cast<uint32_t>((*cut)->stride()));
-            cursor["params"]["checker"].setData(kChecker);
-        });
-        REQUIRE(second.submit(true));
-        auto violations = counts->readAll<uint32_t>(library.device());
-        REQUIRE(violations);
+        const auto violationsOf = [&](const image::ImagePtr& out, uint32_t written, uint32_t parity) {
+            const gpu::Buffer recordView = viewOf(*gpu, out);
+            gpu::BufferDesc desc;
+            desc.bytes = 8 * 4;
+            desc.elementBytes = 4;
+            desc.label = "test.counts";
+            auto counts = gpu::Buffer::create(library.device(), desc);
+            REQUIRE(counts);
+            gpu::CommandBatch second(library.device());
+            check->dispatch(second, {written, 1, 1}, [&](rhi::ShaderCursor cursor) {
+                cursor["mesh"].setBinding(meshView.rhi());
+                cursor["albedo"].setBinding(maskView.rhi());
+                cursor["records"].setBinding(recordView.rhi());
+                cursor["counts"].setBinding(counts->rhi());
+                cursor["params"]["splats"].setData(written);
+                cursor["params"]["recordPixels"].setData(uint32_t{6});
+                cursor["params"]["dstWidth"].setData(static_cast<uint32_t>(out->bounds().width()));
+                cursor["params"]["dstStride"].setData(static_cast<uint32_t>(out->stride()));
+                cursor["params"]["checker"].setData(kChecker);
+                cursor["params"]["parity"].setData(parity);
+            });
+            REQUIRE(second.submit(true));
+            auto violations = counts->readAll<uint32_t>(library.device());
+            REQUIRE(violations);
+            return (*violations)[4];
+        };
         // Not one gaussian stands well inside a square the mask cut away.
-        CHECK((*violations)[4] == 0);
+        CHECK(violationsOf(*cut, kept, 0) == 0);
+
+        // THE CUT READ BY A SECOND SET OF COORDINATES, one cell down: the
+        // same half is kept, and it is the other half -- the records still
+        // carry the first set, so the check reads them with the parity
+        // turned. The sparrow's feather cards read their shape off a map by
+        // their second set, and read by the first they were cut to the
+        // wrong texels.
+        auto moved = convert(true, true);
+        REQUIRE(moved);
+        const std::vector<float>* movedCount = (*moved)->attached("splats");
+        REQUIRE(movedCount != nullptr);
+        const auto keptMoved = static_cast<uint32_t>((*movedCount)[0]);
+        const double movedRatio = static_cast<double>(keptMoved) / static_cast<double>(full);
+        std::printf("  cut by the first set keeps %u of %u, by the second %u\n", kept, full, keptMoved);
+        CHECK(movedRatio > 0.45);
+        CHECK(movedRatio < 0.55);
+        CHECK(violationsOf(*moved, keptMoved, 1) == 0);
+        CHECK(violationsOf(*moved, keptMoved, 0) > keptMoved / 4);
     }));
 }
 

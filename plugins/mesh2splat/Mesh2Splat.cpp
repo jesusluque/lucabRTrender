@@ -23,6 +23,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <string>
 #include <vector>
 
 #include "aofx_kernels_mesh2splat.h"
@@ -85,10 +86,17 @@ struct Mesh2SplatUniforms {
 
     uint32_t opacityStride = 0;
     float    opacityCut = 0.5F;
-    uint32_t pad3 = 0;
-    uint32_t pad4 = 0;
+    /// A second set of texture coordinates (the Texcoord2 clip), and which
+    /// maps read by it rather than by the mesh clip's own.
+    uint32_t hasUv2 = 0;
+    uint32_t albedoUv2 = 0;
+
+    uint32_t normalUv2 = 0;
+    uint32_t mrUv2 = 0;
+    uint32_t opacityUv2 = 0;
+    uint32_t pad5 = 0;
 };
-static_assert(sizeof(Mesh2SplatUniforms) == 224, "must match M2sParams exactly");
+static_assert(sizeof(Mesh2SplatUniforms) == 240, "must match M2sParams exactly");
 
 class Mesh2Splat final : public aofx::Effect {
 public:
@@ -120,6 +128,11 @@ public:
         // Not a picture of colour: the joints each corner of each triangle is
         // carried by, laid out exactly as the Mesh clip is.
         clip("Influences", "Joint influences", true);
+        // A mesh with two sets of texture coordinates: the first rides in the
+        // Mesh clip, this is the second, laid out exactly as the Mesh clip is,
+        // and `albedoUv2`, `normalUv2`, `mrUv2` and `opacityUv2` say which
+        // maps are read by it.
+        clip("Texcoord2", "Second texture coordinates", true);
 
         aofx::ParamDesc opacityChannel;
         opacityChannel.name = "opacityChannel";
@@ -292,6 +305,18 @@ public:
         joints.defaults = {0.0};
         into.params.push_back(joints);
 
+        // Which maps read by the second set of coordinates (the Texcoord2
+        // clip) rather than by the Mesh clip's own.
+        for (const char* name : {"albedoUv2", "normalUv2", "mrUv2", "opacityUv2"}) {
+            aofx::ParamDesc bySecond;
+            bySecond.name = name;
+            bySecond.label = std::string(name) + ": read by the second coordinates";
+            bySecond.hint = "The map is sampled by the Texcoord2 clip's coordinates, not the Mesh clip's.";
+            bySecond.type = aofx::ParamType::Boolean;
+            bySecond.defaults = {0.0};
+            into.params.push_back(bySecond);
+        }
+
         aofx::ParamDesc cells;
         cells.name = "maxCells";
         cells.label = "Most cells a triangle";
@@ -422,6 +447,16 @@ public:
         uniforms.opacityChannel =
             hasCut != 0 ? static_cast<uint32_t>(request.number("opacityChannel", 4.0)) : 0U;
         uniforms.opacityCut = static_cast<float>(request.number("opacityCut", 0.5));
+        const aofx::InputPlane* uv2 = request.input("Texcoord2");
+        const bool withUv2 = uv2 != nullptr && uv2->buffer.isValid();
+        uniforms.hasUv2 = withUv2 ? 1U : 0U;
+        const auto byUv2 = [&](const char* name) {
+            return withUv2 && request.number(name, 0.0) >= 0.5 ? 1U : 0U;
+        };
+        uniforms.albedoUv2 = byUv2("albedoUv2");
+        uniforms.normalUv2 = byUv2("normalUv2");
+        uniforms.mrUv2 = byUv2("mrUv2");
+        uniforms.opacityUv2 = byUv2("opacityUv2");
 
         // Four numbers: splats wanted, splats written, triangles with no
         // frame, cells the per-triangle bound left out.
@@ -461,7 +496,8 @@ public:
             withJoints ? carried->buffer : meshPlane->buffer,
             counters,
             cellCounts,
-            target->buffer};
+            target->buffer,
+            withUv2 ? uv2->buffer : meshPlane->buffer};
         // Count, then settle where each triangle's gaussians start, then
         // write. The order of the output is the mesh's own, which is what
         // lets a gaussian be followed from one frame to the next.

@@ -85,6 +85,32 @@ struct Resolved {
             texture.srgb = source == TfToken("sRGB");
         }
     }
+    // WHICH COORDINATES. `inputs:st` leads back to a primvar reader, whose
+    // `varname` is the primvar. The sparrow's feather cards read their colour
+    // off one atlas by `st` and their shape and normal off another by
+    // `UVMap_001`, and read all by the first, the cards were cut to the
+    // wrong texels.
+    if (const UsdShadeInput st = shader.GetInput(TfToken("st"))) {
+        for (const UsdAttribute& attribute : st.GetValueProducingAttributes()) {
+            if (UsdShadeUtils::GetType(attribute.GetName()) != UsdShadeAttributeType::Output) {
+                continue;
+            }
+            const UsdShadeShader reader(attribute.GetPrim());
+            if (!reader) {
+                continue;
+            }
+            if (const UsdShadeInput varname = reader.GetInput(TfToken("varname"))) {
+                std::string name;
+                TfToken token;
+                if (varname.Get(&name)) {
+                    texture.uvSet = name;
+                } else if (varname.Get(&token)) {
+                    texture.uvSet = token.GetString();
+                }
+            }
+            break;
+        }
+    }
     return texture;
 }
 
@@ -570,9 +596,11 @@ Result<std::vector<StageMesh>> MeshStage::read(geom::MeshBuilder& builder, const
         VtIntArray   uvIndices;
         TfToken      uvInterpolation = UsdGeomTokens->faceVarying;
         bool         hasUvs = false;
+        std::string  primary;
         for (const char* name : {"st", "st0", "uv", "UVMap"}) {
             const UsdGeomPrimvar primvar = primvars.GetPrimvar(TfToken(name));
             if (primvar && primvar.Get(&uvs, at) && !uvs.empty()) {
+                primary = name;
                 uvInterpolation = primvar.GetInterpolation();
                 // AT THE SAME TIME AS THE VALUES. Blender writes
                 // `primvars:st:indices` as time samples when the export
@@ -590,6 +618,34 @@ Result<std::vector<StageMesh>> MeshStage::read(geom::MeshBuilder& builder, const
             lrt::log::info("mesh2splat: '{}' has no texture coordinates, skipped",
                            prim.GetPath().GetString());
             continue;
+        }
+        // A SECOND SET, where a map of the material reads by a primvar that is
+        // not the first: carried as `st2`, and the conversion samples that map
+        // by it. One second set; a third map's would have to be a third.
+        StageMaterial material = materialOf(prim);
+        std::string second;
+        for (const StageTexture* texture : {&material.albedo, &material.normal, &material.metallicMap,
+                                            &material.roughnessMap, &material.opacityMap}) {
+            if (!texture->empty() && !texture->uvSet.empty() && texture->uvSet != primary) {
+                second = texture->uvSet;
+                break;
+            }
+        }
+        VtVec2fArray uvs2;
+        VtIntArray   uv2Indices;
+        TfToken      uv2Interpolation = UsdGeomTokens->faceVarying;
+        bool         hasUvs2 = false;
+        if (!second.empty()) {
+            const UsdGeomPrimvar primvar = primvars.GetPrimvar(TfToken(second));
+            if (primvar && primvar.Get(&uvs2, at) && !uvs2.empty()) {
+                uv2Interpolation = primvar.GetInterpolation();
+                primvar.GetIndices(&uv2Indices, at);
+                hasUvs2 = true;
+            } else {
+                lrt::log::info("mesh2splat: '{}' reads a map by '{}', which the mesh has not got; read by '{}'",
+                               prim.GetPath().GetString(), second, primary);
+                second.clear();
+            }
         }
 
         const auto interpolationOf = [](const TfToken& token) {
@@ -618,6 +674,15 @@ Result<std::vector<StageMesh>> MeshStage::read(geom::MeshBuilder& builder, const
             primvar.indices = std::span<const int32_t>(uvIndices.cdata(), uvIndices.size());
             inputs.push_back(std::move(primvar));
         }
+        if (hasUvs2) {
+            geom::PrimvarInput primvar;
+            primvar.name = "st2";
+            primvar.interpolation = interpolationOf(uv2Interpolation);
+            primvar.components = 2;
+            primvar.values = {std::as_bytes(std::span<const GfVec2f>(uvs2.cdata(), uvs2.size())), false};
+            primvar.indices = std::span<const int32_t>(uv2Indices.cdata(), uv2Indices.size());
+            inputs.push_back(std::move(primvar));
+        }
 
         geom::MeshInput input;
         input.source = prim.GetPath().GetString();
@@ -642,7 +707,8 @@ Result<std::vector<StageMesh>> MeshStage::read(geom::MeshBuilder& builder, const
         const GfMatrix4d toWorld = transforms.GetLocalToWorldTransform(prim);
         out.toWorld = rowsOf(toWorld);
         out.normalToWorld = normalRowsOf(toWorld);
-        out.material = materialOf(prim);
+        out.material = std::move(material);
+        out.uv2 = hasUvs2 ? second : std::string();
         if (options.skinned) {
             const auto query = bindings.queries.find(prim.GetPath());
             const auto skeleton = bindings.skeletons.find(prim.GetPath());

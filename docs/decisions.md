@@ -5791,3 +5791,50 @@ context under its UsdPreviewSurface path); on the 94, with the EGL context
   Flagged, an opaque MaterialX square lost 32 to 88 pixels of coverage
   against the ray route, a different count each run: the generated cutout
   raster pass is not the plain pass, and that is not looked into here.
+
+## The feathers read their shape by a second set of coordinates
+
+With opacity as coverage and the cutout walk deep enough, the sparrow's
+geometry still had hard card edges where the shop's picture has fluff. The
+feather and wing meshes carry two UV sets -- `st`, on which the UV1 atlas of
+colour, roughness and specular is laid out, and `UVMap_001`, on which the UV2
+normal map and its alpha are -- and Blender's export read every texture of
+the material through one `st` reader. The alpha cut the cards to the wrong
+texels: rectangles with a few feather-shaped holes instead of feathers. With
+the two UV2 maps read by `UVMap_001` (in `SparrowBird.usda`, a second
+`UsdPrimvarReader_float2` and the two `inputs:st` connections) the bird is
+the one in the shop: a fluffy belly, layered coverts, barbed primaries.
+
+The conversion had the same one reader. `mesh2splat` packs one set of
+coordinates into its mesh picture -- `(position, u)`, `(normal, v)` a corner
+-- and sampled every map by it. Now:
+
+- `MeshStage` follows a texture's `inputs:st` back to its primvar reader's
+  `varname` (`StageTexture::uvSet`), and where a map of the material reads by
+  a primvar that is not the mesh's first, reads that primvar too (values and
+  indices at the conversion's time, as `st`) and carries it as `st2`
+  (`StageMesh::uv2` names it). One second set; a third map's would be a third.
+- the pack kernel writes it into a picture of the mesh picture's shape,
+  `(u2, v2, 0, 0)` then zeros a corner, and the command hands it to the
+  effect as the `Texcoord2` clip with `albedoUv2`, `normalUv2`, `mrUv2` and
+  `opacityUv2` saying which maps read by it (the SDK's headers do not change:
+  a clip and four numbers, both additive). The count and the emit sample the
+  cut by the same coordinates, as they must.
+- the records keep the first set, as before.
+
+`lrt_aofx_tests [mesh2splat]`: the checker cut read by a second set of
+coordinates one cell down keeps the same half of the quad, and it is the
+other half -- not one gaussian well inside a kept cell of the first set's
+reading, more than a quarter of them inside a cut one.
+
+And the command never asked the texture store for the cut-out map: it was
+decoded only while it happened to be the normal map's file (the feathers read
+their alpha off it), and with the normal map repaired into a file of its own
+the cut silently went -- 15.4 M gaussians wanted for the feathers again, the
+number from before there was a cut. Asked for now.
+
+Not done: the Hydra route reads the material as authored (its readers name
+their primvars), so nothing there changes; the cloud's own normal
+(`--normal-map-turns`) now comes from the right texels but was not
+re-measured; the sparrow's cloud and its visibility fields are to be
+converted and baked again.
