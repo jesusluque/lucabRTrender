@@ -5876,3 +5876,11 @@ With every card in, the sparrow at resolution 1400 is 9.5 M gaussians (the
 feathers 7.3 M in four slices, a 731 MB file), and the visibility bake ran
 Metal out of memory on the M5 Pro at its largest part. The cloud is converted
 at 1100 instead, with `--opacity-cut 0.15` for the soft edges.
+
+The 1400 cloud was tried on the 94 as well: the conversion is 18 s there
+(9 360 102 gaussians), the bake does not run on CUDA at all (it traces
+inline rays, which that target has not: `LRT_BACKEND=vulkan` does), and
+through Vulkan it dies where Metal did -- the largest part, some 3.3 M
+gaussians, takes the tracer's proxies to 20 GB of the L4's 23 (a BLAS of
+1.17 GB is what it could not allocate), and `--parts 24` leaves that part as
+it is. Baking a part in chunks of proxies is what it would take; not done.
