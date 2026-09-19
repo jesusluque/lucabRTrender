@@ -764,17 +764,33 @@ Result<size_t> Engine::commit() {
         if (!entry.pending.has_value()) {
             continue;
         }
-        const scene::SplatStreams streams = splatStreams(*entry.pending, id.GetString());
-        if (streams.count == 0) {
-            entry.gpu.reset();
-        } else {
-            auto splats = loader_->upload(streams);
-            if (!splats) {
-                log::warn("hdLrt: {}: {}", id.GetString(), splats.error().toString());
+        // A TIME CHANGE IS NOT A NEW CLOUD.
+        //
+        // usdVolImaging flags a ParticleField as time varying, so every step
+        // of the timeline arrives here with `DirtyPoints | DirtyPrimvar` and
+        // every array read again -- and this used to decode the whole cloud
+        // again with it. `VtArray` is copy-on-write, so a `Get` at a new time
+        // of an attribute that has no time samples hands back the same
+        // buffer: comparing what the arrays point at is how a cloud whose
+        // geometry did not change is not uploaded a second time. On a skinned
+        // bird of 4 269 858 gaussians only `skinningXforms` has samples, and
+        // that is 609 matrices.
+        const CloudIdentity identity = identityOf(*entry.pending);
+        const bool sameCloud = entry.gpu != nullptr && identity == entry.uploaded;
+        if (!sameCloud) {
+            const scene::SplatStreams streams = splatStreams(*entry.pending, id.GetString());
+            if (streams.count == 0) {
                 entry.gpu.reset();
             } else {
-                entry.gpu = std::make_unique<scene::GpuSplats>(std::move(*splats));
+                auto splats = loader_->upload(streams);
+                if (!splats) {
+                    log::warn("hdLrt: {}: {}", id.GetString(), splats.error().toString());
+                    entry.gpu.reset();
+                } else {
+                    entry.gpu = std::make_unique<scene::GpuSplats>(std::move(*splats));
+                }
             }
+            entry.uploaded = identity;
         }
         // THE RIG, IF A SKELETON CARRIES THIS CLOUD.
         //
@@ -785,10 +801,12 @@ Result<size_t> Engine::commit() {
         // skeleton's transforms are taken again, and for sixty joints that is
         // four kilobytes.
         if (entry.gpu != nullptr) {
-            LRT_TRY(carryCloud(id, entry));
+            LRT_TRY(carryCloud(id, entry, !sameCloud));
         }
         entry.pending.reset();
-        ++uploaded;
+        if (!sameCloud) {
+            ++uploaded;
+        }
     }
     for (auto& [id, entry] : points_) {
         if (!entry.pending.has_value()) {
@@ -2088,7 +2106,41 @@ Result<void> Engine::applyExposure(double stops, uint32_t width, uint32_t height
     return batch.submit(true);
 }
 
-Result<void> Engine::carryCloud(const pxr::SdfPath& id, SplatEntry& entry) {
+namespace {
+
+/// Where an array USD handed over lives, and how much of it there is. A
+/// `FloatStream` already points into the `VtArray`'s own storage, so this is
+/// that storage's address -- not a hash, and nothing is read.
+[[nodiscard]] std::pair<const void*, size_t> arrayIdentity(const pxr::VtValue& value) {
+    const scene::FloatStream stream = streamOf(value);
+    if (!stream.empty()) {
+        return {static_cast<const void*>(stream.bytes.data()), stream.bytes.size()};
+    }
+    if (value.IsHolding<pxr::VtIntArray>()) {
+        const pxr::VtIntArray& held = value.UncheckedGet<pxr::VtIntArray>();
+        return {static_cast<const void*>(held.cdata()), held.size() * sizeof(int)};
+    }
+    return {nullptr, 0};
+}
+
+}   // namespace
+
+CloudIdentity Engine::identityOf(const ParticleFieldArrays& arrays) {
+    const pxr::VtValue* const held[10] = {
+        &arrays.positions,   &arrays.orientations, &arrays.scales,       &arrays.opacities,
+        &arrays.shCoefficients, &arrays.metallic,  &arrays.roughness,    &arrays.transmission,
+        &arrays.jointIndices,   &arrays.jointWeights};
+    CloudIdentity identity;
+    for (size_t k = 0; k < 10; ++k) {
+        const auto [data, bytes] = arrayIdentity(*held[k]);
+        identity.data[k] = data;
+        identity.bytes[k] = bytes;
+    }
+    identity.shDegree = arrays.shDegree;
+    return identity;
+}
+
+Result<void> Engine::carryCloud(const pxr::SdfPath& id, SplatEntry& entry, bool reuploaded) {
     const ParticleFieldArrays& arrays = *entry.pending;
     const auto* indices = arrays.jointIndices.IsHolding<pxr::VtIntArray>()
                               ? &arrays.jointIndices.UncheckedGet<pxr::VtIntArray>()
@@ -2134,14 +2186,21 @@ Result<void> Engine::carryCloud(const pxr::SdfPath& id, SplatEntry& entry) {
     // uploaded with the cloud; `(joint, weight)` pairs is the layout every
     // skinner here reads, and pairing them is a rearrangement of values the
     // file holds.
-    std::vector<float> pairs(size_t{count} * 4 * 2);
-    for (size_t k = 0; k < size_t{count} * 4; ++k) {
-        pairs[k * 2] = static_cast<float>(std::max((*indices)[k], 0));
-        pairs[k * 2 + 1] = (*weights)[k];
+    //
+    // ONLY WHEN THE CLOUD WAS UPLOADED. Interleaving them is a loop over four
+    // values a gaussian on the CPU and a buffer of eight floats each -- 137 MB
+    // for the sparrow -- and none of it changes from one instant to the next.
+    // Every frame of the timeline used to pay for it.
+    if (reuploaded || !entry.influences.valid()) {
+        std::vector<float> pairs(size_t{count} * 4 * 2);
+        for (size_t k = 0; k < size_t{count} * 4; ++k) {
+            pairs[k * 2] = static_cast<float>(std::max((*indices)[k], 0));
+            pairs[k * 2 + 1] = (*weights)[k];
+        }
+        auto influences = gpu::Buffer::fromSpan<float>(*device_, pairs, "splat.influences");
+        if (!influences) return std::move(influences).error();
+        entry.influences = std::move(*influences);
     }
-    auto influences = gpu::Buffer::fromSpan<float>(*device_, pairs, "splat.influences");
-    if (!influences) return std::move(influences).error();
-    entry.influences = std::move(*influences);
     auto xforms = gpu::Buffer::fromSpan<float>(*device_, joints, "splat.skinningXforms");
     if (!xforms) return std::move(xforms).error();
     entry.xforms = std::move(*xforms);

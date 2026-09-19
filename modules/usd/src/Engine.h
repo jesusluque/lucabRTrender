@@ -16,6 +16,7 @@
 // handle to a destroyed prim is a stale handle and never somebody else's cloud.
 #pragma once
 
+#include <array>
 #include <map>
 #include <set>
 #include <memory>
@@ -69,8 +70,27 @@ struct StreamedAsset {
     bool operator==(const StreamedAsset&) const = default;
 };
 
+/// WHAT A CLOUD WAS UPLOADED FROM, by the identity of the arrays USD handed
+/// over.
+///
+/// `VtArray` is copy-on-write, so a `Get` at a new time of an attribute that
+/// has no time samples returns the same buffer: where the data is and how much
+/// of it there is, together, say whether anything the decode depends on
+/// actually changed. `skinningXforms` is deliberately not among them -- it is
+/// the one array that does change every frame, and no decode depends on it.
+struct CloudIdentity {
+    std::array<const void*, 10> data{};
+    std::array<size_t, 10>      bytes{};
+    int                         shDegree = -1;
+
+    [[nodiscard]] bool operator==(const CloudIdentity& other) const noexcept {
+        return data == other.data && bytes == other.bytes && shDegree == other.shDegree;
+    }
+};
+
 struct SplatEntry {
     std::optional<ParticleFieldArrays>  pending;   ///< synced, not yet uploaded
+    CloudIdentity                       uploaded;  ///< what `gpu` was decoded from
     std::unique_ptr<scene::GpuSplats>   gpu;
     render::Mat4                        objectToWorld = render::Mat4::identity();
     bool                                visible = true;
@@ -577,7 +597,9 @@ private:
     /// Puts a cloud a skeleton carries where the skeleton is. The uploaded
     /// cloud stays the bind pose and `entry.posed` is what a frame draws, so
     /// what a renderer holds never changes identity between frames.
-    [[nodiscard]] Result<void> carryCloud(const pxr::SdfPath& id, SplatEntry& entry);
+    [[nodiscard]] Result<void> carryCloud(const pxr::SdfPath& id, SplatEntry& entry,
+                                          bool reuploaded);
+    [[nodiscard]] static CloudIdentity identityOf(const ParticleFieldArrays& arrays);
 
     [[nodiscard]] Result<void> paintDomes(const render::Projection& projection, uint32_t width, uint32_t height,
                                           render::RenderTargets& targets);

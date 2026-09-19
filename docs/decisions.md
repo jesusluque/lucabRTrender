@@ -5533,3 +5533,39 @@ Nothing here is built yet. Recorded so the measurements are not lost.
 4. **The `erf` line integral in the traced route** as the quality path, which
    wants any-hit shaders and RT cores -- CUDA, not Metal, where the stochastic
    intersection-shader form is the way round the missing any-hit.
+
+## A time change is not a new cloud
+
+`usdVolImaging` flags a `ParticleField` as time varying, so every step of the
+timeline reached `HdLrtParticleField::Sync` with `DirtyPoints | DirtyPrimvar`
+and every array was read again. Two things followed from that, and both were
+pure waste on a cloud whose geometry never changes.
+
+**The whole cloud was decoded again, every frame.** `VtArray` is copy-on-write,
+so a `Get` at a new time of an attribute that has no time samples hands back
+*the same buffer*. Comparing what the arrays point at -- ten addresses and
+their sizes, plus the harmonic degree -- says whether anything the decode
+depends on actually changed. `skinningXforms` is deliberately not among them:
+it is the one array that does change every frame, and no decode depends on it.
+On the sparrow that is 609 matrices against 4 269 858 gaussians.
+
+**And the influences were interleaved again, every frame.** `(joint, weight)`
+pairs are what every skinner here reads, and building them is a CPU loop over
+four values a gaussian and a buffer of eight floats each -- **137 MB** for that
+bird -- none of which changes between instants. It is now rebuilt only when the
+cloud was uploaded.
+
+Measured on the viewer, 400 frames playing at 1280x720:
+
+| | before | after |
+|---|---|---|
+| cloud uploads over 400 frames | 400 | **1** |
+| raster, median | 134.96 ms | **56.87 ms** |
+| raster, warm | 31.56 ms | **13.40 ms** |
+| `rt`, median | 268.66 ms | **178.99 ms** |
+| `rt`, warm | 55.31 ms | 55.05 ms |
+
+The rasteriser is at 75 fps on 4.27 M skinned gaussians. The traced route
+improves in the median and not in its warm frame, so its remaining cost is
+elsewhere -- the proxies and the acceleration structure the posed cloud is
+traced through, which is the next thing to look at.
