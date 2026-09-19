@@ -7,6 +7,7 @@
 
 #include <catch2/catch_approx.hpp>
 
+#include <array>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -6408,4 +6409,98 @@ TEST_CASE("a cloud its file says a skeleton carries moves with it", "[usd][gpu][
     CHECK(later.max[0] - first.max[0] == Catch::Approx(2.0).margin(1e-3));
     CHECK(later.min[1] == Catch::Approx(first.min[1]).margin(1e-3));
     CHECK(later.min[2] == Catch::Approx(first.min[2]).margin(1e-3));
+}
+
+// A UsdPreviewSurface's opacity under one is coverage: the surface is there
+// for a sample or it is not, drawn by lot, and never a lens of glass
+// (MaterialX's own reading of it, which made a feather's soft edge a glass
+// edge). A red card of opacity a over a white card reads a of red and 1 - a
+// of white; at 0 the card is not there at all, at 1 it is all there is.
+TEST_CASE("a fractional opacity is coverage: a half-clear red card over a white one reads half of each",
+          "[usd][gpu][rt][coverage]") {
+    LRT_REQUIRE_GPU(gpu);
+    const auto stage = [&](float opacity) {
+        const fs::path path = scratch("coverage_" + std::to_string(int(opacity * 100)) + ".usda");
+        std::ofstream out(path);
+        const auto card = [&](const char* name, double z, const char* material) {
+            out << "def Mesh \"" << name << "\" (\n    prepend apiSchemas = [\"MaterialBindingAPI\"]\n)\n{\n"
+                   "    int[] faceVertexCounts = [4]\n    int[] faceVertexIndices = [0, 1, 2, 3]\n"
+                   "    point3f[] points = [(-3, -3, " << z << "), (3, -3, " << z << "), (3, 3, " << z
+                << "), (-3, 3, " << z << ")]\n"
+                   "    uniform token subdivisionScheme = \"none\"\n"
+                   "    rel material:binding = </Materials/" << material << ">\n}\n";
+        };
+        out << "#usda 1.0\n(\n    upAxis = \"Z\"\n)\n";
+        card("Front", 0.0, "Red");
+        card("Back", -1.0, "White");
+        out << "def Camera \"Camera\"\n{\n"
+               "    float focalLength = 24\n"
+               "    float horizontalAperture = 24.576\n    float verticalAperture = 18.432\n"
+               "    float2 clippingRange = (0.1, 100)\n"
+               "    double3 xformOp:translate = (0, 0, 5)\n"
+               "    uniform token[] xformOpOrder = [\"xformOp:translate\"]\n}\n"
+               "def Scope \"Materials\"\n{\n"
+               "    def Material \"Red\"\n    {\n"
+               "        token outputs:surface.connect = </Materials/Red/Preview.outputs:surface>\n"
+               "        def Shader \"Preview\"\n        {\n"
+               "            uniform token info:id = \"UsdPreviewSurface\"\n"
+               "            color3f inputs:diffuseColor = (0, 0, 0)\n"
+               "            color3f inputs:emissiveColor = (1, 0, 0)\n"
+               "            int inputs:useSpecularWorkflow = 1\n"
+               "            color3f inputs:specularColor = (0, 0, 0)\n"
+               "            float inputs:roughness = 1\n"
+               "            float inputs:opacity = " << opacity << "\n"
+               "            token outputs:surface\n        }\n    }\n"
+               "    def Material \"White\"\n    {\n"
+               "        token outputs:surface.connect = </Materials/White/Preview.outputs:surface>\n"
+               "        def Shader \"Preview\"\n        {\n"
+               "            uniform token info:id = \"UsdPreviewSurface\"\n"
+               "            color3f inputs:diffuseColor = (0, 0, 0)\n"
+               "            color3f inputs:emissiveColor = (1, 1, 1)\n"
+               "            int inputs:useSpecularWorkflow = 1\n"
+               "            color3f inputs:specularColor = (0, 0, 0)\n"
+               "            float inputs:roughness = 1\n"
+               "            token outputs:surface\n        }\n    }\n}\n";
+        return path;
+    };
+    // Black diffuse, no specular: the cards emit and reflect nothing, so
+    // the pixel is the emission of what is there. (With a specular lobe the
+    // white card caught the red card as a light -- the emissive table does
+    // not draw the lot, see the decisions -- and the headlight of a stage
+    // without lights.)
+    const uint32_t w = 64, h = 48;
+    const auto centre = [&](float opacity, const char* technique) {
+        auto renderer = usd::StageRenderer::open(stage(opacity));
+        if (!renderer) FAIL(renderer.error().toString());
+        (*renderer)->setPathSamples(256);
+        (*renderer)->setPathTotal(256);
+        (*renderer)->setPathBounces(0);
+        auto image = (*renderer)->render("/Camera", 0.0, w, h, technique);
+        if (!image) FAIL(image.error().toString());
+        const size_t at = (size_t{h / 2} * w + w / 2) * 4;
+        std::printf("  opacity %.2f, %s: centre (%.3f, %.3f, %.3f, %.3f)\n", double(opacity), technique,
+                    double(image->rgba[at]), double(image->rgba[at + 1]), double(image->rgba[at + 2]),
+                    double(image->rgba[at + 3]));
+        return std::array<float, 4>{image->rgba[at], image->rgba[at + 1], image->rgba[at + 2], image->rgba[at + 3]};
+    };
+    // Half: red and white by lot, 256 paths a pixel -- a binomial's three
+    // sigma is 0.094.
+    const auto half = centre(0.5F, "rt");
+    CHECK(half[0] == Catch::Approx(1.0F).margin(0.02F));
+    CHECK(half[1] == Catch::Approx(0.5F).margin(0.1F));
+    CHECK(half[2] == Catch::Approx(0.5F).margin(0.1F));
+    CHECK(half[3] == Catch::Approx(1.0F).margin(0.02F));
+    // None: the card is cut away by the visibility pass, and the white card is
+    // the pixel's -- on both routes.
+    for (const char* technique : {"rt", "raster"}) {
+        const auto none = centre(0.0F, technique);
+        CHECK(none[0] == Catch::Approx(1.0F).margin(0.02F));
+        CHECK(none[1] == Catch::Approx(1.0F).margin(0.02F));
+        CHECK(none[2] == Catch::Approx(1.0F).margin(0.02F));
+    }
+    // Whole: red, and nothing of the white behind.
+    const auto whole = centre(1.0F, "rt");
+    CHECK(whole[0] == Catch::Approx(1.0F).margin(0.02F));
+    CHECK(whole[1] == Catch::Approx(0.0F).margin(0.02F));
+    CHECK(whole[2] == Catch::Approx(0.0F).margin(0.02F));
 }

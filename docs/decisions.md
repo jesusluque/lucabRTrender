@@ -5693,3 +5693,97 @@ And the feathers were a quarter metallic. Blender's FBX importer turned a
 specular factor into `Metallic = 0.25`; the source has no metallic map for
 them and a feather is not a metal. The stage that carries the bird overrides
 it to 0 before the conversion.
+
+## Opacity is coverage, not glass
+
+The sparrow's geometry rendered silver where its photographs show a brown
+bird, and the user's diagnosis was the import. Three things were measured
+before anything was changed, since the material path has several places to
+be wrong in.
+
+**The textures arrive whole.** A quad that fills an orthographic frame at the
+texture's own size, the texture connected to a diffuse of roughness one
+(specular workflow, specular colour 0, ior 1: the albedo AOV of a black
+constant reads 0.00045, of a white one 1.0), and the `albedo` AOV against the
+file: the colour map (sRGB) within 0.0013 of the linearised file at every
+texel, the roughness and specular maps (raw) within 0.0012, at mip 0 -- the
+same against a 2x2 box of the file reads 0.4. A flat normal map is the
+identity (mean 1e-5 against the same quad with no map). The `albedo` and
+`shadingNormal` AOVs are now render vars a settings prim can ask for; they
+are the path tracer's, so a raster product leaves them empty.
+
+**The lobes are right.** A row of spheres per UsdPreviewSurface input --
+roughness, metallic, specular workflow, ior, clearcoat, opacity in both modes,
+emission, and the bird's own maps -- at `$S/ball/shaderball.py` (a script,
+not an asset). Every row reads as it should but one: **a sphere of opacity 0
+was a grey ball**. MaterialX's `usd_preview_surface.mtlx` makes an opacity
+under one a `dielectric_bsdf` transmission at the surface's ior, so the
+sphere was a lens of the sky, and a feather card's soft edge was a glass
+edge: the silver. Storm draws the same sphere as nothing.
+
+**So opacity is coverage.** USD says a surface of opacity a is there or it is
+not, and a rasteriser blends by a. The engine now:
+
+- compiles UsdPreviewSurface with a nodegraph of its own
+  (`shaders/lrt/material/mx/lrt_usd_preview_surface.mtlx`, MaterialX's with
+  the transmission mix removed and the surface's opacity output the opacity
+  itself, or the threshold's 0 / 1); the reference variant keeps MaterialX's,
+  as genglsl does. A material whose `opacity` is connected or under one is
+  flagged as a cutout beside one with a threshold (`cutsOut`).
+- cuts by lot. The raster route's visibility passes cut a flagged sample
+  where its opacity is under a hash of the pixel (`pixelLot`; a frame is one
+  image, so no seed), and the shading kernel counts a survivor whole. The
+  path tracer's visibility cuts only what is fully clear, and the tracer draws
+  a lot a sample at every flagged vertex, camera hit or bounce: a losing
+  surface is passed along the ray from the hit, neither a bounce nor a step,
+  up to 32 deep (a wing is a dozen cards, most of each clear). A ray that
+  escapes this way gathers the lights at infinity along it, since the
+  background pass draws only where the visibility pass found nothing. The
+  margin off a passed hit is 1e-5 of the scale: at a bounce's 1e-4 the body a
+  feather card lies on was skipped.
+- reads half of each: a red card of opacity 0.5 over a white one, 256 paths,
+  centre (1, 0.5, 0.5) within a binomial's three sigma; opacity 0 is cut by
+  the visibility pass on both routes; opacity 1 hides the white
+  (`lrt_usd_tests [coverage]`, `lrt_material_tests [coverage]`).
+
+The sparrow's feathers, three things of the asset's, not the engine's, each
+put in the layer that carries the bird (`SparrowBird.usda`): the feather
+material was a quarter metallic and the eyes took their metallic from a
+specular map (Blender's FBX import; a sparrow is a dielectric); and the
+feather normal map's colour is premultiplied by its alpha (unpremultiplied,
+its maximum is exactly 1; the clear corner is black), so every soft edge's
+normal came out as (-1, -1, -1) -- the flakes. `UV2_treesparrow_normal_fixed.png`
+is the same map composited over a flat normal by its alpha, its alpha kept
+for the opacity. The belly's holes that remain are the asset's: the body
+mesh ends above them and the cards there are strand edges over nothing
+(with the body's material made emissive red, no red behind them).
+
+### Storm beside the engine
+
+`lrt_storm_oracle_tests "[storm-side-by-side]"` draws any stage
+(`LRT_ORACLE_STAGE`, `_OUT`, `_CAMERA`, `_SIZE`, `_TIME`, `_TECHNIQUE`,
+`_PATHS`) with Storm and the engine into two EXRs, colour only -- a
+translucent material has Storm blend, and Metal refuses to blend into an
+integer id target. On this Mac Storm then dies in `glGetString` (no GL
+context under its UsdPreviewSurface path); on the 94, with the EGL context
+`makeHeadlessGlContextCurrent` makes, it should run. Not yet run there.
+
+### What it is not
+
+- A shadow ray does not draw the lot: a soft edge casts a full shadow, as a
+  cutout already did. The shadow walk would need the material evaluated at
+  the shadow hit, which is a second call site of every material.
+- A bounce that passes through and escapes gathers the lights at infinity
+  with no MIS weight; the bounce's own escape did that before the pass.
+- The raster route dithers: one lot a pixel, no accumulation.
+- The `opacityMode` presence / transparent distinction is gone: both are
+  coverage here.
+- An emissive surface is a light at its whole size whatever its opacity: the
+  emissive table does not draw the lot. The test's cards emit and reflect
+  nothing for that reason.
+- `cutsOut` reads the material's root surface node alone: the document hdMtlx
+  hands over carries the libraries, whose implementation graphs wire
+  `opacity` up in every surface, and reading those flagged every material.
+  Flagged, an opaque MaterialX square lost 32 to 88 pixels of coverage
+  against the ray route, a different count each run: the generated cutout
+  raster pass is not the plain pass, and that is not looked into here.

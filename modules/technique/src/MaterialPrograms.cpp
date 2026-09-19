@@ -11,10 +11,20 @@ namespace lrt::technique {
 
 namespace {
 
-/// Asking a sample's material whether it is there at all. MaterialX resolves
-/// `opacityThreshold` itself -- a UsdPreviewSurface with one has opacity 0 or
-/// 1 -- so the test is a half, and only rows flagged as cutouts pay for it.
+/// Asking a sample's material whether it is there at all. A UsdPreviewSurface
+/// with an `opacityThreshold` has opacity 0 or 1; one without has what its
+/// opacity says, which is coverage: the raster route cuts by a pixel's lot
+/// (a hash, so a frame is one image), the path tracer only what is fully
+/// gone, and draws its own lot a sample. Only rows flagged as cutouts pay.
 const char* kCutout = R"(
+float pixelLot(uint2 pixel) {
+    uint state = (pixel.y * 65536u + pixel.x) * 747796405u + 2891336453u;
+    uint word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+    word = (word >> 22u) ^ word;
+    // Never exactly 0: an opacity of 0 always cuts, one of 1 never does.
+    return (float(word >> 8) + 0.5) * (1.0 / 16777216.0);
+}
+
 public bool materialCuts(CameraParams camera, uint2 pixel, uint4 seen) {
     const Surface s = surfaceAt(camera, pixel.x, pixel.y, seen);
     // An invisible face cuts as a cutout does, whatever its material. Its
@@ -29,7 +39,7 @@ public bool materialCuts(CameraParams camera, uint2 pixel, uint4 seen) {
     }
     const MaterialInputs inputs = materialInputsAt(camera, toWorld, pixel.x, pixel.y, s, lookup.time);
     evaluateMaterial(m.function, inputs, m.blob);
-    return gLrtResult.opacity < 0.5;
+    return gLrtResult.opacity < (lookup.alphaDither != 0 ? pixelLot(pixel) : 1.0 / 512.0);
 }
 )";
 
@@ -103,6 +113,7 @@ void bindMaterialFrame(rhi::ShaderCursor cursor, const MaterialFrame& frame, con
     cursor["toWorld"]["row1"].setData(toWorld.data() + 4, sizeof(float) * 4);
     cursor["toWorld"]["row2"].setData(toWorld.data() + 8, sizeof(float) * 4);
     cursor["lookup"]["time"].setData(frame.time);
+    cursor["lookup"]["alphaDither"].setData(frame.alphaDither);
 }
 
 }   // namespace lrt::technique

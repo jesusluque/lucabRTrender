@@ -27,6 +27,8 @@ namespace lrt::material {
 namespace {
 
 const std::string kFunctionPlaceholder = "LRT_MATERIAL_FUNCTION";
+/// MaterialX's UsdPreviewSurface nodegraph, replaced by the engine's own.
+const std::string kPreviewSurfaceGraph = "IMP_UsdPreviewSurface_surfaceshader";
 
 /// The surface node: no light loop. Its BSDF graph runs once, pushing lobes;
 /// what it weights them by becomes the material's lobe stack.
@@ -626,6 +628,18 @@ Result<std::unique_ptr<MaterialCompiler>> MaterialCompiler::create(
                 impl.libraries->importLibrary(imageDoc);
                 impl.libraries->importLibrary(closureDoc);
                 impl.referenceLibraries->importLibrary(imageDoc);
+                // UsdPreviewSurface with its opacity as coverage, in place of
+                // MaterialX's graph (the file says why); the reference keeps
+                // MaterialX's, as genglsl does.
+                const std::filesystem::path preview = shaders / "lrt/material/mx/lrt_usd_preview_surface.mtlx";
+                if (std::filesystem::exists(preview)) {
+                    if (impl.libraries->getNodeGraph(kPreviewSurfaceGraph)) {
+                        impl.libraries->removeNodeGraph(kPreviewSurfaceGraph);
+                    }
+                    mx::DocumentPtr previewDoc = mx::createDocument();
+                    mx::readFromXmlFile(previewDoc, mx::FilePath(preview.string()));
+                    impl.libraries->importLibrary(previewDoc);
+                }
                 found = true;
             }
             impl.sourcePaths.append(mx::FilePath(shaders.string()));
@@ -658,17 +672,36 @@ bool MaterialCompiler::cutsOut(const std::shared_ptr<void>& document) {
         if (!node) {
             continue;
         }
-        const mx::InputPtr input = node->getInput("opacityThreshold");
-        if (!input) {
+        // The material's own surface node, which hdMtlx puts at the root:
+        // the document carries the libraries too, whose implementation
+        // graphs wire `opacity` up in every surface.
+        if (node->getParent() != doc) {
             continue;
         }
-        if (!input->getNodeName().empty() || !input->getNodeGraphString().empty() ||
-            !input->getInterfaceName().empty()) {
+        // A threshold cuts; an opacity under one is coverage, cut by lot.
+        const auto driven = [](const mx::InputPtr& input) {
+            return input && (!input->getNodeName().empty() || !input->getNodeGraphString().empty() ||
+                             !input->getInterfaceName().empty());
+        };
+        const mx::InputPtr threshold = node->getInput("opacityThreshold");
+        if (driven(threshold)) {
             return true;   // driven by a graph: assume it cuts
         }
-        const mx::ValuePtr value = input->getValue();
-        if (value && value->isA<float>() && value->asA<float>() > 0.0F) {
+        if (threshold) {
+            const mx::ValuePtr value = threshold->getValue();
+            if (value && value->isA<float>() && value->asA<float>() > 0.0F) {
+                return true;
+            }
+        }
+        const mx::InputPtr opacity = node->getInput("opacity");
+        if (driven(opacity)) {
             return true;
+        }
+        if (opacity) {
+            const mx::ValuePtr value = opacity->getValue();
+            if (value && value->isA<float>() && value->asA<float>() < 1.0F) {
+                return true;
+            }
         }
     }
     return false;
@@ -701,6 +734,11 @@ Result<CompiledMaterial> MaterialCompiler::compileDocument(const std::shared_ptr
         // not the engine's implementations.
         mx::DocumentPtr doc = mx::createDocument();
         doc->copyContentFrom(given);
+        if (variant == ClosureVariant::Lobes && doc->getNodeGraph(kPreviewSurfaceGraph)) {
+            // hdMtlx's document brought MaterialX's graph; the engine's is in
+            // its libraries.
+            doc->removeNodeGraph(kPreviewSurfaceGraph);
+        }
         doc->importLibrary(variant == ClosureVariant::Lobes ? impl.libraries : impl.referenceLibraries);
         mx::TypedElementPtr renderable;
         if (!element.empty()) {

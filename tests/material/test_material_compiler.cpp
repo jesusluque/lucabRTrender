@@ -417,3 +417,29 @@ TEST_CASE("materials that differ in name and values alone share one module", "[m
     CHECK(back.module == uvgrid.module);
     CHECK(back.source == uvgrid.source);
 }
+
+TEST_CASE("a UsdPreviewSurface's opacity is coverage: no transmission lobe, and the material cuts",
+          "[material][materialx][coverage]") {
+    LRT_REQUIRE_GPU(gpu);
+    auto mx = compiler(*gpu);
+    // MaterialX's own graph makes an opacity under one a dielectric
+    // transmission at the surface's ior -- a sphere of opacity 0 came out a
+    // grey lens of the sky. The engine's graph (lrt_usd_preview_surface.mtlx)
+    // has no transmission: the lobes are the opaque surface's and `opacity`
+    // goes out as the surface's opacity, for the passes to cut by.
+    auto compiled = mx->compileXml(surface("UsdPreviewSurface",
+                                           "    <input name=\"diffuseColor\" type=\"color3\" value=\"0.8, 0.2, 0.1\" />\n"
+                                           "    <input name=\"opacity\" type=\"float\" value=\"0.5\" />\n"));
+    if (!compiled) FAIL(compiled.error().toString());
+    CHECK(compiled->source.find("transmission_bsdf") == std::string::npos);
+    CHECK(compiled->source.find("opacity_presence_out") != std::string::npos);
+    // The reference variant keeps MaterialX's graph, as genglsl does.
+    auto reference = mx->compileXml(surface("UsdPreviewSurface",
+                                            "    <input name=\"opacity\" type=\"float\" value=\"0.5\" />\n"),
+                                    {}, material::ClosureVariant::GenglslReference);
+    if (!reference) FAIL(reference.error().toString());
+    CHECK(reference->source.find("transmission_bsdf") != std::string::npos);
+    std::printf("  coverage graph: %zu lines; MaterialX's: %zu lines\n",
+                static_cast<size_t>(std::count(compiled->source.begin(), compiled->source.end(), '\n')),
+                static_cast<size_t>(std::count(reference->source.begin(), reference->source.end(), '\n')));
+}

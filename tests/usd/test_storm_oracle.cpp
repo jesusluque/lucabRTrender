@@ -40,6 +40,7 @@
 #include <MaterialXFormat/XmlIo.h>
 
 #include "lrt/core/Platform.h"
+#include "lrt/io/Exr.h"
 #include "lrt/usd/StageRenderer.h"
 
 
@@ -73,6 +74,34 @@ GfMatrix4d projectionOf(const render::Camera& camera, uint32_t w, uint32_t h) {
     return lens.GetFrustum().ComputeProjectionMatrix();
 }
 
+float halfToFloat(uint16_t h) {
+    const uint32_t sign = (uint32_t{h} & 0x8000u) << 16;
+    const uint32_t exponent = (h >> 10) & 0x1Fu;
+    const uint32_t mantissa = h & 0x3FFu;
+    uint32_t bits;
+    if (exponent == 0) {
+        if (mantissa == 0) {
+            bits = sign;
+        } else {
+            // A subnormal: normalise it.
+            uint32_t m = mantissa;
+            int e = 113;
+            while ((m & 0x400u) == 0) {
+                m <<= 1;
+                --e;
+            }
+            bits = sign | (static_cast<uint32_t>(e) << 23) | ((m & 0x3FFu) << 13);
+        }
+    } else if (exponent == 31) {
+        bits = sign | 0x7F800000u | (mantissa << 13);
+    } else {
+        bits = sign | ((exponent + 112) << 23) | (mantissa << 13);
+    }
+    float out;
+    std::memcpy(&out, &bits, 4);
+    return out;
+}
+
 std::vector<uint8_t> mapped(HdRenderBuffer* buffer) {
     buffer->Resolve();
     const size_t bytes = size_t{buffer->GetWidth()} * buffer->GetHeight() * HdDataSizeOfFormat(buffer->GetFormat());
@@ -82,7 +111,8 @@ std::vector<uint8_t> mapped(HdRenderBuffer* buffer) {
     return out;
 }
 
-Outputs storm(const fs::path& stagePath, const render::Camera& camera, uint32_t w, uint32_t h, bool colour = false) {
+Outputs storm(const fs::path& stagePath, const render::Camera& camera, uint32_t w, uint32_t h, bool colour = false,
+              double time = 0.0, bool stateDome = true, bool ids = true) {
 #if defined(__linux__)
     // Storm draws through OpenGL here, and HgiGL expects a context current.
     if (!platform::makeHeadlessGlContextCurrent()) {
@@ -105,25 +135,33 @@ Outputs storm(const fs::path& stagePath, const render::Camera& camera, uint32_t 
     index->InsertSceneIndex(sceneIndices.finalSceneIndex, SdfPath::AbsoluteRootPath());
     HdxTaskController controller(index.get(), SdfPath("/__stormOracle"), /*gpuEnabled=*/true);
     controller.SetEnableSelection(false);
-    TfTokenVector outputs{HdAovTokens->depth, HdAovTokens->primId, HdAovTokens->Neye};
+    // A translucent material has Storm blend, and Metal refuses to blend
+    // into an integer id target: a colour-only draw leaves the ids out.
+    TfTokenVector outputs;
+    if (ids) {
+        outputs = {HdAovTokens->depth, HdAovTokens->primId, HdAovTokens->Neye};
+    }
     if (colour) {
         outputs.push_back(HdAovTokens->color);
     }
     controller.SetRenderOutputs(outputs);
     if (colour) {
         // Storm's MaterialX shaders read environment uniforms that exist only
-        // under a lighting state, as usdview gives it: one light, a dome.
+        // under a lighting state, as usdview gives it: one light, a dome --
+        // or, for a stage that brings its own lights, a state with none.
         GlfSimpleLightingContextRefPtr lighting = GlfSimpleLightingContext::New();
-        GlfSimpleLight light;
-        light.SetIsDomeLight(true);
-        lighting->SetLights({light});
+        if (stateDome) {
+            GlfSimpleLight light;
+            light.SetIsDomeLight(true);
+            lighting->SetLights({light});
+        }
         lighting->SetUseLighting(true);
         controller.SetLightingState(lighting);
     }
     HdRprimCollection collection(HdTokens->geometry, HdReprSelector(HdReprTokens->smoothHull));
     collection.SetRootPath(SdfPath::AbsoluteRootPath());
     controller.SetCollection(collection);
-    sceneIndices.stageSceneIndex->SetTime(UsdTimeCode(0.0));
+    sceneIndices.stageSceneIndex->SetTime(UsdTimeCode(time));
     sceneIndices.stageSceneIndex->ApplyPendingUpdates();
     controller.SetFreeCameraMatrices(viewOf(camera), projectionOf(camera, w, h));
     controller.SetRenderBufferSize(GfVec2i(static_cast<int>(w), static_cast<int>(h)));
@@ -132,9 +170,11 @@ Outputs storm(const fs::path& stagePath, const render::Camera& camera, uint32_t 
     HdTaskSharedPtrVector tasks = controller.GetRenderingTasks();
     engine.Execute(index.get(), &tasks);
     Outputs out;
-    out.depth = mapped(controller.GetRenderOutput(HdAovTokens->depth));
-    out.eye = mapped(controller.GetRenderOutput(HdAovTokens->Neye));
-    out.primId = mapped(controller.GetRenderOutput(HdAovTokens->primId));
+    if (ids) {
+        out.depth = mapped(controller.GetRenderOutput(HdAovTokens->depth));
+        out.eye = mapped(controller.GetRenderOutput(HdAovTokens->Neye));
+        out.primId = mapped(controller.GetRenderOutput(HdAovTokens->primId));
+    }
     if (colour) {
         HdRenderBuffer* buffer = controller.GetRenderOutput(HdAovTokens->color);
         REQUIRE(buffer->GetFormat() == HdFormatFloat16Vec4);
@@ -448,4 +488,76 @@ TEST_CASE("MaterialX pattern graphs from MaterialX's TestSuite shade as Storm sh
                 compared, failing);
     CHECK(compared * 10 >= materials.size() * 9);
     CHECK(failing == 0);
+}
+
+// Any stage, Storm beside the engine: the same file, camera and time drawn by
+// both into an output directory, to look at. Not a check -- Storm shades by
+// its own rules -- but the question "is it the import or the shading" is
+// answered by looking at the two. Hidden; driven by the environment:
+//   LRT_ORACLE_STAGE      the .usd to draw
+//   LRT_ORACLE_OUT        the directory storm.exr and ours.exr go to
+//   LRT_ORACLE_CAMERA     "ex ey ez  tx ty tz  ux uy uz  focal" (else /Cam.. the first camera is not read: give one)
+//   LRT_ORACLE_SIZE       "WxH" (960x720)
+//   LRT_ORACLE_TIME       the time code (0)
+//   LRT_ORACLE_TECHNIQUE  raster | rt, and LRT_ORACLE_PATHS the paths a pixel for rt (64)
+TEST_CASE("a stage named by the environment is drawn by Storm and by the engine, side by side",
+          "[.][usd][gpu][oracle][storm-side-by-side]") {
+    LRT_REQUIRE_GPU(gpu);
+    const std::string stagePath = platform::env("LRT_ORACLE_STAGE");
+    const std::string outDir = platform::env("LRT_ORACLE_OUT");
+    if (stagePath.empty() || outDir.empty()) {
+        SKIP("LRT_ORACLE_STAGE and LRT_ORACLE_OUT name the stage and the output directory");
+    }
+    if (platform::env("HDX_MSAA_SAMPLE_COUNT") != "1") {
+        FAIL("Storm must render single-sampled: run with HDX_MSAA_SAMPLE_COUNT=1 in the environment (ctest sets it)");
+    }
+    PlugRegistry::GetInstance().RegisterPlugins(fs::path(LRT_HYDRA_PLUGIN_DIR).string());
+    uint32_t w = 960;
+    uint32_t h = 720;
+    if (const std::string size = platform::env("LRT_ORACLE_SIZE"); !size.empty()) {
+        std::sscanf(size.c_str(), "%ux%u", &w, &h);
+    }
+    double values[10] = {0.0, -5.0, 2.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 35.0};
+    if (const std::string spec = platform::env("LRT_ORACLE_CAMERA"); !spec.empty()) {
+        std::sscanf(spec.c_str(), "%lf %lf %lf %lf %lf %lf %lf %lf %lf %lf", &values[0], &values[1], &values[2],
+                    &values[3], &values[4], &values[5], &values[6], &values[7], &values[8], &values[9]);
+    }
+    render::Camera camera = render::Camera::lookingAt({values[0], values[1], values[2]},
+                                                      {values[3], values[4], values[5]},
+                                                      {values[6], values[7], values[8]});
+    camera.lens.focal = values[9];
+    camera.lens.vaperture = camera.lens.haperture * h / w;
+    camera.lens.nearZ = 0.01;
+    camera.lens.farZ = 1000.0;
+    const double time = platform::env("LRT_ORACLE_TIME").empty() ? 0.0 : std::stod(platform::env("LRT_ORACLE_TIME"));
+    const std::string technique = platform::env("LRT_ORACLE_TECHNIQUE").empty() ? "raster"
+                                                                                : platform::env("LRT_ORACLE_TECHNIQUE");
+    const uint32_t paths = platform::env("LRT_ORACLE_PATHS").empty() ? 64u
+                                                                     : std::stoul(platform::env("LRT_ORACLE_PATHS"));
+    fs::create_directories(outDir);
+
+    auto renderer = usd::StageRenderer::open(stagePath);
+    if (!renderer) FAIL(renderer.error().toString());
+    (*renderer)->setPathTotal(paths);
+    auto image = (*renderer)->render(camera, time, w, h, technique);
+    if (!image) FAIL(image.error().toString());
+    auto wrote = io::writeExr(fs::path(outDir) / "ours.exr", w, h, image->rgba, {}, /*half=*/false);
+    if (!wrote) FAIL(wrote.error().toString());
+
+    // Storm, lit by the stage's lights alone.
+    // LRT_ORACLE_STATE_DOME=1 adds the lighting state's dome, as usdview's
+    // free camera light does; without it Storm has the stage's lights alone.
+    const Outputs theirs = storm(stagePath, camera, w, h, /*colour=*/true, time,
+                                 /*stateDome=*/platform::env("LRT_ORACLE_STATE_DOME") == "1", /*ids=*/false);
+    std::vector<float> rgba(size_t{w} * h * 4);
+    for (size_t k = 0; k < rgba.size(); k += 2) {
+        uint32_t word = 0;
+        std::memcpy(&word, theirs.colour.data() + k * 2, 4);
+        rgba[k] = halfToFloat(static_cast<uint16_t>(word & 0xFFFFu));
+        rgba[k + 1] = halfToFloat(static_cast<uint16_t>(word >> 16));
+    }
+    wrote = io::writeExr(fs::path(outDir) / "storm.exr", w, h, rgba, {}, /*half=*/false);
+    if (!wrote) FAIL(wrote.error().toString());
+    std::printf("  %s at time %g, %ux%u, %s: %s/ours.exr and storm.exr\n", stagePath.c_str(), time, w, h,
+                technique.c_str(), outDir.c_str());
 }

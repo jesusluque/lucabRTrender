@@ -871,6 +871,7 @@ struct Shaded {
     uint           categoriesLo;   // the instance's, for a light's link
     uint           categoriesHi;
     bool           valid;
+    bool           coverage;       // its opacity is coverage (a cutout row): the sample is there, or it is not
     float3         rayOrigin;      // where the ray that found it started, and how far it went: a medium's segment
     float          rayT;
 };
@@ -887,6 +888,7 @@ Shaded shadeSurface(uint2 pixel, Surface s) {
     const MaterialRecord m = materials[materialRowOf(s)];
     evaluateMaterial(m.function, out.inputs, m.blob);
     out.stack = gLrtResult;
+    out.coverage = (m.flags & kMaterialCutout) != 0;
     out.toEye = normalize(out.inputs.viewPosition - out.inputs.positionWorld);
     out.depth = s.depth;
     out.valid = true;
@@ -973,6 +975,7 @@ Found foundHit(PathHit hit, float3 from, float3 direction) {
 Shaded shadeFound(uint2 pixel, Found f) {
     Shaded out;
     out.valid = false;
+    out.coverage = false;
     out.depth = 0.0;
     if (!f.valid) {
         return out;
@@ -1553,6 +1556,7 @@ void tracePathsAt(uint2 group, uint index) {
         // such a point waits while it is shaded, then goes on. The trip count
         // is a uniform's, so the compiler cannot unroll the call into copies.
         uint bounce = 0;
+        uint passed = 0;   // surfaces this sample's lot saw through
         Shaded cur;
         cur.valid = false;
         bool   lightStep = false;     // the next step shades the light point, not the path
@@ -1602,7 +1606,7 @@ void tracePathsAt(uint2 group, uint index) {
             // its first vertex is not the one hit a pixel shades once: cached,
             // every sample would answer with sample zero's eye and the
             // harmonics past the constant would come back as noise about zero.
-            const bool cameraHit = !lightStep && bounce == 0 && !ownRays && !kBake;
+            const bool cameraHit = !lightStep && bounce == 0 && passed == 0 && !ownRays && !kBake;
             Shaded shaded;
             if (cameraHit && firstShaded) {
                 shaded = first;
@@ -1618,6 +1622,51 @@ void tracePathsAt(uint2 group, uint index) {
                 carried += lightScale * shaded.stack.emission;
                 lightStep = false;
             } else {
+                if (kTraces && shaded.coverage && shaded.stack.opacity < 1.0 && passed < 32 &&
+                    random(tid, sample, bounce, 29u + passed) >= shaded.stack.opacity) {
+                    // Coverage: for this sample the surface is not there.
+                    // The ray goes on from the hit along its own direction,
+                    // and that is neither a bounce nor a step: a wing is a
+                    // dozen cards deep, most of each card clear. A feather's
+                    // soft edge is the card behind it as often as the edge;
+                    // escaping, the sample is transparent and the background
+                    // is composited behind it, as a lens ray's that found
+                    // nothing. Barely off the hit: a card lies on the body it
+                    // covers, and a bounce's margin skipped the body.
+                    const float3 o = target.positionWorld;
+                    const float3 d = normalize(o - target.rayOrigin);
+                    const PathHit hit = traceNearestFrom(o, d, 1.0e-5 * max(1.0e-2, length(o)), mask);
+                    if (hit.seen.x == 0) {
+                        // Nothing behind: the sample sees the sky through
+                        // the surface. The background is drawn only where
+                        // the visibility pass found nothing, so this pixel's
+                        // sky is gathered here -- the lights the ray meets
+                        // at infinity, as a bounce that escapes gathers
+                        // them, at a weight of one since no lobe drew it.
+                        if (lightCount <= kMisLightLimit) {
+                            for (uint k = 0; k < lightCount; ++k) {
+                                const LightRecord light = lightFor(k, tid, sample);
+                                if (!lightLinked(light.lightCategory, shaded.categoriesLo, shaded.categoriesHi)) {
+                                    continue;
+                                }
+                                const LightHit lh = lightHitImaged(light, o, d);
+                                if (lh.valid) {
+                                    carried += throughput * lh.radiance;
+                                }
+                            }
+                        }
+                        if (!vertexSeen) {
+                            vertexSeen = true;
+                            opacity = 1.0;
+                            depthHere = target.depth;
+                        }
+                        break;
+                    }
+                    found = foundHit(hit, o, d);
+                    ++passed;
+                    --step;
+                    continue;
+                }
                 cur = shaded;
                 if (kBake && bounce == 0) {
                     // The body of the material, never its polish (bakeBody
@@ -1637,7 +1686,9 @@ void tracePathsAt(uint2 group, uint index) {
                 }
                 if (!vertexSeen) {
                     vertexSeen = true;
-                    opacity = cur.stack.opacity;
+                    // A covered sample is there whole; the pixel's alpha is
+                    // the share of its samples that met something.
+                    opacity = cur.coverage ? 1.0 : cur.stack.opacity;
                     depthHere = cur.depth;
                 }
                 // Emission met by the material's ray, weighed against next event

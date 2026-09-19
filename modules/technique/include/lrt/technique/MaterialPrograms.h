@@ -87,6 +87,9 @@ struct MaterialFrame {
     const gpu::Buffer*            blob = nullptr;
     const material::TextureStore* textures = nullptr;
     float                         time = 0.0F;
+    /// Whether the visibility passes cut a fractional opacity by a pixel's
+    /// lot: the raster route does; the path tracer draws its own, a sample.
+    uint32_t                      alphaDither = 1;
     /// The frame's lights. None: the headlight, as meshes were lit before
     /// there were any.
     const light::LightTable*      lights = nullptr;

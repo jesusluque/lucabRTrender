@@ -1717,6 +1717,7 @@ Result<void> Engine::render(const render::Projection& projection, const render::
         }
         technique::MaterialFrame frame;
         frame.programs = &*materialPrograms_;
+        frame.alphaDither = technique == Technique::RayTraced ? 0u : 1u;
         frame.scene = &*scene_;
         frame.records = &materialRecords_;
         frame.blob = &materialBlob_;

@@ -397,9 +397,12 @@ void shadeMaterials(uint3 group: SV_GroupID, uint index: SV_GroupIndex) {
             }
         }
     }
-    colour[at] = float4(radiance * stack.opacity, stack.opacity);
+    // A cutout's sample survived its lot in the visibility pass: it is there
+    // whole. Any other opacity is still blended, as displayOpacity is.
+    const float coverage = (m.flags & kMaterialCutout) != 0 ? 1.0 : stack.opacity;
+    colour[at] = float4(radiance * coverage, coverage);
     depth[at] = s.depth;
-    writeGroups(at, pixels, groups, stack.opacity);
+    writeGroups(at, pixels, groups, coverage);
 }
 )";
 

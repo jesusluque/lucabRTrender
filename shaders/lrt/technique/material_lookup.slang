@@ -15,11 +15,15 @@ public struct MaterialRecord {
 };
 
 /// MaterialRecord.flags
-public static const uint kMaterialCutout = 1u;   // opacity of 0 removes the sample: cut, not blended
+public static const uint kMaterialCutout = 1u;   // its opacity says whether a sample is there: cut, never blended
 
 public struct MaterialLookupParams {
     public float time;
-    public uint  pad0; public uint pad1; public uint pad2;
+    /// 1: a fractional opacity is cut by a pixel's lot (the raster route,
+    /// which draws once). 0: only an opacity of zero cuts, and the path
+    /// tracer casts the lot itself, one a sample.
+    public uint  alphaDither;
+    public uint  pad1; public uint pad2;
 };
 
 public StructuredBuffer<MaterialRecord> materials;
