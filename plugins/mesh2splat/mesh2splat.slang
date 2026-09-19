@@ -106,7 +106,7 @@ struct M2sParams {
     uint  normalUv2;
     uint  mrUv2;
     uint  opacityUv2;
-    uint  pad5;
+    uint  firstTriangle;  // triangles before this are not this run's: a mesh converted in slices
 };
 
 StructuredBuffer<float4>   mesh;        // per triangle: (position, u) and (normal, v), three corners
@@ -115,7 +115,7 @@ StructuredBuffer<float4>   normalMap;
 StructuredBuffer<float4>   metallicRoughness;
 StructuredBuffer<float4>   opacityMask; // a cut-out, read on one channel
 StructuredBuffer<float4>   influences;  // 2 entries a corner: (joint, weight) twice
-RWStructuredBuffer<uint>   counters;    // [wanted, written, degenerate, dropped]
+RWStructuredBuffer<uint>   counters;    // [wanted, written, degenerate, dropped, done: first triangle the budget cut]
 RWStructuredBuffer<uint>   cellCounts;  // a triangle's covered cells, then where they start
 RWStructuredBuffer<float4> records;     // the output plane
 StructuredBuffer<float4>   texcoord2;   // the mesh picture's shape: (u2, v2) a corner, where there is a second set
@@ -134,6 +134,7 @@ void m2sClear(uint3 tid: SV_DispatchThreadID) {
     counters[1] = 0;
     counters[2] = 0;
     counters[3] = 0;
+    counters[4] = params.triangles;   // every triangle fits until the scan says which did not
 }
 
 /// Where one component of a record lands. A record is several entries long
@@ -493,18 +494,22 @@ float2 m2sUv2At(const M2sTriangle t, float3 bary) {
     return t.t0 * bary.x + t.t1 * bary.y + t.t2 * bary.z;
 }
 
-bool m2sCovered(const M2sTriangle t, float3 bary) {
+/// What the cut-out map reads here: one where there is no map.
+float m2sMaskAt(const M2sTriangle t, float3 bary) {
     if (params.opacityChannel == 0) {
-        return true;
+        return 1.0;
     }
     const float2 uv = params.opacityUv2 != 0 ? m2sUv2At(t, bary) : m2sUvAt(t, bary);
     const float4 texel = sampleWrapped(opacityMask, params.opacityWidth, params.opacityHeight,
                                        params.opacityStride, uv);
-    const float mask = params.opacityChannel == 1 ? texel.x
-                     : params.opacityChannel == 2 ? texel.y
-                     : params.opacityChannel == 3 ? texel.z
-                                                  : texel.w;
-    return mask >= params.opacityCut;
+    return params.opacityChannel == 1 ? texel.x
+         : params.opacityChannel == 2 ? texel.y
+         : params.opacityChannel == 3 ? texel.z
+                                      : texel.w;
+}
+
+bool m2sCovered(const M2sTriangle t, float3 bary) {
+    return params.opacityChannel == 0 || m2sMaskAt(t, bary) >= params.opacityCut;
 }
 
 /// How many gaussians this triangle stands, one thread a triangle.
@@ -513,6 +518,10 @@ bool m2sCovered(const M2sTriangle t, float3 bary) {
 void m2sCount(uint3 tid: SV_DispatchThreadID) {
     const uint triangle = tid.x;
     if (triangle >= params.triangles) {
+        return;
+    }
+    if (triangle < params.firstTriangle) {
+        cellCounts[countAt(triangle)] = 0;   // an earlier slice's
         return;
     }
     const M2sTriangle t = m2sTriangleOf(triangle);
@@ -592,6 +601,15 @@ void m2sScan(uint3 gid: SV_GroupThreadID) {
     for (uint i = from; i < to; ++i) {
         const uint here = cellCounts[countAt(i)];
         cellCounts[countAt(i)] = running;
+        // The first triangle the budget cuts into: the slots are a prefix
+        // in the mesh's order, so every triangle after it is cut too, and
+        // the host's next slice starts here.
+        // ... and a triangle the budget cuts into writes nothing: the slice
+        // that starts at it writes it whole, so `written` is where it starts.
+        if (here > 0 && running + here > params.maxSplats) {
+            InterlockedMin(counters[4], i);
+            InterlockedMin(counters[1], running);
+        }
         running += here;
     }
 }
@@ -602,6 +620,9 @@ void m2sEmit(uint3 tid: SV_DispatchThreadID) {
     const uint triangle = tid.x;
     if (triangle >= params.triangles) {
         return;
+    }
+    if (triangle < params.firstTriangle || triangle >= counters[4]) {
+        return;   // an earlier slice's, or the budget cut into it: the next slice's
     }
     const M2sTriangle t = m2sTriangleOf(triangle);
     if (!t.valid) {
@@ -641,7 +662,12 @@ void m2sEmit(uint3 tid: SV_DispatchThreadID) {
         if (caught && !m2sCellInside(t, k, bary)) {
             continue;   // the cell's centre is outside this triangle
         }
-        if (caught && !m2sCovered(t, bary)) {
+        // THE CUT-OUT'S VALUE IS THE GAUSSIAN'S OPACITY, not a yes or a no.
+        // A feather's barb is a texel of alpha 0.3, and a gaussian of
+        // opacity 0.3 is what blends the way the card did; cut at a half,
+        // every barb was either a whole gaussian or nothing.
+        const float mask = caught ? m2sMaskAt(t, bary) : 1.0;
+        if (caught && !(mask >= params.opacityCut)) {
             continue;   // the cut-out says there is no surface here
         }
         if (slot >= params.maxSplats) {
@@ -696,7 +722,7 @@ void m2sEmit(uint3 tid: SV_DispatchThreadID) {
         // its own. What a renderer makes of that is the renderer's: a
         // translucent material is not a transparent one, and lowering the
         // opacity here would say it was.
-        const float keptOpacity = params.opacity;
+        const float keptOpacity = params.opacity * mask;
         colour = lerp(colour, colour * params.transmissionColour.xyz, params.transmission);
 
         const float3 shortAxis = params.useNormalMap != 0 ? shading : normal;

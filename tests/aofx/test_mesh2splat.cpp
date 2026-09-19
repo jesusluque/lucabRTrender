@@ -439,6 +439,48 @@ TEST_CASE("a cut-out map leaves no gaussian where there is no surface",
         CHECK(movedRatio < 0.55);
         CHECK(violationsOf(*moved, keptMoved, 1) == 0);
         CHECK(violationsOf(*moved, keptMoved, 0) > keptMoved / 4);
+
+        // A SLICE: from the second triangle on, the quad's other half, and the
+        // effect says every triangle fit. With a budget under the whole it
+        // says which triangle the budget cut into instead -- the second, for
+        // a budget the first fills -- which is where a host's next slice
+        // starts.
+        const auto slice = [&](uint32_t first, uint64_t maxSplats) {
+            aofx_host::EffectJob job;
+            job.bounds = records->bounds();
+            job.inputs.push_back({"Mesh", mesh});
+            number(job, "triangles", 2);
+            number(job, "resolution", kResolution);
+            number(job, "maxSplats", static_cast<double>(maxSplats));
+            number(job, "writePbr", 1.0);
+            number(job, "firstTriangle", first);
+            auto out = aofx_host::renderEffect(*gpu, *effect, job);
+            REQUIRE(out);
+            const std::vector<float>* counts = (*out)->attached("splats");
+            REQUIRE(counts != nullptr);
+            REQUIRE(counts->size() >= 6);
+            return std::array<uint32_t, 3>{static_cast<uint32_t>((*counts)[0]), static_cast<uint32_t>((*counts)[1]),
+                                           static_cast<uint32_t>((*counts)[5])};
+        };
+        const auto second = slice(1, budget);
+        std::printf("  from the second triangle: %u written of %u wanted, cut at triangle %u\n", second[0],
+                    second[1], second[2]);
+        CHECK(second[0] == second[1]);
+        CHECK(second[0] > full / 3);
+        CHECK(second[0] < full * 2 / 3);
+        CHECK(second[2] == 2);
+        const auto starved = slice(0, full / 2);
+        std::printf("  the whole at half its budget: %u written of %u wanted, cut at triangle %u\n", starved[0],
+                    starved[1], starved[2]);
+        CHECK(starved[1] == full);
+        CHECK(starved[2] <= 1);
+        // And a triangle the budget cuts into is written by no run at all:
+        // what the starved run wrote plus the run from where it was cut is
+        // the whole, once each.
+        const auto rest = slice(starved[2], budget);
+        std::printf("  from where the budget cut: %u written; %u + %u == %u\n", rest[0], starved[0], rest[0],
+                    full);
+        CHECK(starved[0] + rest[0] == full);
     }));
 }
 

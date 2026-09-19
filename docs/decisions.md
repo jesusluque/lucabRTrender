@@ -5838,3 +5838,41 @@ their primvars), so nothing there changes; the cloud's own normal
 (`--normal-map-turns`) now comes from the right texels but was not
 re-measured; the sparrow's cloud and its visibility fields are to be
 converted and baked again.
+
+## A mesh past the ceiling is converted in slices, and a barb keeps its alpha
+
+The reconverted sparrow was smooth where the mesh has fluff. Two more things
+the cloud dropped, both in the conversion:
+
+- **Half the cards were not there.** A run's output picture is capped at
+  2 M gaussians (`kRunCeiling`: 192 MB a picture, and the device pool dies
+  past that), and a mesh that wants more "keeps the first of them, in the
+  mesh's own order" -- the feathers wanted 6.67 M and got 2.1 M, so the
+  cards later in the mesh (the head's and the breast's) were missing from
+  the cloud, not thinned. Now the effect says which triangle the budget cut
+  into (the slots are a prefix in the mesh's order, so every triangle after
+  it is cut too: `InterlockedMin` in the scan, sixth number attached as
+  "splats") and takes a `firstTriangle` (a parameter, additive), and the
+  command runs the mesh again from there until everything from there fits:
+  the same array a single run of the whole would have written, at the same
+  ceiling a run ever has open.
+- **A barb was a whole gaussian or nothing.** The cut-out map was read as a
+  yes or a no at 0.5; a feather's barb is a texel of alpha 0.3. The value now
+  goes out as the gaussian's opacity (`params.opacity` times the mask), and
+  the cut is what `--opacity-cut` says: 0.5 as it was, or lower where the
+  soft edge is wanted (the sparrow: 0.15).
+
+A triangle the budget cuts into is written by no run: the slice that starts
+at it writes it whole, and `written` is where it starts -- the first try
+wrote its first gaussians in one run and all of them in the next, 4 726
+twice over on the feathers.
+
+`lrt_aofx_tests [mesh2splat]`: a run from the second triangle writes the
+quad's other half and says every triangle fit; a run of the whole at half its
+budget says the budget cut into the first or the second, and what it wrote
+plus a run from there is the whole, once each.
+
+With every card in, the sparrow at resolution 1400 is 9.5 M gaussians (the
+feathers 7.3 M in four slices, a 731 MB file), and the visibility bake ran
+Metal out of memory on the M5 Pro at its largest part. The cloud is converted
+at 1100 instead, with `--opacity-cut 0.15` for the soft edges.

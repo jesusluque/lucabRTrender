@@ -532,42 +532,70 @@ public:
             // once. Asking for more than this does not fail, it dies --
             // measured on a car whose body wanted ten million at resolution
             // 1024 and took the process with it.
+            // AND A MESH THAT WANTS MORE THAN THE CEILING IS CONVERTED IN
+            // SLICES, each run starting at the triangle the last one's
+            // budget cut into (the effect says which), in the mesh's own
+            // order, so the output is the same array a single run of the
+            // whole would have written. The sparrow's feathers wanted 6.7 M
+            // and got the first 2.1 M: the cards later in the mesh -- half
+            // the head and the breast -- were not in the cloud at all.
             constexpr uint64_t kRunCeiling = 2u << 20;
-            const uint64_t guess = std::clamp<uint64_t>(uint64_t{triangles_[k]} * 128, 4096,
-                                                        std::min(room, kRunCeiling));
-            auto out = runOne(effect, meshes[k], k, guess);
-            if (!out) return std::move(out).error();
-            if (out->wanted > out->written && out->written < room) {
-                const uint64_t again = std::min({out->wanted, room, kRunCeiling});
-                if (again > guess) {
-                    out = runOne(effect, meshes[k], k, again);
-                    if (!out) return std::move(out).error();
+            uint64_t meshWritten = 0;
+            uint64_t meshWanted = 0;
+            bool     carried = false;
+            uint32_t first = 0;
+            uint32_t slices = 0;
+            while (first < triangles_[k]) {
+                const uint64_t left = options_->maxSplats > written ? options_->maxSplats - written : 0;
+                if (left == 0) {
+                    break;
                 }
+                const uint64_t guess = std::clamp<uint64_t>(uint64_t{triangles_[k] - first} * 128, 4096,
+                                                            std::min(left, kRunCeiling));
+                auto out = runOne(effect, meshes[k], k, guess, first);
+                if (!out) return std::move(out).error();
+                if (out->wanted > out->written && out->written < std::min(left, kRunCeiling)) {
+                    const uint64_t again = std::min({out->wanted, left, kRunCeiling});
+                    if (again > guess) {
+                        out = runOne(effect, meshes[k], k, again, first);
+                        if (!out) return std::move(out).error();
+                    }
+                }
+                if (slices == 0) {
+                    meshWanted = out->wanted;   // the first run counts everything from here on
+                }
+                ++slices;
+                written += out->written;
+                meshWritten += out->written;
+                degenerate += out->degenerate;
+                raw.records.insert(raw.records.end(), out->records.begin(), out->records.end());
+                normals_.insert(normals_.end(), out->normals.begin(), out->normals.end());
+                // A MESH NOTHING CARRIES STILL TAKES ITS PLACE IN THE RIG.
+                //
+                // A stage's skinned meshes are rarely all of them -- the
+                // sparrow comes with a cylinder and a plane beside the bird
+                // -- and the influences have to stay one to one with the
+                // gaussians or the cloud and its rig disagree about who is
+                // who. Those gaussians get four joints of no weight, which
+                // is what the skinner reads as "leave this one where the
+                // bind pose put it".
+                if (options_->skinned && out->influences.empty()) {
+                    influences_.insert(influences_.end(), out->written * 8, 0.0F);
+                } else {
+                    influences_.insert(influences_.end(), out->influences.begin(), out->influences.end());
+                    carried = carried || !out->influences.empty();
+                }
+                if (out->wanted <= out->written || out->done <= first || out->done >= triangles_[k]) {
+                    break;   // everything from here fit, or nothing more can
+                }
+                first = static_cast<uint32_t>(out->done);
             }
-            written += out->written;
-            wanted += out->wanted;
-            degenerate += out->degenerate;
-            raw.records.insert(raw.records.end(), out->records.begin(), out->records.end());
-            normals_.insert(normals_.end(), out->normals.begin(), out->normals.end());
-            // A MESH NOTHING CARRIES STILL TAKES ITS PLACE IN THE RIG.
-            //
-            // A stage's skinned meshes are rarely all of them -- the sparrow
-            // comes with a cylinder and a plane beside the bird -- and the
-            // influences have to stay one to one with the gaussians or the
-            // cloud and its rig disagree about who is who. Those gaussians
-            // get four joints of no weight, which is what the skinner reads
-            // as "leave this one where the bind pose put it".
-            if (options_->skinned && out->influences.empty()) {
-                influences_.insert(influences_.end(), out->written * 8, 0.0F);
-            } else {
-                influences_.insert(influences_.end(), out->influences.begin(), out->influences.end());
-            }
-            std::printf("mesh2splat: %s -> %llu splats of %llu wanted (%u triangles)%s\n",
-                        meshes[k].path.c_str(), static_cast<unsigned long long>(out->written),
-                        static_cast<unsigned long long>(out->wanted), triangles_[k],
-                        out->influences.empty()
-                            ? ""
-                            : (", carried by " + meshes[k].skinning.skeleton).c_str());
+            wanted += meshWanted;
+            std::printf("mesh2splat: %s -> %llu splats of %llu wanted (%u triangles%s)%s\n",
+                        meshes[k].path.c_str(), static_cast<unsigned long long>(meshWritten),
+                        static_cast<unsigned long long>(meshWanted), triangles_[k],
+                        slices > 1 ? (", " + std::to_string(slices) + " slices").c_str() : "",
+                        carried ? (", carried by " + meshes[k].skinning.skeleton).c_str() : "");
         }
         if (written == 0) {
             return Error(ErrorCode::InvalidArgument, "the conversion produced no splats");
@@ -600,6 +628,9 @@ private:
         uint64_t           written = 0;
         uint64_t           wanted = 0;
         uint64_t           degenerate = 0;
+        /// The first triangle the budget cut into; the triangle count when
+        /// everything fit. Where the next slice starts.
+        uint64_t           done = 0;
         std::vector<float> records;
         std::vector<float> normals;   ///< xyz a splat, for the bake
         /// The joints a gaussian is carried by: (joint, weight) four times a
@@ -609,7 +640,7 @@ private:
     };
 
     [[nodiscard]] Result<OneMesh> runOne(aofx::Effect& effect, const usd::StageMesh& mesh, size_t at,
-                                         uint64_t room) {
+                                         uint64_t room, uint32_t firstTriangle = 0) {
         const usd::StageMaterial& material = mesh.material;
         // A MAP THAT WILL NOT FIT IS A MAP THIS MATERIAL DOES NOT HAVE.
         //
@@ -679,6 +710,7 @@ private:
         number("triangles", static_cast<double>(triangles_[at]));
         number("resolution", static_cast<double>(options_->resolution));
         number("maxSplats", static_cast<double>(budget));
+        number("firstTriangle", static_cast<double>(firstTriangle));
         number("flatness", options_->flatness);
         number("opacity", options_->opacity);
         number("minOpacity", options_->minOpacity);
@@ -731,6 +763,8 @@ private:
         answer.written = static_cast<uint64_t>(std::max((*counted)[0], 0.0F));
         answer.wanted = static_cast<uint64_t>(std::max((*counted)[1], 0.0F));
         answer.degenerate = static_cast<uint64_t>(std::max((*counted)[2], 0.0F));
+        answer.done = counted->size() >= 6 ? static_cast<uint64_t>(std::max((*counted)[5], 0.0F))
+                                           : uint64_t{triangles_[at]};
         answer.written = std::min(answer.written, budget);
 
         // The records as `io::RawSplats` wants them: fourteen floats a splat

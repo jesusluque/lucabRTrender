@@ -94,7 +94,9 @@ struct Mesh2SplatUniforms {
     uint32_t normalUv2 = 0;
     uint32_t mrUv2 = 0;
     uint32_t opacityUv2 = 0;
-    uint32_t pad5 = 0;
+    /// Triangles before this are an earlier slice's: a mesh whose gaussians
+    /// do not fit one run's picture is converted in slices, in its own order.
+    uint32_t firstTriangle = 0;
 };
 static_assert(sizeof(Mesh2SplatUniforms) == 240, "must match M2sParams exactly");
 
@@ -317,6 +319,16 @@ public:
             into.params.push_back(bySecond);
         }
 
+        aofx::ParamDesc first;
+        first.name = "firstTriangle";
+        first.label = "First triangle";
+        first.hint = "Triangles before this are not converted: a mesh whose gaussians do not fit one "
+                     "run is converted in slices, each starting where the budget cut the last.";
+        first.type = aofx::ParamType::Integer;
+        first.defaults = {0.0};
+        first.hardMin = {0.0};
+        into.params.push_back(first);
+
         aofx::ParamDesc cells;
         cells.name = "maxCells";
         cells.label = "Most cells a triangle";
@@ -457,10 +469,13 @@ public:
         uniforms.normalUv2 = byUv2("normalUv2");
         uniforms.mrUv2 = byUv2("mrUv2");
         uniforms.opacityUv2 = byUv2("opacityUv2");
+        uniforms.firstTriangle = static_cast<uint32_t>(
+            std::clamp(request.number("firstTriangle", 0.0), 0.0, static_cast<double>(triangles)));
 
-        // Four numbers: splats wanted, splats written, triangles with no
-        // frame, cells the per-triangle bound left out.
-        const aofx::Buffer counters = request.gpu->scratch(1, 1);
+        // Five numbers: splats wanted, splats written, triangles with no
+        // frame, cells the per-triangle bound left out, and the first
+        // triangle the budget cut into. Two pixels hold eight.
+        const aofx::Buffer counters = request.gpu->scratch(2, 1);
         if (!counters.isValid()) {
             request.complaint = "mesh2splat could not take the four numbers it counts with";
             return false;
@@ -516,7 +531,7 @@ public:
             return false;
         }
 
-        uint32_t counted[4] = {0, 0, 0, 0};
+        uint32_t counted[8] = {0, 0, 0, 0, 0, 0, 0, 0};
         if (!request.gpu->read(counters, counted, sizeof(counted))) {
             request.complaint = "mesh2splat could not read back how many splats it wrote";
             return false;
@@ -525,9 +540,11 @@ public:
         // there, how many the mesh wanted, how many triangles had no frame to
         // stand a gaussian on, how many cells the per-triangle bound left
         // unwalked, and how long a record is.
+        // And sixth, the first triangle the budget cut into (the triangle
+        // count when nothing was): where a host's next slice starts.
         request.attach("splats", {static_cast<float>(counted[1]), static_cast<float>(counted[0]),
                                   static_cast<float>(counted[2]), static_cast<float>(counted[3]),
-                                  static_cast<float>(uniforms.recordPixels)});
+                                  static_cast<float>(uniforms.recordPixels), static_cast<float>(counted[4])});
         // A budget too small is not a failure: the splats that fit are real,
         // and the host is told what was wanted so it can say so or run again
         // with room. `complaint` is not the place for it -- the host ignores
