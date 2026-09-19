@@ -112,7 +112,14 @@ Result<SplatVisibility> SplatVisibility::create(gpu::ShaderLibrary& library) {
     LRT_TRY(make(v.partOf_, "visPartOf"));
     LRT_TRY(make(v.mark_, "visMark"));
     LRT_TRY(make(v.gather_, "visGather"));
-    LRT_TRY(make(v.bake_, "visBake"));
+    // The bake traces an inline ray, which a device may not have (CUDA has
+    // not): then there is no baking here, and a cloud baked elsewhere is
+    // still read.
+    if (auto bake = gpu::ComputeKernel::create(library, "lrt/splat/splat_visibility_bake", "visBake")) {
+        v.bake_.emplace(std::move(*bake));
+    } else {
+        log::info("visibility: no bake on this device ({}); baked clouds are read", bake.error().toString());
+    }
     LRT_TRY(make(v.factors_, "visFactors", "lrt/splat/splat_visibility_read"));
     LRT_TRY(make(v.histogram_, "visHistogram"));
     LRT_TRY(make(v.ambient_, "visAmbient"));
@@ -128,6 +135,10 @@ Result<void> SplatVisibility::bake(scene::GpuSplats& cloud, const gpu::Buffer& i
     const auto partCount = static_cast<uint32_t>(parts.partJoint.size());
     if (count == 0 || partCount == 0 || parts.jointToPart.empty()) {
         return Error(ErrorCode::InvalidArgument, "a visibility bake needs a cloud and at least one part");
+    }
+    if (!bake_.has_value()) {
+        return Error(ErrorCode::DeviceFailure,
+                     "a visibility bake traces inline rays, which this device has not: bake it where it can be");
     }
     if (!tracer_.has_value()) {
         render::RayTracerSettings settings;

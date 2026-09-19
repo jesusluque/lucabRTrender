@@ -5619,6 +5619,12 @@ The fields are the cloud's own: `primvars:lrt:splat:visibilityParts`,
   entry point it holds.** The read's light tables beside the bake's shadow
   tables put `iesValues` at buffer 31 and the pipeline could not be made,
   though `slangc` was happy. The read is a module of its own.
+- **And the bake is a module of its own too, for CUDA.** It traces an inline
+  ray, which CUDA has not, and on the L4 the whole module failed to compile
+  and took the read down with it (*"unavailable features in entry point"*).
+  Split off, the read compiles on every target; without the bake module a
+  device says so and reads clouds baked elsewhere -- the fields travel in the
+  file, which is the point of baking them.
 - **A part does not shadow itself.** Its field, read at one of its own
   gaussians, is the crowd that gaussian stands in -- the same thing that made
   a shadow ray from a splat black, one level up. The read skips the part a
