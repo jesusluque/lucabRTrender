@@ -33,6 +33,9 @@ struct SplatSkinning {
     uint32_t              joints = 0;
     /// The time codes the transforms below were read at.
     std::vector<double>   times;
+    /// What those codes are worth. Written on the stage, because a layer that
+    /// is silent is read at 24 and stretched under a root that says otherwise.
+    double                timeCodesPerSecond = 24.0;
     /// `times.size() * joints * 16` floats, row major as USD holds them.
     std::vector<float>    xforms;
 

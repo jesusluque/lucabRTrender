@@ -94,7 +94,12 @@ struct M2sParams {
     uint  mrStride;
 
     uint  hasInfluences;  // the joints a corner is carried by, same shape as the mesh
-    uint  pad2;
+    uint  opacityChannel; // 0 none, else the cut-out's channel: 1 r, 2 g, 3 b, 4 a
+    uint  opacityWidth;
+    uint  opacityHeight;
+
+    uint  opacityStride;
+    float opacityCut;
     uint  pad3;
     uint  pad4;
 };
@@ -103,6 +108,7 @@ StructuredBuffer<float4>   mesh;        // per triangle: (position, u) and (norm
 StructuredBuffer<float4>   albedo;
 StructuredBuffer<float4>   normalMap;
 StructuredBuffer<float4>   metallicRoughness;
+StructuredBuffer<float4>   opacityMask; // a cut-out, read on one channel
 StructuredBuffer<float4>   influences;  // 2 entries a corner: (joint, weight) twice
 RWStructuredBuffer<uint>   counters;    // [wanted, written, degenerate, dropped]
 RWStructuredBuffer<uint>   cellCounts;  // a triangle's covered cells, then where they start
@@ -441,6 +447,38 @@ bool m2sCellInside(M2sTriangle t, uint k, out float3 bary) {
     return !(alpha < 0.0 || beta < 0.0 || gamma < 0.0);
 }
 
+/// IS THERE A SURFACE AT THIS CELL AT ALL?
+///
+/// A feather is a flat card whose shape lives entirely in a mask -- the
+/// sparrow's primaries are an atlas of cut-out silhouettes in the alpha of
+/// the map that also holds their normals. Converted without it, every
+/// feather is the whole rectangle: opaque, straight-edged, and eating the
+/// budget the real feather needed. Below the cut there is no surface, so no
+/// gaussian is counted and none is written -- and the count and the emit must
+/// agree on that or the slots a triangle was given do not match the slots it
+/// fills.
+bool m2sCovered(float2 uv) {
+    if (params.opacityChannel == 0) {
+        return true;
+    }
+    const float4 texel = sampleWrapped(opacityMask, params.opacityWidth, params.opacityHeight,
+                                       params.opacityStride, uv);
+    const float mask = params.opacityChannel == 1 ? texel.x
+                     : params.opacityChannel == 2 ? texel.y
+                     : params.opacityChannel == 3 ? texel.z
+                                                  : texel.w;
+    return mask >= params.opacityCut;
+}
+
+/// The uv a cell's centre stands at, which is the same barycentric blend the
+/// emit does -- they must see the same texel.
+float2 m2sUvAt(const M2sTriangle t, float3 bary) {
+    const float2 uv0 = float2(t.p0.w, t.n0.w);
+    const float2 uv1 = float2(t.p1.w, t.n1.w);
+    const float2 uv2 = float2(t.p2.w, t.n2.w);
+    return uv0 * bary.x + uv1 * bary.y + uv2 * bary.z;
+}
+
 /// How many gaussians this triangle stands, one thread a triangle.
 [shader("compute")]
 [numthreads(64, 1, 1)]
@@ -461,7 +499,7 @@ void m2sCount(uint3 tid: SV_DispatchThreadID) {
     uint inside = 0;
     for (uint k = 0; k < t.cells; ++k) {
         float3 bary;
-        if (m2sCellInside(t, k, bary)) {
+        if (m2sCellInside(t, k, bary) && m2sCovered(m2sUvAt(t, bary))) {
             ++inside;
         }
     }
@@ -564,7 +602,7 @@ void m2sEmit(uint3 tid: SV_DispatchThreadID) {
     bool caught = false;
     for (uint k = 0; k < t.cells; ++k) {
         float3 bary;
-        if (m2sCellInside(t, k, bary)) {
+        if (m2sCellInside(t, k, bary) && m2sCovered(m2sUvAt(t, bary))) {
             caught = true;
             break;
         }
@@ -574,6 +612,9 @@ void m2sEmit(uint3 tid: SV_DispatchThreadID) {
         float3 bary = float3(1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0);
         if (caught && !m2sCellInside(t, k, bary)) {
             continue;   // the cell's centre is outside this triangle
+        }
+        if (caught && !m2sCovered(m2sUvAt(t, bary))) {
+            continue;   // the cut-out says there is no surface here
         }
         if (slot >= params.maxSplats) {
             return;

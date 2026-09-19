@@ -5252,3 +5252,168 @@ over a cloud whose paint is metallic 0.85 at roughness 0.19 blows out, because
 a splat has no occlusion against the ones behind it unless `--splat-shadows`
 pays for it. The bake is both cheaper and right for a turnaround, whose lights
 do not move.
+
+## A feather is a hole in a rectangle
+
+The sparrow's wingtips converted into straight-edged slabs. They are not
+slabs: every primary is a **flat card** whose shape lives entirely in a mask,
+and the mask is the alpha channel of the map that also carries the feathers'
+normals -- an atlas of cut-out silhouettes with their barbs. The material says
+so plainly:
+
+```
+float inputs:opacity = 1
+float inputs:opacity.connect = </root/_materials/feather/Image_Texture_001.outputs:a>
+```
+
+`materialOf` read the constant and dropped the connection. The value is
+authored *and* connected, so `takeFloat` found `1` and stopped; the texture
+`resolve` had already found went nowhere, because `StageMaterial` had no field
+for it.
+
+**A cut-out is not a transmission**, and it matters which one it is stored as.
+Transmission is a surface you see through; a cut-out is a surface that is not
+there. Carried as transmission, a feather becomes a pane of glass shaped like
+a rectangle -- which is what the wings were, with the rectangle merely fainter.
+
+Three things were needed.
+
+- **`StageTexture` remembers the channel.** `outputs:a` is not `outputs:rgb`,
+  and which one the surface took is part of the connection, not of the file.
+  `resolve` reads it off the producing attribute's base name.
+- **`StageMaterial::opacityMap`**, separate from `transmission`, fed to the
+  plugin as an `Opacity` clip with the channel and a cut (`--opacity-cut`,
+  0.5). A mask is not colour, so it is loaded raw.
+- **The cut is applied in `m2sCount` as well as in `m2sEmit`.** It has to be
+  in both or the slots a triangle is given do not match the slots it fills,
+  and putting it in the count is what gives the budget back. `m2sCovered` and
+  `m2sUvAt` are shared by the two kernels so they cannot disagree about which
+  texel a cell stands on.
+
+Measured on the sparrow, at resolution 1400:
+
+| mesh | wanted before | wanted after |
+|---|---|---|
+| `sparrow_feather` | 15 378 695 | 5 898 220 |
+| `sparrow_wings` | 2 410 709 | 1 375 102 |
+
+62 % of the feathers' budget was being spent on empty rectangle, and
+`sparrow_wings` now fits inside the 2 097 152 a single run may write instead
+of being capped. The wing reads as separate primaries with ragged tips and
+the tail as a fan.
+
+The test feeds the checkerboard the colour test already builds as the cut-out
+on its red channel -- red on an even square, zero on an odd one. Half the quad
+survives (0.45 to 0.55 of it, the slack being the ring of texels an edge runs
+through, which bilinear filtering carries either way), and a kernel counts the
+gaussians standing well inside a square the mask cut away: zero.
+
+## The sparrow's animation, and a skinning matrix that has to be true
+
+Blender's USD exporter has `export_animation = False` by default, and with it
+off it still writes a `SkelAnimation` -- carrying `blendShapeWeights` and no
+joint samples at all. With it on, this rig still gets none: its action comes
+from an FBX import and keeps its curves in a slot's channelbag rather than in
+`action.fcurves`, which is where the exporter looks. So `scripts/sparrow-anim.py`
+writes the animation itself, by sampling the **evaluated pose** -- true
+however the pose is driven.
+
+The first version solved a per-bone change of basis from `restTransforms` and
+transported the pose through it. The rest round-tripped to `4.13e-6` and the
+bird came out with its head, bill, eyes and toes mangled while its body and
+wings looked right.
+
+**The round trip proved nothing**: the basis had been *defined* so that the
+rest would round-trip. What the check missed is that Blender writes
+`restTransforms` from the rest pose and `bindTransforms` from the pose the
+mesh was bound in, and on this bird **they are different poses**:
+
+```
+rest world chain vs bindTransforms: worst 1.989 at Toe.L.010
+```
+
+UsdSkel skins with `W(t) . bindTransform^-1`. A basis solved against the rest
+cancels against the rest and not against the bind, so exactly the joints where
+the two disagree -- the toes, the head, the bill -- kept a loose rotation of
+up to half a turn.
+
+Solving no basis at all is both simpler and right. Ask directly for the world
+transform that makes the two skinning matrices equal:
+
+```
+W(t) := pose.matrix(t) . matrix_local^-1 . bindTransform
+```
+
+Then `W(t) . bindTransform^-1` is `pose.matrix(t) . matrix_local^-1`, which is
+Blender's own, exactly, for every joint and every instant, whatever convention
+either side keeps its bone frames in. The check now reads back what the file
+will hold -- `%.6f` translations and rotations, `half3` scales -- and rebuilds
+the chain from it:
+
+```
+f1   skinning matrix worst 4.923e-05 at Head.Lowerpeck.stretch.001_end
+f31  skinning matrix worst 7.141e-05 at Head.Lowerpeck.stretch.002
+f61  skinning matrix worst 4.923e-05
+```
+
+From 1.989 to 5e-5, and what is left is the quantisation.
+
+USD joint names are the Blender bone names with every character USD will not
+have in an identifier turned into an underscore, so `Spine.001_Pelvis` is
+written `Spine_001_Pelvis`. The map back is by sanitising the *bone* names and
+looking the joint up in that.
+
+**And the clip that looked like a flap was the bug.** With the basis fixed the
+wings barely moved, which looked like a regression. Rendering the clip in
+Blender said otherwise: `air_fly_A0` is very nearly a glide there too, and the
+dramatic flapping seen before was the broken transform. The bird is shown on
+`air_fly_A2` (61 frames), which is a flap. The five FBX files hold 71 clips in
+all -- flying, gliding, turns, hops, idles, eating -- and any of them is one
+line of the script.
+
+## One cloud, seventy-one clips
+
+The sparrow arrives as five FBX files holding 71 animation clips between them
+-- flying, gliding, turns, hops, idles, eating. Converting each would write
+313 MB of identical gaussians seventy-one times: 22 GB to say the same four
+million splats are doing something else.
+
+A skinned cloud already separates the two. What a clip changes is
+`primvars:lrt:splat:skinningXforms` -- 609 matrices a frame -- and that is a
+primvar like any other, so a **layer over the one cloud** is the whole clip.
+`scripts/sparrow-clips.py` writes three files each:
+
+```
+clips/<clip>.usda       the SkelAnimation, over the mesh stage
+clips/<clip>_rig.usda   the cloud's skinningXforms
+clips/<clip>_gs.usda    the stage that plays it: that rig, the cloud, lights
+```
+
+377 MB for all 71, against 22 GB. The five rigs are the same 609 joints, so
+one cloud serves every file.
+
+The matrices are what `UsdSkelSkeletonQuery::ComputeSkinningTransforms`
+answers -- joint world times inverse bind, in the skeleton's own space --
+which is exactly Blender's `pose.matrix . matrix_local^-1`, transposed,
+because USD writes a matrix for row vectors. Checked against a conversion of
+the same clip, the two agree to `1.4e-05` at every frame.
+
+### And the cloud was playing slow
+
+Getting that check to pass found a real one. The two agreed at frame 1 and
+drifted further apart the longer the clip ran, while the matrices themselves
+matched to six figures. The written cloud said:
+
+```
+endTimeCode = 61
+startTimeCode = 1
+```
+
+and nothing else. `writeParticleFieldStage` authored the start and end time
+codes and **never `SetTimeCodesPerSecond`**. A layer that does not say what a
+time code is worth is read at 24, and USD scales every sample it holds by the
+root layer's rate over that one -- so a cloud sampled at 30 and composed under
+a stage at 30 was stretched by 30/24 and lagged the mesh by a quarter,
+cumulatively. `MeshStage::timeCodesPerSecond()` reads the source stage's rate,
+`SplatSkinning` carries it, and the export writes it. Before: `0.031` mean
+error at frame 16 and `0.049` at frame 61. After: `1.4e-05` and `1.1e-05`.

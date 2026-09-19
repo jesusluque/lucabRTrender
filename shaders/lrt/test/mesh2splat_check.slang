@@ -164,6 +164,32 @@ void m2sCheckColour(uint3 tid: SV_DispatchThreadID) {
 }
 
 
+/// WHERE THE CUT-OUT SAYS THERE IS NO SURFACE, THERE IS NO GAUSSIAN.
+///
+/// The checker is fed as the cut-out on its red channel: red is one on an
+/// even cell and zero on an odd one, so every gaussian written must stand on
+/// an even cell. A gaussian within a texel of an edge is sampled across it
+/// and bilinear filtering can carry it over the cut, so only the ones well
+/// inside a cell are claims about the cut.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void m2sCheckCut(uint3 tid: SV_DispatchThreadID) {
+    const uint splat = tid.x;
+    if (splat >= params.splats) {
+        return;
+    }
+    const float2 uv = records[recordAt(splat, 5)].zw;
+    const uint cellX = uint(clamp(uv.x, 0.0, 0.999) * float(params.checker));
+    const uint cellY = uint(clamp(uv.y, 0.0, 0.999) * float(params.checker));
+    const bool even = ((cellX + cellY) & 1u) == 0u;
+    const float2 inCell = frac(uv * float(params.checker));
+    const bool wellInside = all(inCell > 0.15) && all(inCell < 0.85);
+    if (wellInside && !even) {
+        InterlockedAdd(counts[4], 1u);
+    }
+}
+
+
 /// The joints picture for the quad: every corner carried entirely by one
 /// joint. Written by a kernel like the quad itself, so the test makes its
 /// inputs the way it checks its outputs.

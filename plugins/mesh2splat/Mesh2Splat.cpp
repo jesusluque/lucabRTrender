@@ -78,11 +78,17 @@ struct Mesh2SplatUniforms {
     uint32_t mrStride = 0;
 
     uint32_t hasInfluences = 0;
-    uint32_t pad2 = 0;
+    /// 0 none, else the channel the cut-out is read from: 1 r, 2 g, 3 b, 4 a.
+    uint32_t opacityChannel = 0;
+    uint32_t opacityWidth = 0;
+    uint32_t opacityHeight = 0;
+
+    uint32_t opacityStride = 0;
+    float    opacityCut = 0.5F;
     uint32_t pad3 = 0;
     uint32_t pad4 = 0;
 };
-static_assert(sizeof(Mesh2SplatUniforms) == 208, "must match M2sParams exactly");
+static_assert(sizeof(Mesh2SplatUniforms) == 224, "must match M2sParams exactly");
 
 class Mesh2Splat final : public aofx::Effect {
 public:
@@ -108,9 +114,36 @@ public:
         clip("Albedo", "Albedo", true);
         clip("Normal", "Normal map", true);
         clip("MetallicRoughness", "Metallic-roughness", true);
+        // A cut-out, not a transmission: where it reads below the cut there is
+        // no surface, so no gaussian is counted and none is written.
+        clip("Opacity", "Opacity cut-out", true);
         // Not a picture of colour: the joints each corner of each triangle is
         // carried by, laid out exactly as the Mesh clip is.
         clip("Influences", "Joint influences", true);
+
+        aofx::ParamDesc opacityChannel;
+        opacityChannel.name = "opacityChannel";
+        opacityChannel.label = "Cut-out channel";
+        opacityChannel.hint =
+            "Which channel of the opacity clip holds the cut-out: 1 red, 2 green, 3 blue, 4 "
+            "alpha. A feather atlas is usually the alpha of a map that holds something else.";
+        opacityChannel.type = aofx::ParamType::Integer;
+        opacityChannel.defaults = {4.0};
+        opacityChannel.hardMin = {1.0};
+        opacityChannel.hardMax = {4.0};
+        into.params.push_back(opacityChannel);
+
+        aofx::ParamDesc opacityCut;
+        opacityCut.name = "opacityCut";
+        opacityCut.label = "Cut at";
+        opacityCut.hint =
+            "Below this the surface is not there. A cut-out is not a transmission: a gaussian "
+            "under the cut is not written at all, so the budget goes to the surface that exists.";
+        opacityCut.type = aofx::ParamType::Double;
+        opacityCut.defaults = {0.5};
+        opacityCut.hardMin = {0.0};
+        opacityCut.hardMax = {1.0};
+        into.params.push_back(opacityCut);
 
         aofx::ParamDesc triangles;
         triangles.name = "triangles";
@@ -366,6 +399,7 @@ public:
         const aofx::InputPlane* albedo = request.input("Albedo");
         const aofx::InputPlane* normal = request.input("Normal");
         const aofx::InputPlane* mr = request.input("MetallicRoughness");
+        const aofx::InputPlane* cut = request.input("Opacity");
         const auto describe = [](const aofx::InputPlane* plane, uint32_t& has, uint32_t& width,
                                  uint32_t& height, uint32_t& stride) {
             const bool there = plane != nullptr && plane->buffer.isValid();
@@ -382,6 +416,12 @@ public:
                  uniforms.normalStride);
         describe(mr, uniforms.hasMetallicRoughness, uniforms.mrWidth, uniforms.mrHeight,
                  uniforms.mrStride);
+        uint32_t hasCut = 0;
+        describe(cut, hasCut, uniforms.opacityWidth, uniforms.opacityHeight,
+                 uniforms.opacityStride);
+        uniforms.opacityChannel =
+            hasCut != 0 ? static_cast<uint32_t>(request.number("opacityChannel", 4.0)) : 0U;
+        uniforms.opacityCut = static_cast<float>(request.number("opacityCut", 0.5));
 
         // Four numbers: splats wanted, splats written, triangles with no
         // frame, cells the per-triangle bound left out.
@@ -417,6 +457,7 @@ public:
             albedo != nullptr && albedo->buffer.isValid() ? albedo->buffer : meshPlane->buffer,
             normal != nullptr && normal->buffer.isValid() ? normal->buffer : meshPlane->buffer,
             mr != nullptr && mr->buffer.isValid() ? mr->buffer : meshPlane->buffer,
+            cut != nullptr && cut->buffer.isValid() ? cut->buffer : meshPlane->buffer,
             withJoints ? carried->buffer : meshPlane->buffer,
             counters,
             cellCounts,

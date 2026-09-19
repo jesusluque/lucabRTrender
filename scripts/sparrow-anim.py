@@ -23,7 +23,7 @@ def as_matrix(nums):
     m.transpose()
     return m
 
-U_rest = [as_matrix(r) for r in skel['rest']]
+U_bind = [as_matrix(r) for r in skel['bind']]
 
 # USD joint names are the Blender bone names with every character USD does not
 # allow in an identifier turned into an underscore -- `Spine.001_Pelvis` is
@@ -39,27 +39,26 @@ names = [blender_name[j.split('/')[-1]] for j in joints]
 index = {n: i for i, n in enumerate(names)}
 parent_of = [index[bones[n].parent.name] if bones[n].parent else -1 for n in names]
 
-def rest_local(i):
-    m = bones[names[i]].matrix_local
-    p = parent_of[i]
-    return m.copy() if p < 0 else bones[names[p]].matrix_local.inverted() @ m
-
-# Blender's bone frame and USD's joint frame differ by a rotation per bone.
-# Solve for it from the rest pose the exporter itself wrote, so whatever
-# convention it used is the one we reproduce.
-C = [None] * len(names)
-for i in range(len(names)):
-    p = parent_of[i]
-    B = rest_local(i)
-    C[i] = B.inverted() @ U_rest[i] if p < 0 else B.inverted() @ C[p] @ U_rest[i]
-
-worst = 0.0
-for i in range(len(names)):
-    p = parent_of[i]
-    B = rest_local(i)
-    U = (B @ C[i]) if p < 0 else (C[p].inverted() @ B @ C[i])
-    worst = max(worst, max(abs(U[r][c] - U_rest[i][r][c]) for r in range(4) for c in range(4)))
-print('lrt: rest round trip worst %.2e' % worst)
+# WHAT HAS TO BE TRUE IS THE SKINNING MATRIX, NOT THE JOINT.
+#
+# UsdSkel deforms a point by `W(t) . bindTransform^-1`; Blender deforms it by
+# `pose.matrix . matrix_local^-1`. So ask for the world transform that makes
+# those two equal and read the joint-local samples off it:
+#
+#     W(t) := pose.matrix(t) . matrix_local^-1 . bindTransform
+#
+# and then `W(t) . bindTransform^-1` is `pose.matrix(t) . matrix_local^-1`,
+# exactly, for every joint and every instant, whatever convention either side
+# keeps its bone frames in.
+#
+# Solving a change of basis from `restTransforms` instead looks right and is
+# not: Blender writes `restTransforms` from the rest pose and `bindTransforms`
+# from the pose the mesh was bound in, and on this bird **they are different
+# poses** -- the rest world chain and the bind transforms differ by 1.989 at
+# `Toe.L.010`. A basis solved against the rest does not cancel against the
+# bind, so the toes, the head, the eyes and the bill came out mangled while
+# the body, whose bones agree, looked fine.
+K = [bones[n].matrix_local.inverted() @ U_bind[i] for i, n in enumerate(names)]
 
 a, b = act.frame_range
 first, last = int(a), int(b)
@@ -70,20 +69,44 @@ trans, rots, scales = {}, {}, {}
 for f in range(first, last + 1):
     scene.frame_set(f)
     ev = arm.evaluated_get(bpy.context.evaluated_depsgraph_get())
-    t, r, s = [], [], []
-    for i, n in enumerate(names):
+    world = [ev.pose.bones[n].matrix @ K[i] for i, n in enumerate(names)]
+    t, r, s_ = [], [], []
+    for i in range(len(names)):
         p = parent_of[i]
-        pb = ev.pose.bones[n].matrix
-        B = pb.copy() if p < 0 else ev.pose.bones[names[p]].matrix.inverted() @ pb
-        U = (B @ C[i]) if p < 0 else (C[p].inverted() @ B @ C[i])
-        loc, quat, sca = U.decompose()
+        local = world[i] if p < 0 else world[p].inverted() @ world[i]
+        loc, quat, sca = local.decompose()
         t.append('(%.6f, %.6f, %.6f)' % (loc.x, loc.y, loc.z))
         r.append('(%.6f, %.6f, %.6f, %.6f)' % (quat.w, quat.x, quat.y, quat.z))
-        s.append('(%.4f, %.4f, %.4f)' % (sca.x, sca.y, sca.z))
-    trans[f], rots[f], scales[f] = t, r, s
+        s_.append('(%.4f, %.4f, %.4f)' % (sca.x, sca.y, sca.z))
+    trans[f], rots[f], scales[f] = t, r, s_
 
 moved = sum(1 for i in range(len(names)) if rots[first][i] != rots[(first + last) // 2][i])
 print('lrt: %d of %d joints differ between the ends' % (moved, len(names)))
+
+# READ BACK WHAT THE FILE WILL HOLD and compare the skinning matrix it gives
+# against Blender's own, so the check covers the quantisation as well as the
+# algebra. This is the number that says the bird is not deformed.
+from mathutils import Quaternion, Vector
+def parse(text):
+    return [float(x) for x in text.strip('()').split(',')]
+for f in (first, (first + last) // 2, last):
+    scene.frame_set(f)
+    ev = arm.evaluated_get(bpy.context.evaluated_depsgraph_get())
+    world = [None] * len(names)
+    for i in range(len(names)):
+        local = Matrix.LocRotScale(Vector(parse(trans[f][i])),
+                                   Quaternion(parse(rots[f][i])),
+                                   Vector(parse(scales[f][i])))
+        p = parent_of[i]
+        world[i] = local if p < 0 else world[p] @ local
+    worst, who = 0.0, ''
+    for i, n in enumerate(names):
+        usd = world[i] @ U_bind[i].inverted()
+        blender = ev.pose.bones[n].matrix @ bones[n].matrix_local.inverted()
+        d = max(abs(usd[r][c] - blender[r][c]) for r in range(4) for c in range(4))
+        if d > worst:
+            worst, who = d, n
+    print('lrt: f%-3d skinning matrix worst %.3e at %s' % (f, worst, who))
 
 anim = 'Flight'
 lines = ['#usda 1.0', '(', '    startTimeCode = %d' % first, '    endTimeCode = %d' % last,

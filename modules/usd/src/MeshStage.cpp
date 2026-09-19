@@ -108,6 +108,13 @@ struct Resolved {
             shader.GetShaderId(&id);
             if (isImageNode(id)) {
                 out.texture = fileOf(shader);
+                // `outputs:a` is not `outputs:rgb`. A cut-out mask is read off
+                // one channel of a map that holds something else, and which
+                // channel is part of the connection, not of the file.
+                const std::string output = attribute.GetBaseName().GetString();
+                if (output.size() == 1 && output.find_first_of("rgba") == 0) {
+                    out.texture.channel = output[0];
+                }
                 return out;
             }
             if (isNormalMapNode(id)) {
@@ -218,9 +225,15 @@ void takeColour(const Resolved& resolved, std::array<float, 3>& into) {
         // and a surface you can see through is one whose opacity is less than
         // one -- so that is read as transmission, which is the only place a
         // gaussian can put it.
+        const Resolved resolved = read("opacity");
         float opacity = 1.0F;
-        takeFloat(read("opacity"), opacity);
+        takeFloat(resolved, opacity);
         out.transmission = std::clamp(1.0F - opacity, 0.0F, 1.0F);
+        // A MAP ON THE OPACITY IS A CUT-OUT, NOT A TRANSMISSION. Where it
+        // reads low the surface is not there; where it reads high it is
+        // opaque. Carrying it as transmission would make a feather a pane of
+        // glass shaped like a rectangle, which is what the wings were.
+        out.opacityMap = resolved.texture;
     } else {
         takeFloat(read(openPbr ? "transmission_weight" : "transmission"), out.transmission);
         takeColour(read("transmission_color"), out.transmissionColour);
@@ -335,6 +348,13 @@ Result<std::vector<float>> MeshStage::skeletonTransforms(const std::string& skel
         std::memcpy(held, xforms.data(), count * 16 * sizeof(float));
     }
     return out;
+}
+
+double MeshStage::timeCodesPerSecond() const {
+    if (impl_ == nullptr) {
+        return 24.0;
+    }
+    return impl_->stage->GetTimeCodesPerSecond();
 }
 
 std::pair<double, double> MeshStage::timeRange() const {

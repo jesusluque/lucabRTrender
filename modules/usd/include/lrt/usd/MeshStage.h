@@ -48,6 +48,12 @@ namespace lrt::usd {
 struct StageTexture {
     std::string file;
     bool        srgb = false;
+    /// WHICH CHANNEL THE SURFACE TOOK, because a mask is usually somebody
+    /// else's alpha: `'a'` for the alpha, `'r'`, `'g'`, `'b'` for one
+    /// component, `0` for the colour. The sparrow's feathers are flat cards
+    /// whose shape lives entirely in the alpha of the map that also holds
+    /// their normals.
+    char        channel = 0;
 
     [[nodiscard]] bool empty() const noexcept { return file.empty(); }
 };
@@ -66,6 +72,10 @@ struct StageMaterial {
     StageTexture           normal;
     StageTexture           metallicMap;
     StageTexture           roughnessMap;
+    /// A cut-out: where this reads below a half the surface is not there at
+    /// all. It is not the same thing as `transmission`, which is a surface
+    /// you see through.
+    StageTexture           opacityMap;
 };
 
 /// WHAT CARRIES A MESH WHEN ITS SKELETON MOVES.
@@ -150,6 +160,12 @@ public:
 
     /// The stage's own time range, for a conversion that was given none.
     [[nodiscard]] std::pair<double, double> timeRange() const;
+
+    /// The stage's own rate. A layer that does not say is taken at 24 by USD,
+    /// and composing it under a root that says 30 scales every time sample it
+    /// holds by 30/24 -- so a written cloud has to carry the rate it was
+    /// sampled at or it plays slow.
+    [[nodiscard]] double timeCodesPerSecond() const;
 
     /// Which way it stood: 'y' or 'z'. The gaussians are in that stage's
     /// world space, so the cloud written from them has to say the same.

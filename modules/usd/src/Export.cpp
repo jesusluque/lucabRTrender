@@ -262,6 +262,12 @@ Result<void> writeParticleFieldStage(gpu::ShaderLibrary& library, const io::RawS
         }
         stage->SetStartTimeCode(rig.times.front());
         stage->SetEndTimeCode(rig.times.back());
+        // WITHOUT THIS THE CLOUD PLAYS SLOW. A layer that does not say what a
+        // time code is worth is read at 24, and USD scales every sample it
+        // holds by the root layer's rate over that one -- so a cloud sampled
+        // at 30 and composed under a stage at 30 was stretched by 30/24 and
+        // drifted further from the mesh the further the clip ran.
+        stage->SetTimeCodesPerSecond(rig.timeCodesPerSecond);
     }
 
     if (options.addCamera) {

@@ -105,6 +105,8 @@ struct Options {
     double                   flatness = 0.1;
     double                   opacity = 1.0;
     double                   minOpacity = 0.6;
+    /// A cut-out map reads below this where there is no surface.
+    double                   opacityCut = 0.5;
     uint32_t                 maxCells = 1u << 18;
     /// A MAP NO BIGGER THAN THIS, AND A CEILING BY DEFAULT.
     ///
@@ -609,6 +611,13 @@ private:
         const image::ImagePtr mrMap =
             anyMr ? mapOrNone(material.metallicMap.file, material.roughnessMap.file, true)
                   : image::ImagePtr{};
+        // THE CUT-OUT. A map on `opacity` is not a transmission: below the
+        // cut the surface is not there at all. Loaded raw -- a mask is not
+        // colour and must not be taken through sRGB.
+        const image::ImagePtr cutMap =
+            options_->noTextures || material.opacityMap.empty()
+                ? image::ImagePtr{}
+                : mapOrNone(material.opacityMap.file, {}, false);
         const image::ImagePtr* albedo = &albedoMap;
         const image::ImagePtr* normal = &normalMap;
         const image::ImagePtr* mr = &mrMap;
@@ -632,6 +641,7 @@ private:
         if (*albedo) job.inputs.push_back({"Albedo", *albedo});
         if (*normal) job.inputs.push_back({"Normal", *normal});
         if (*mr) job.inputs.push_back({"MetallicRoughness", *mr});
+        if (cutMap) job.inputs.push_back({"Opacity", cutMap});
         if (carried) job.inputs.push_back({"Influences", skins_[at]});
 
         const auto number = [&job](const char* name, double value) {
@@ -645,6 +655,15 @@ private:
         number("minOpacity", options_->minOpacity);
         number("maxCells", static_cast<double>(options_->maxCells));
         number("useNormalMap", options_->normalMapTurns ? 1.0 : 0.0);
+        if (cutMap) {
+            const char channel = material.opacityMap.channel;
+            const double which = channel == 'r'   ? 1.0
+                                 : channel == 'g' ? 2.0
+                                 : channel == 'b' ? 3.0
+                                                  : 4.0;
+            number("opacityChannel", which);
+            number("opacityCut", options_->opacityCut);
+        }
         // Six entries a splat: the four a gaussian is, and the two that say
         // what it reflects with.
         number("writePbr", 1.0);
@@ -881,6 +900,10 @@ void addMesh2Splat(CLI::App& app) {
                     "what a fully transmitting material still stops. Low is a window -- you see what "
                     "stands behind it -- and translucency is not that: the light comes through "
                     "scattered, so the body stays mostly there");
+    cmd->add_option("--opacity-cut", o->opacityCut,
+                    "a material whose opacity is a map is a cut-out: below this the surface is "
+                    "not there and no gaussian is written, so the budget goes where the surface "
+                    "is. It is what makes a feather a feather and not the card it is drawn on");
     cmd->add_option("--max-cells", o->maxCells, "most cells one triangle may walk");
     cmd->add_option("--texture-size", o->textureSize,
                     "read maps no larger than this (0: their own size). A map is a float4 picture "
@@ -1022,8 +1045,10 @@ void addMesh2Splat(CLI::App& app) {
                 auto moved = (*stage).skeletonTransforms(rig.skeleton, rig.times);
                 if (!moved) return std::move(moved).error();
                 rig.xforms = std::move(*moved);
-                std::printf("mesh2splat: carried by %s, %u joints over %zu instants\n",
-                            rig.skeleton.c_str(), rig.joints, rig.times.size());
+                rig.timeCodesPerSecond = (*stage).timeCodesPerSecond();
+                std::printf("mesh2splat: carried by %s, %u joints over %zu instants at %g fps\n",
+                            rig.skeleton.c_str(), rig.joints, rig.times.size(),
+                            rig.timeCodesPerSecond);
             }
 
             usd::ExportOptions options;

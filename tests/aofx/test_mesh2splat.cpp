@@ -278,6 +278,129 @@ TEST_CASE("a gaussian takes the colour of the texel it stands on", "[aofx][mesh2
     }));
 }
 
+TEST_CASE("a cut-out map leaves no gaussian where there is no surface",
+          "[aofx][mesh2splat]") {
+    gpu_host::Context* gpu = gpu_host::installProcessContext();
+    if (gpu == nullptr || gpu->compute() == nullptr) {
+        SKIP("no gpe device");
+    }
+    aofx_host::EffectRegistry registry;
+    aofx::Effect* effect = conversion(registry, gpu);
+    if (effect == nullptr) {
+        SKIP("the Mesh2Splat bundle is not built here");
+    }
+    gpu::ShaderLibrary library(gpu->deviceShared());
+
+    REQUIRE(gpu->run([&] {
+        auto quad = gpu::ComputeKernel::create(library, "lrt/test/mesh2splat_check", "m2sQuad");
+        auto checker = gpu::ComputeKernel::create(library, "lrt/test/mesh2splat_check", "m2sChecker");
+        auto check = gpu::ComputeKernel::create(library, "lrt/test/mesh2splat_check", "m2sCheckCut");
+        REQUIRE(quad);
+        REQUIRE(checker);
+        REQUIRE(check);
+
+        constexpr uint32_t kMeshWidth = 64;
+        constexpr uint32_t kChecker = 8;
+        constexpr int32_t  kMapSize = 64;
+        const image::ImagePtr mesh = pictureOf(kMeshWidth, 1);
+        const image::ImagePtr mask = pictureOf(kMapSize, kMapSize);
+        const gpu::Buffer meshView = viewOf(*gpu, mesh);
+        const gpu::Buffer maskView = viewOf(*gpu, mask);
+        const uint32_t budget = kResolution * kResolution * 2;
+        const image::ImagePtr records = pictureOf(static_cast<int32_t>(budget * 6), 1);
+
+        gpu::CommandBatch batch(library.device());
+        quad->dispatch(batch, {1, 1, 1}, [&](rhi::ShaderCursor cursor) {
+            cursor["mesh"].setBinding(meshView.rhi());
+            cursor["albedo"].setBinding(maskView.rhi());
+            cursor["records"].setBinding(meshView.rhi());
+            cursor["counts"].setBinding(meshView.rhi());
+            cursor["params"]["meshWidth"].setData(kMeshWidth);
+            cursor["params"]["meshStride"].setData(static_cast<uint32_t>(mesh->stride()));
+        });
+        // Red on an even cell, green on an odd one: read on the red channel it
+        // is a mask that keeps exactly half the quad.
+        checker->dispatch(batch, {kMapSize, kMapSize, 1}, [&](rhi::ShaderCursor cursor) {
+            cursor["mesh"].setBinding(meshView.rhi());
+            cursor["albedo"].setBinding(maskView.rhi());
+            cursor["records"].setBinding(meshView.rhi());
+            cursor["counts"].setBinding(meshView.rhi());
+            cursor["params"]["albedoWidth"].setData(static_cast<uint32_t>(kMapSize));
+            cursor["params"]["albedoHeight"].setData(static_cast<uint32_t>(kMapSize));
+            cursor["params"]["albedoStride"].setData(static_cast<uint32_t>(mask->stride()));
+            cursor["params"]["checker"].setData(kChecker);
+        });
+        REQUIRE(batch.submit(true));
+        mesh->deviceWrote();
+        mask->deviceWrote();
+        mesh->attach("bounds", {0.0F, 0.0F, 0.0F, 1.0F, 1.0F, 0.0F});
+
+        const auto convert = [&](bool withCut) {
+            aofx_host::EffectJob job;
+            job.bounds = records->bounds();
+            job.inputs.push_back({"Mesh", mesh});
+            if (withCut) {
+                job.inputs.push_back({"Opacity", mask});
+            }
+            number(job, "triangles", 2);
+            number(job, "resolution", kResolution);
+            number(job, "maxSplats", budget);
+            number(job, "writePbr", 1.0);
+            if (withCut) {
+                number(job, "opacityChannel", 1.0);   // red
+                number(job, "opacityCut", 0.5);
+            }
+            return aofx_host::renderEffect(*gpu, *effect, job);
+        };
+
+        auto whole = convert(false);
+        REQUIRE(whole);
+        const std::vector<float>* wholeCount = (*whole)->attached("splats");
+        REQUIRE(wholeCount != nullptr);
+        const auto full = static_cast<uint32_t>((*wholeCount)[0]);
+        REQUIRE(full >= kResolution * kResolution);
+
+        auto cut = convert(true);
+        REQUIRE(cut);
+        const std::vector<float>* cutCount = (*cut)->attached("splats");
+        REQUIRE(cutCount != nullptr);
+        const auto kept = static_cast<uint32_t>((*cutCount)[0]);
+
+        // HALF THE QUAD, WITHIN THE CELLS THE EDGE CUTS THROUGH. The mask is
+        // a checkerboard of `kChecker` squares, so half of it is gone; what
+        // the count cannot be exact about is the ring of texels an edge runs
+        // through, which bilinear filtering carries either way.
+        const double ratio = static_cast<double>(kept) / static_cast<double>(full);
+        CHECK(ratio > 0.45);
+        CHECK(ratio < 0.55);
+
+        const gpu::Buffer recordView = viewOf(*gpu, *cut);
+        gpu::BufferDesc desc;
+        desc.bytes = 8 * 4;
+        desc.elementBytes = 4;
+        desc.label = "test.counts";
+        auto counts = gpu::Buffer::create(library.device(), desc);
+        REQUIRE(counts);
+        gpu::CommandBatch second(library.device());
+        check->dispatch(second, {kept, 1, 1}, [&](rhi::ShaderCursor cursor) {
+            cursor["mesh"].setBinding(meshView.rhi());
+            cursor["albedo"].setBinding(maskView.rhi());
+            cursor["records"].setBinding(recordView.rhi());
+            cursor["counts"].setBinding(counts->rhi());
+            cursor["params"]["splats"].setData(kept);
+            cursor["params"]["recordPixels"].setData(uint32_t{6});
+            cursor["params"]["dstWidth"].setData(static_cast<uint32_t>((*cut)->bounds().width()));
+            cursor["params"]["dstStride"].setData(static_cast<uint32_t>((*cut)->stride()));
+            cursor["params"]["checker"].setData(kChecker);
+        });
+        REQUIRE(second.submit(true));
+        auto violations = counts->readAll<uint32_t>(library.device());
+        REQUIRE(violations);
+        // Not one gaussian stands well inside a square the mask cut away.
+        CHECK((*violations)[4] == 0);
+    }));
+}
+
 TEST_CASE("glass keeps its material's opacity and takes its transmission colour", "[aofx][mesh2splat]") {
     gpu_host::Context* gpu = gpu_host::installProcessContext();
     if (gpu == nullptr || gpu->compute() == nullptr) {
