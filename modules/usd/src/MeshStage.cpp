@@ -210,13 +210,28 @@ void takeColour(const Resolved& resolved, std::array<float, 3>& into) {
     takeColour(colour, out.baseColour);
     out.albedo = colour.texture;
 
+    // A MAP IS THE VALUE, NOT A FACTOR ON THE DEFAULT. The conversion
+    // multiplies a material's constant into its map, which is glTF's
+    // convention where the constant defaults to one. USD's is that a
+    // connection replaces the value: an input connected to a texture has no
+    // constant to speak of, and reading none left `roughness` at this
+    // struct's own default of 0.5 -- so the sparrow's roughness map, which
+    // runs to 1, was halved everywhere, and its head shone like a marble.
+    // A metallic map with the default of 0 in front of it would have been
+    // erased outright. Connected, the constant is one.
     const Resolved metallic = read(preview ? "metallic" : (openPbr ? "base_metalness" : "metalness"));
     takeFloat(metallic, out.metallic);
     out.metallicMap = metallic.texture;
+    if (!out.metallicMap.empty()) {
+        out.metallic = 1.0F;
+    }
 
     const Resolved roughness = read(preview ? "roughness" : "specular_roughness");
     takeFloat(roughness, out.roughness);
     out.roughnessMap = roughness.texture;
+    if (!out.roughnessMap.empty()) {
+        out.roughness = 1.0F;
+    }
 
     out.normal = read(openPbr ? "geometry_normal" : "normal").texture;
 

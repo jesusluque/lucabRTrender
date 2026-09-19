@@ -5675,3 +5675,21 @@ own local term is left out, the ambient term is a mean over the sphere rather
 than a cosine lobe about the receiver's normal, and a part is taken as rigid.
 The self-part term is the next thing to add, and the survey says it is either
 a per-bone canonical AO grid (DNF-Avatar) or a short trace.
+
+## A map is the value, not a factor on the default
+
+The sparrow's head shone like a marble under the sun. It was not the
+texture (with the sun off the spot is gone) and it was not the plumage: it
+was the conversion. `materialOf` read a material's roughness as a constant and
+its map beside it, and the conversion multiplies the two -- glTF's
+convention, where the constant defaults to one. USD's is that a connection
+replaces the value, so an input connected to a texture has no constant, and
+reading none left `roughness` at the struct's own default of **0.5**: the
+bird's roughness map, which runs to one, was halved everywhere. A metallic
+map behind the default of 0 would have been erased outright. Connected, the
+constant is now one.
+
+And the feathers were a quarter metallic. Blender's FBX importer turned a
+specular factor into `Metallic = 0.25`; the source has no metallic map for
+them and a feather is not a metal. The stage that carries the bird overrides
+it to 0 before the conversion.
