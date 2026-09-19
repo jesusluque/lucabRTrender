@@ -373,8 +373,16 @@ M2sTriangle m2sTriangleOf(uint triangle) {
     const float3 ju = (e1 * duv2.y - e2 * duv1.y) * inverse;
     const float3 jv = (e2 * duv1.x - e1 * duv2.x) * inverse;
     const float perCell = 1.0 / float(max(params.resolution, 1u));
-    const float alongU = length(ju) * params.sigmaX * perCell;
-    const float alongV = length(jv) * params.sigmaY * perCell;
+    // A GAUSSIAN CANNOT BE BIGGER THAN THE TRIANGLE IT STANDS ON. The
+    // Jacobian's columns are `1 / determinant`, and a sliver seen almost edge
+    // on by its own projection has a determinant just above the floor above,
+    // so `ju` and `jv` run away: on the bmw27 car 1859 such triangles drew
+    // white spikes metres long across the frame. The triangle's longest edge
+    // is the bound that is always true, whatever the projection did.
+    const float longestEdge =
+        sqrt(max(dot(e1, e1), max(dot(e2, e2), dot(t.c - t.b, t.c - t.b))));
+    const float alongU = min(length(ju) * params.sigmaX * perCell, longestEdge);
+    const float alongV = min(length(jv) * params.sigmaY * perCell, longestEdge);
     // THE THIRD SIZE IS A FRACTION OF THE OTHER TWO, not a length.
     //
     // mesh2splat writes 1e-7 there, a number in the model's own units, while
@@ -457,6 +465,21 @@ void m2sCount(uint3 tid: SV_DispatchThreadID) {
             ++inside;
         }
     }
+    // A TRIANGLE SMALLER THAN A CELL STILL EXISTS.
+    //
+    // The density is a grid over the model and a gaussian stands where a cell
+    // centre falls inside a triangle, which is what rasterising it amounts
+    // to -- and a triangle smaller than a cell need contain no centre at all.
+    // Rasterised, it vanishes, and that is what a rasteriser is for. Convert-
+    // ed, it takes its geometry with it: the Buick's grille, its chrome and
+    // its window rubbers are tens of thousands of triangles finer than a
+    // centimetre, and a mesh of 80137 of them came out as 34011 gaussians
+    // with the detail gone. So one that caught nothing gets a single gaussian
+    // at its middle. It is the least a triangle can be worth and it is not
+    // nothing.
+    if (inside == 0) {
+        inside = 1;
+    }
     cellCounts[countAt(triangle)] = inside;
 }
 
@@ -536,9 +559,20 @@ void m2sEmit(uint3 tid: SV_DispatchThreadID) {
     // not whichever ones won a race.
     uint slot = cellCounts[countAt(triangle)];
 
+    // Whether any cell caught it at all; one that caught none is worth a
+    // gaussian at its middle (m2sCount says why).
+    bool caught = false;
     for (uint k = 0; k < t.cells; ++k) {
         float3 bary;
-        if (!m2sCellInside(t, k, bary)) {
+        if (m2sCellInside(t, k, bary)) {
+            caught = true;
+            break;
+        }
+    }
+    const uint walk = caught ? t.cells : 1u;
+    for (uint k = 0; k < walk; ++k) {
+        float3 bary = float3(1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0);
+        if (caught && !m2sCellInside(t, k, bary)) {
             continue;   // the cell's centre is outside this triangle
         }
         if (slot >= params.maxSplats) {

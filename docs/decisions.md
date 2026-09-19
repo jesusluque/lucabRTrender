@@ -5162,3 +5162,93 @@ or Pixar's:
   the axis three hundred times left the dark minimum exactly as deep. The same
   change is right here for a different reason, and this time the measurement
   says so.
+
+## Two assets out of Blender, and the two bugs they found
+
+The BMW 1M of `bmw27` (Mike Pan, CC-BY, `download.blender.org/demo/test/`)
+and the Eurasian tree sparrow's flight cycle are the first assets converted
+that were not authored for this renderer. Each found one thing wrong.
+
+### A gaussian cannot be bigger than the triangle it stands on
+
+`mesh2splat.slang` takes a gaussian's two sizes across the surface from the
+columns of the Jacobian of the triplanar map, `J = V O⁻¹`, and those columns
+carry `1 / determinant`. The determinant is guarded against zero at `1e-24`,
+which is the guard the projection needs -- but a **sliver seen almost edge on
+by its own projection** passes that guard with a determinant of, say, `1e-20`
+and the columns come back twenty orders of magnitude too long.
+
+On the BMW, 1859 triangles did: the frame filled with white spikes metres
+long radiating from the headlights and the wheel arches. They were there in
+the relit cloud and in the baked one, and they were not noise -- a handful of
+enormous gaussians.
+
+The bound that is always true is local and needs nothing measured: a gaussian
+belongs to a triangle, so it cannot be longer than that triangle's longest
+edge.
+
+```slang
+const float longestEdge =
+    sqrt(max(dot(e1, e1), max(dot(e2, e2), dot(t.c - t.b, t.c - t.b))));
+const float alongU = min(length(ju) * params.sigmaX * perCell, longestEdge);
+const float alongV = min(length(jv) * params.sigmaY * perCell, longestEdge);
+```
+
+It binds only where the projection had already failed: the pawn, the fox and
+the car's well-shaped triangles are unchanged, since `length(ju) * sigma /
+resolution` is a fraction of a cell there and a cell is far smaller than an
+edge.
+
+### A primvar's indices are read at the frame's time
+
+`MeshStage` read texture coordinates at the frame's time and their **indices
+at the default time**:
+
+```cpp
+primvar.Get(&uvs, at);
+primvar.GetIndices(&uvIndices);   // no time
+```
+
+Blender writes `primvars:st:indices` as *time samples* when the export carries
+animation. An attribute with samples and no default answers nothing, so the
+indices came back empty, the face-varying values were then consumed
+positionally, and every mesh whose st primvar was indexed sampled one texel:
+the sparrow's wings came out flat mauve while its body, whose primvar is not
+indexed, was correct. `GetIndices(&uvIndices, at)` is the whole fix.
+
+### What the sparrow needed on Blender's side
+
+Blender's USD exporter has `export_animation = False` by default, and with it
+off a `SkelAnimation` is still written -- carrying `blendShapeWeights` and no
+joint samples at all. That is what made the first sparrow look static.
+
+With it on the exporter still wrote no joint samples for this rig, whose
+action comes from an FBX import and keeps its curves in a slot's channelbag
+rather than in `action.fcurves`. The animation is therefore written here, by
+sampling the **evaluated pose** -- which is true however the pose is driven --
+and solving the per-bone change of basis from the `restTransforms` the
+exporter itself wrote, so whatever convention it used is the one reproduced.
+The rest pose round-trips to `4.13e-6`; 363 of the 609 joints move across the
+cycle.
+
+USD joint names are the Blender bone names with every character USD will not
+have in an identifier turned into an underscore, so `Spine.001_Pelvis` is
+written `Spine_001_Pelvis`. The map back is by sanitising the *bone* names and
+looking the joint up in that, not the other way round.
+
+### The numbers
+
+| | gaussians | joints | instants | file |
+|---|---|---|---|---|
+| BMW 1M, baked degree 2 | 6 774 631 | -- | -- | resolution 1200 |
+| sparrow, skinned | 4 991 908 | 609 | 33 | resolution 1400 |
+
+The BMW's body alone wants 2 917 105 gaussians at resolution 1200 and is
+capped at the 2 097 152 a single run may write; the sparrow's feathers want
+15 378 695 and take the same cap.
+
+**Relighting a car under a softbox does not work**: an 11.7 × 7.0 area light
+over a cloud whose paint is metallic 0.85 at roughness 0.19 blows out, because
+a splat has no occlusion against the ones behind it unless `--splat-shadows`
+pays for it. The bake is both cheaper and right for a turnaround, whose lights
+do not move.

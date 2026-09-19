@@ -184,14 +184,26 @@ void takeColour(const Resolved& resolved, std::array<float, 3>& into) {
     }
     TfToken id;
     surface.GetShaderId(&id);
+    // WHICH SURFACE, AND THEREFORE WHAT ITS INPUTS ARE CALLED.
+    //
+    // Three vocabularies reach this, and they agree on almost no name.
+    // MaterialX's `standard_surface` is what an asset built from a .mtlx
+    // carries; **OpenPBR** is what Blender 5 writes when it is asked for a
+    // MaterialX network, and it calls the same things `base_metalness` and
+    // `transmission_weight`; `UsdPreviewSurface` is what everything else
+    // writes. Read with the wrong set the inputs simply are not there and
+    // every material comes back at its defaults, in silence -- which is how
+    // a concept car whose glass is `transmission = 1` arrived opaque.
     const bool preview = id == TfToken("UsdPreviewSurface");
+    const bool openPbr = id == TfToken("ND_open_pbr_surface_surfaceshader") ||
+                         id == TfToken("open_pbr_surface");
 
     const auto read = [&surface](const char* name) { return resolve(surface.GetInput(TfToken(name))); };
     const Resolved colour = read(preview ? "diffuseColor" : "base_color");
     takeColour(colour, out.baseColour);
     out.albedo = colour.texture;
 
-    const Resolved metallic = read(preview ? "metallic" : "metalness");
+    const Resolved metallic = read(preview ? "metallic" : (openPbr ? "base_metalness" : "metalness"));
     takeFloat(metallic, out.metallic);
     out.metallicMap = metallic.texture;
 
@@ -199,7 +211,7 @@ void takeColour(const Resolved& resolved, std::array<float, 3>& into) {
     takeFloat(roughness, out.roughness);
     out.roughnessMap = roughness.texture;
 
-    out.normal = read("normal").texture;
+    out.normal = read(openPbr ? "geometry_normal" : "normal").texture;
 
     if (preview) {
         // UsdPreviewSurface has no transmission. What it has is an opacity,
@@ -210,7 +222,7 @@ void takeColour(const Resolved& resolved, std::array<float, 3>& into) {
         takeFloat(read("opacity"), opacity);
         out.transmission = std::clamp(1.0F - opacity, 0.0F, 1.0F);
     } else {
-        takeFloat(read("transmission"), out.transmission);
+        takeFloat(read(openPbr ? "transmission_weight" : "transmission"), out.transmission);
         takeColour(read("transmission_color"), out.transmissionColour);
     }
     return out;
@@ -509,7 +521,14 @@ Result<std::vector<StageMesh>> MeshStage::read(geom::MeshBuilder& builder, const
             const UsdGeomPrimvar primvar = primvars.GetPrimvar(TfToken(name));
             if (primvar && primvar.Get(&uvs, at) && !uvs.empty()) {
                 uvInterpolation = primvar.GetInterpolation();
-                primvar.GetIndices(&uvIndices);
+                // AT THE SAME TIME AS THE VALUES. Blender writes
+                // `primvars:st:indices` as time samples when the export
+                // carries animation, and `GetIndices` without a time asks the
+                // default, which such an attribute has not got: the indices
+                // came back empty and the face-varying values were then read
+                // positionally, so the sparrow's wings sampled one texel and
+                // came out a flat mauve.
+                primvar.GetIndices(&uvIndices, at);
                 hasUvs = true;
                 break;
             }

@@ -138,6 +138,14 @@ Gaussian splats as a primitive beside triangles rather than as a demo.
   is shown on. Model **CC0** by PixelMannen; rig and animation **CC-BY 4.0**
   by tomkranis; glTF conversion **CC-BY 4.0** by @AsoboStudio and @scurest.
   <https://github.com/KhronosGroup/glTF-Sample-Assets/tree/main/Models/Fox>
+- **bmw27** -- Blender's own benchmark scene, a BMW 1M on a seamless
+  backdrop, **CC-BY** by Mike Pan. Its materials predate the Principled BSDF,
+  so the Cycles node trees are reduced to Principled equivalents before the
+  USD export. <https://download.blender.org/demo/test/BMW27_2.blend.zip>
+- **Eurasian tree sparrow** -- a rigged and flying bird, 609 joints, whose
+  clips arrive as FBX. It is the asset `--skinned` is shown moving on, and
+  the one that made the case for writing the `SkelAnimation` here rather than
+  relying on Blender's exporter.
 
 The script needs Blender, which is a dependency of that asset and of nothing
 else: no build, no test and no part of the engine uses it. `guc`, the glTF to

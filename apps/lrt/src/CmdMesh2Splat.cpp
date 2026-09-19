@@ -31,6 +31,7 @@
 #include <cmath>
 #include <cstdio>
 #include <map>
+#include <set>
 #include <memory>
 #include <string>
 #include <vector>
@@ -82,7 +83,11 @@ constexpr uint32_t kRowEntries = 4096;
     }
     const uint64_t buffer = storage->bufferFor(image->address());
     if (buffer == 0) {
-        return Error(ErrorCode::DeviceFailure, "an image was allocated on the heap, not the device");
+        return Error::make(ErrorCode::DeviceFailure,
+                           "the {} picture is on the heap, not the device: {} by {}, {:.1f} MB -- the "
+                           "pool would not serve it",
+                           label, image->bounds().width(), image->bounds().height(),
+                           static_cast<double>(image->sizeBytes()) / (1024.0 * 1024.0));
     }
     return context.renderView(buffer, image->sizeBytes(), 16, label);
 }
@@ -101,7 +106,15 @@ struct Options {
     double                   opacity = 1.0;
     double                   minOpacity = 0.6;
     uint32_t                 maxCells = 1u << 18;
-    uint32_t                 textureSize = 0;
+    /// A MAP NO BIGGER THAN THIS, AND A CEILING BY DEFAULT.
+    ///
+    /// A map travels to the effect as a float4 picture, sixteen bytes a texel
+    /// where the file holds one: a 4k map is 268 MB on the device and a car
+    /// with fifteen of them does not fit the pool at all. The conversion
+    /// samples a map once a cell, and at resolution 512 the whole model is
+    /// 512 cells across, so most of a 4k map is thrown away before it is
+    /// looked at. 0 reads them at their own size.
+    uint32_t                 textureSize = 1024;
     bool                     noTextures = false;
     bool                     normalMapTurns = false;
     bool                     addCamera = true;
@@ -462,17 +475,63 @@ public:
                 break;
             }
             const usd::StageMaterial& what = meshes[k].material;
-            std::printf("mesh2splat: %s uses %s (albedo '%s', transmission %.3f)\n",
+            std::printf("mesh2splat: %s uses %s (colour %.2f %.2f %.2f, albedo '%s', metallic %.2f, "
+                        "roughness %.2f, transmission %.3f)\n",
                         meshes[k].path.c_str(), what.path.empty() ? "no material" : what.path.c_str(),
-                        what.albedo.file.c_str(), static_cast<double>(what.transmission));
-            auto out = runOne(effect, meshes[k], k, room);
+                        static_cast<double>(what.baseColour[0]), static_cast<double>(what.baseColour[1]),
+                        static_cast<double>(what.baseColour[2]), what.albedo.file.c_str(),
+                        static_cast<double>(what.metallic), static_cast<double>(what.roughness),
+                        static_cast<double>(what.transmission));
+            // A PICTURE FOR WHAT THIS MESH CAN WANT, NOT FOR THE WHOLE
+            // BUDGET.
+            //
+            // The output used to be sized for everything still unconverted, a
+            // mesh at a time. On the chess pawn, which has two, nobody
+            // noticed; on a car of a hundred and sixty it asks the device for
+            // a hundred and sixty pictures of a hundred and fifty megabytes,
+            // the pool runs out around the thirteenth, and what it serves
+            // instead is a heap image the effect cannot be handed.
+            //
+            // So the first run is sized by a guess, and the effect says how
+            // many the mesh wanted whether or not they fit: a mesh that
+            // overflows is run again at exactly that, and nothing else pays
+            // for it.
+            // A ceiling, because a picture is sixteen bytes an entry and six
+            // entries a splat: two million is 192 MB, and the device pool
+            // holds two gigabytes for every picture a conversion has open at
+            // once. Asking for more than this does not fail, it dies --
+            // measured on a car whose body wanted ten million at resolution
+            // 1024 and took the process with it.
+            constexpr uint64_t kRunCeiling = 2u << 20;
+            const uint64_t guess = std::clamp<uint64_t>(uint64_t{triangles_[k]} * 128, 4096,
+                                                        std::min(room, kRunCeiling));
+            auto out = runOne(effect, meshes[k], k, guess);
             if (!out) return std::move(out).error();
+            if (out->wanted > out->written && out->written < room) {
+                const uint64_t again = std::min({out->wanted, room, kRunCeiling});
+                if (again > guess) {
+                    out = runOne(effect, meshes[k], k, again);
+                    if (!out) return std::move(out).error();
+                }
+            }
             written += out->written;
             wanted += out->wanted;
             degenerate += out->degenerate;
             raw.records.insert(raw.records.end(), out->records.begin(), out->records.end());
             normals_.insert(normals_.end(), out->normals.begin(), out->normals.end());
-            influences_.insert(influences_.end(), out->influences.begin(), out->influences.end());
+            // A MESH NOTHING CARRIES STILL TAKES ITS PLACE IN THE RIG.
+            //
+            // A stage's skinned meshes are rarely all of them -- the sparrow
+            // comes with a cylinder and a plane beside the bird -- and the
+            // influences have to stay one to one with the gaussians or the
+            // cloud and its rig disagree about who is who. Those gaussians
+            // get four joints of no weight, which is what the skinner reads
+            // as "leave this one where the bind pose put it".
+            if (options_->skinned && out->influences.empty()) {
+                influences_.insert(influences_.end(), out->written * 8, 0.0F);
+            } else {
+                influences_.insert(influences_.end(), out->influences.begin(), out->influences.end());
+            }
             std::printf("mesh2splat: %s -> %llu splats of %llu wanted (%u triangles)%s\n",
                         meshes[k].path.c_str(), static_cast<unsigned long long>(out->written),
                         static_cast<unsigned long long>(out->wanted), triangles_[k],
@@ -522,19 +581,37 @@ private:
     [[nodiscard]] Result<OneMesh> runOne(aofx::Effect& effect, const usd::StageMesh& mesh, size_t at,
                                          uint64_t room) {
         const usd::StageMaterial& material = mesh.material;
-        auto albedo = options_->noTextures || material.albedo.empty()
-                          ? Result<image::ImagePtr>{image::ImagePtr{}}
-                          : mapPicture(material.albedo.file, {});
-        if (!albedo) return std::move(albedo).error();
-        auto normal = options_->noTextures || material.normal.empty()
-                          ? Result<image::ImagePtr>{image::ImagePtr{}}
-                          : mapPicture(material.normal.file, {});
-        if (!normal) return std::move(normal).error();
+        // A MAP THAT WILL NOT FIT IS A MAP THIS MATERIAL DOES NOT HAVE.
+        //
+        // The device pool is finite and a stage decides how many maps it
+        // wants, so the two can disagree -- and when they do, the material's
+        // own constants are a poorer answer than the map and a far better one
+        // than no conversion at all. Said once a file, not once a mesh.
+        const auto mapOrNone = [&](const std::string& first, const std::string& second, bool pack) {
+            auto picture = mapPicture(first, second, pack);
+            if (picture) {
+                return *picture;
+            }
+            if (refused_.insert(first + "|" + second).second) {
+                std::fprintf(stderr, "mesh2splat: '%s' is left out: %s\n",
+                             (first.empty() ? second : first).c_str(), picture.error().toString().c_str());
+            }
+            return image::ImagePtr{};
+        };
+        const image::ImagePtr albedoMap =
+            options_->noTextures || material.albedo.empty() ? image::ImagePtr{}
+                                                            : mapOrNone(material.albedo.file, {}, false);
+        const image::ImagePtr normalMap =
+            options_->noTextures || material.normal.empty() ? image::ImagePtr{}
+                                                            : mapOrNone(material.normal.file, {}, false);
         const bool anyMr = !options_->noTextures &&
                            (!material.metallicMap.empty() || !material.roughnessMap.empty());
-        auto mr = anyMr ? mapPicture(material.metallicMap.file, material.roughnessMap.file, true)
-                        : Result<image::ImagePtr>{image::ImagePtr{}};
-        if (!mr) return std::move(mr).error();
+        const image::ImagePtr mrMap =
+            anyMr ? mapOrNone(material.metallicMap.file, material.roughnessMap.file, true)
+                  : image::ImagePtr{};
+        const image::ImagePtr* albedo = &albedoMap;
+        const image::ImagePtr* normal = &normalMap;
+        const image::ImagePtr* mr = &mrMap;
 
         // The records the effect writes go into a picture of their own, four
         // entries a splat: position and opacity, the three sizes, the rotation,
@@ -654,6 +731,7 @@ private:
     /// Every splat's shading normal, xyz, in the order the records are in.
     std::vector<float>                       normals_;
     std::vector<float>                       influences_;
+    std::set<std::string>                    refused_;   ///< maps the device would not hold
 
 public:
     [[nodiscard]] const std::vector<float>& normals() const noexcept { return normals_; }
@@ -804,7 +882,9 @@ void addMesh2Splat(CLI::App& app) {
                     "stands behind it -- and translucency is not that: the light comes through "
                     "scattered, so the body stays mostly there");
     cmd->add_option("--max-cells", o->maxCells, "most cells one triangle may walk");
-    cmd->add_option("--texture-size", o->textureSize, "read maps no larger than this (0: their own size)");
+    cmd->add_option("--texture-size", o->textureSize,
+                    "read maps no larger than this (0: their own size). A map is a float4 picture "
+                    "on the device, so a 4k one is 268 MB and a stage with a few does not fit");
     cmd->add_flag("--no-textures", o->noTextures, "ignore the maps; materials keep their constant values");
     cmd->add_flag("--normal-map-turns", o->normalMapTurns,
                   "orient each gaussian by the normal map rather than the surface");

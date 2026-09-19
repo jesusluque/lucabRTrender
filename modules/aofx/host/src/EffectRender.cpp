@@ -63,12 +63,17 @@ Result<image::ImagePtr> renderEffect(gpu_host::Context& context, aofx::Effect& e
         bounds = job.inputs.front().image->bounds();
     }
 
-    const auto bufferOf = [&](const image::Image& picture) -> Result<aofx::Buffer> {
+    const auto bufferOf = [&](const image::Image& picture, const char* what) -> Result<aofx::Buffer> {
         const uint64_t id = storage->bufferFor(picture.address());
         if (id == 0) {
-            return Error(ErrorCode::InvalidArgument,
-                         "an image is on the heap, not on the device: install the context "
-                         "before making images");
+            // Which picture, and how big: with the context installed this
+            // means the device pool would not serve it, and the size is the
+            // first thing anybody asks.
+            return Error::make(ErrorCode::InvalidArgument,
+                               "the {} picture is on the heap, not on the device: {} by {}, {:.1f} MB "
+                               "-- the pool would not serve it, or the context is not installed",
+                               what, picture.bounds().width(), picture.bounds().height(),
+                               static_cast<double>(picture.sizeBytes()) / (1024.0 * 1024.0));
         }
         aofx::Buffer buffer;
         buffer.device = id;
@@ -99,7 +104,7 @@ Result<image::ImagePtr> renderEffect(gpu_host::Context& context, aofx::Effect& e
         if (input.image == nullptr) {
             continue;
         }
-        auto buffer = bufferOf(*input.image);
+        auto buffer = bufferOf(*input.image, input.clip.c_str());
         if (!buffer) {
             return std::move(buffer).error();
         }
@@ -127,7 +132,7 @@ Result<image::ImagePtr> renderEffect(gpu_host::Context& context, aofx::Effect& e
         passThrough = &request.inputs.front();
     }
 
-    auto outBuffer = bufferOf(*out);
+    auto outBuffer = bufferOf(*out, "output");
     if (!outBuffer) {
         return std::move(outBuffer).error();
     }
