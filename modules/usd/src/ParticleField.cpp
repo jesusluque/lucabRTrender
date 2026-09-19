@@ -206,6 +206,16 @@ void HdLrtParticleField::Sync(HdSceneDelegate* delegate, HdRenderParam* renderPa
         arrays.jointWeights = delegate->Get(id, kJointWeights);
         arrays.geomBindTransform = delegate->Get(id, kGeomBind);
         arrays.skinningXforms = delegate->Get(id, kXforms);
+        // LrtSplatVisibilityAPI: the baked fields, where `lrt visibility`
+        // wrote them. Two arrays that never change over time.
+        static const TfToken kVisibilityParts("lrt:splat:visibilityParts");
+        static const TfToken kVisibilityTexels("lrt:splat:visibilityTexels");
+        arrays.visibilityParts = delegate->Get(id, kVisibilityParts);
+        arrays.visibilityTexels = delegate->Get(id, kVisibilityTexels);
+        static const TfToken kVisibilityPartOf("lrt:splat:visibilityPartOf");
+        arrays.visibilityPartOf = delegate->Get(id, kVisibilityPartOf);
+        static const TfToken kVisibilityAmbient("lrt:splat:visibilityAmbient");
+        arrays.visibilityAmbient = delegate->Get(id, kVisibilityAmbient);
         raw = std::move(arrays);
     }
     std::optional<lrt::render::SplatEdit> edit;

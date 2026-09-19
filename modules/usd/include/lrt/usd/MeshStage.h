@@ -167,6 +167,11 @@ public:
     /// sampled at or it plays slow.
     [[nodiscard]] double timeCodesPerSecond() const;
 
+    /// The joints of a Skeleton prim, as the paths its `joints` attribute
+    /// holds, in its order -- which is the order a cloud's joint indices use.
+    /// Bookkeeping over names, for partitioning a rig into parts.
+    [[nodiscard]] Result<std::vector<std::string>> joints(const std::string& skeleton) const;
+
     /// Which way it stood: 'y' or 'z'. The gaussians are in that stage's
     /// world space, so the cloud written from them has to say the same.
     [[nodiscard]] char upAxis() const;

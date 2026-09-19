@@ -11,6 +11,7 @@ lrt_add_module(technique
         src/EmissiveTable.cpp
         src/PathTracer.cpp
         src/SplatShadows.cpp
+        src/SplatVisibility.cpp
         src/Visibility.cpp
     PUBLIC_LIBS
         lrt::core

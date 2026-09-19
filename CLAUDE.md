@@ -87,7 +87,7 @@ the ones above it.
 | world | `GpuScene` (vertex/index/primvar pools, instance records), `Instancing` (Hydra instancer chains), `RayTracingScene` (BLAS/TLAS), `BvhScene` (two-level compute LBVH) |
 | material | `TextureStore` (decode, mips, UDIM, the texture table), `MaterialCompiler` (MaterialX graphs into Slang), the lobe library |
 | light | UsdLux lights on the device: a record per light, and how a shading point samples one |
-| technique | how a frame is drawn: `VisibilityRaster` / `VisibilityTrace` / `VisibilityBvh` (same ids), `HeadlightShading`, `AovShading`, `Denoiser` (OIDN on the engine's own queue: Metal, CUDA, and Vulkan through CUDA with imported memory), `DisplayTransform` (view transforms, and OpenColorIO compiled into a kernel) |
+| technique | how a frame is drawn: `VisibilityRaster` / `VisibilityTrace` / `VisibilityBvh` (same ids), `HeadlightShading`, `AovShading`, `Denoiser` (OIDN on the engine's own queue: Metal, CUDA, and Vulkan through CUDA with imported memory), `DisplayTransform` (view transforms, and OpenColorIO compiled into a kernel), `SplatVisibility` (per-part visibility fields: baked once, a product of table reads a frame, no ray) |
 | lod | `LodBuilder`, `CutSelector`; `Lrtc.h` for the `.lrtc` reader/writer and `StreamingPool` |
 | usd | `Engine`, `StageRenderer`, `Export`; the `hdLrt` plugin; codeless schemas in `modules/usd/schemas` |
 | aofx | the AOFX plugin SDK (ABI 25, from aopenfx) and host |
@@ -137,7 +137,9 @@ How the pieces fit:
     that may be absent from the device, and a group whose chunks are missing
     draws its merged Gaussian.
 - **The CLI** is `apps/lrt` (CLI11): `CmdRender` (render/bench),
-  `CmdStage` (convert/stage), `CmdView`, `CmdAofx`, `CmdLive`, `CmdInfo`.
+  `CmdStage` (convert/stage), `CmdView`, `CmdAofx`, `CmdLive`, `CmdInfo`,
+  `CmdMesh2Splat` (a mesh into gaussians, optionally skinned), `CmdVisibility`
+  (bake a skinned cloud's per-part visibility into its file).
 - **lrt view** keeps frames on the device: `StageRenderer::draw`, then
   `DisplayTransform` writes the window's surface texture and ImGui draws over
   it. Hydra render buffers are converted only when a host maps them.

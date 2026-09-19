@@ -231,7 +231,12 @@ Result<FrameStats> TileRasterizer::render(const Projection& projection,
     // a splat a light (splat_shadow.slang), read by the projection as a
     // factor. Its own kernel, since an inline ray is a feature a device may
     // not have and the projection must stay available everywhere.
-    const bool splatShadows = lights != nullptr && lights->any() && lights->shadows() && shadowsSupported_ &&
+    // Factors measured before the frame stand in for the shadow ray: a baked
+    // visibility answers the same question without a trace, and answers it
+    // on a device that cannot trace inline at all.
+    const bool measured = lights != nullptr && lights->any() && lights->visibilityFactors != nullptr &&
+                          lights->visibilityLights > 0;
+    const bool splatShadows = !measured && lights != nullptr && lights->any() && lights->shadows() && shadowsSupported_ &&
                               std::any_of(instances.begin(), instances.end(),
                                           [](const SplatInstance& i) { return i.relight; });
     const uint32_t shadowLights = splatShadows ? std::min(lights->count, uint32_t{8}) : 0u;
@@ -321,9 +326,12 @@ Result<FrameStats> TileRasterizer::render(const Projection& projection,
             // proxies. Bound either way; taken only where there is a
             // structure to trace and the device can trace it inline.
             const bool shadows = relight && splatShadows && instance.relight;
-            cursor["params"]["shadowRays"].setData(uint32_t{shadows ? 1u : 0u});
-            cursor["params"]["shadowLights"].setData(shadowLights);
-            cursor["shadowFactors"].setBinding(shadows ? shadowFactors_.rhi() : emptyShadow_.rhi());
+            const bool fromField = relight && measured && instance.relight;
+            cursor["params"]["shadowRays"].setData(uint32_t{(shadows || fromField) ? 1u : 0u});
+            cursor["params"]["shadowLights"].setData(fromField ? lights->visibilityLights : shadowLights);
+            cursor["shadowFactors"].setBinding(fromField  ? lights->visibilityFactors->rhi()
+                                               : shadows ? shadowFactors_.rhi()
+                                                         : emptyShadow_.rhi());
             // What the splat reflects with, where its cloud carries it (a
             // conversion from a mesh does, a capture does not). Bound either
             // way, and `hasPbr` is what says whether it is read.

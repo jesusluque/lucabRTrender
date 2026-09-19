@@ -534,10 +534,17 @@ Result<void> GaussianRayTracer::prepareFrame(std::span<const SplatInstance> inst
             // or not; the flags are what say which of them are.
             cursor["pbr"].setBinding(shade.cloud->hasPbr() ? shade.cloud->pbr.rhi() : shade.cloud->shape.rhi());
             cursor["lights"].setBinding(shade.relight ? lights->records->rhi() : emptyLights_.rhi());
-            cursor["shadowFactors"].setBinding(emptyShadow_.rhi());
+            // Factors measured before the frame, where a cloud carries a
+            // baked visibility: laid out one slot a splat in the order the
+            // instances came, which is `colourStart`'s order too.
+            const bool measured = shade.relight && lights != nullptr && lights->visibilityFactors != nullptr &&
+                                  lights->visibilityLights > 0;
+            cursor["shadowFactors"].setBinding(measured ? lights->visibilityFactors->rhi() : emptyShadow_.rhi());
             rhi::ShaderCursor p = cursor["params"];
             p["count"].setData(shade.cloud->count);
             p["base"].setData(shade.colourStart);
+            p["shadowBase"].setData(measured ? shade.colourStart : 0u);
+            p["shadowLights"].setData(measured ? lights->visibilityLights : 0u);
             p["shWords"].setData(shade.cloud->shWords);
             p["restPerColour"].setData(shade.cloud->restPerColour);
             p["shLimit"].setData(shLimit);

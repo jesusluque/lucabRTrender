@@ -788,6 +788,48 @@ Result<size_t> Engine::commit() {
                     entry.gpu.reset();
                 } else {
                     entry.gpu = std::make_unique<scene::GpuSplats>(std::move(*splats));
+                    // THE BAKED FIELDS, where the file carries them: two
+                    // arrays that go up as they are, the same words the bake
+                    // wrote (`lrt visibility`), and nothing computed here.
+                    const auto* partsHeld = entry.pending->visibilityParts.IsHolding<pxr::VtFloatArray>()
+                                                ? &entry.pending->visibilityParts.UncheckedGet<pxr::VtFloatArray>()
+                                                : nullptr;
+                    const auto* texelsHeld = entry.pending->visibilityTexels.IsHolding<pxr::VtIntArray>()
+                                                 ? &entry.pending->visibilityTexels.UncheckedGet<pxr::VtIntArray>()
+                                                 : nullptr;
+                    const auto* partOfHeld = entry.pending->visibilityPartOf.IsHolding<pxr::VtIntArray>()
+                                                 ? &entry.pending->visibilityPartOf.UncheckedGet<pxr::VtIntArray>()
+                                                 : nullptr;
+                    if (partsHeld != nullptr && texelsHeld != nullptr && partOfHeld != nullptr &&
+                        partsHeld->size() % 12 == 0 && !partsHeld->empty() && !texelsHeld->empty() &&
+                        partOfHeld->size() == entry.gpu->count) {
+                        auto parts = gpu::Buffer::fromSpan<float>(
+                            *device_, std::span<const float>(partsHeld->cdata(), partsHeld->size()),
+                            "splat.visibility.parts");
+                        auto texels = gpu::Buffer::fromSpan<int32_t>(
+                            *device_, std::span<const int32_t>(texelsHeld->cdata(), texelsHeld->size()),
+                            "splat.visibility.texels");
+                        auto partOf = gpu::Buffer::fromSpan<int32_t>(
+                            *device_, std::span<const int32_t>(partOfHeld->cdata(), partOfHeld->size()),
+                            "splat.visibility.partOf");
+                        const auto* ambientHeld = entry.pending->visibilityAmbient.IsHolding<pxr::VtIntArray>()
+                                                      ? &entry.pending->visibilityAmbient.UncheckedGet<pxr::VtIntArray>()
+                                                      : nullptr;
+                        if (ambientHeld != nullptr && !ambientHeld->empty()) {
+                            auto ambient = gpu::Buffer::fromSpan<int32_t>(
+                                *device_, std::span<const int32_t>(ambientHeld->cdata(), ambientHeld->size()),
+                                "splat.visibility.ambient");
+                            if (ambient) entry.gpu->visibilityAmbient = std::move(*ambient);
+                        }
+                        if (parts && texels && partOf) {
+                            entry.gpu->visibilityParts = std::move(*parts);
+                            entry.gpu->visibilityTexels = std::move(*texels);
+                            entry.gpu->visibilityPartOf = std::move(*partOf);
+                            entry.gpu->visibilityPartCount = static_cast<uint32_t>(partsHeld->size() / 12);
+                        } else {
+                            log::warn("hdLrt: {}: the baked visibility did not upload", id.GetString());
+                        }
+                    }
                 }
             }
             entry.uploaded = identity;
@@ -1273,6 +1315,12 @@ Result<void> Engine::render(const render::Projection& projection, const render::
                 }
             }
         }
+        // WHAT A CLOUD WITH A BAKED VISIBILITY NEEDS MEASURED BEFORE THE FRAME:
+        // its factors, one a splat a light, laid out one slot a splat in the
+        // order the instances go to the renderers -- which is the order their
+        // colour slots take, so the same base serves both routes.
+        frameMeasured_.clear();
+        frameSlots_ = 0;
         for (const auto& [id, entry] : splats_) {
             if (!entry.visible) {
                 continue;
@@ -1283,6 +1331,23 @@ Result<void> Engine::render(const render::Projection& projection, const render::
                 const scene::GpuSplats* drawn = entry.posed != nullptr ? entry.posed.get() : entry.gpu.get();
                 splats.push_back({drawn, entry.objectToWorld, entry.edit, entry.relight,
                                   entry.litBody, categoryMask(entry.categories)});
+                if (entry.relight && entry.gpu->hasVisibility()) {
+                    MeasuredCloud m;
+                    m.drawn = drawn;
+                    m.fields = entry.gpu.get();
+                    m.xforms = entry.posed != nullptr ? &entry.xforms : nullptr;
+                    m.slot = frameSlots_;
+                    m.rows = entry.objectToWorld.rows3x4();
+                    m.categories = categoryMask(entry.categories);
+                    // The skinner's bind transform, rows 0..2 of the 4x4 as it holds it.
+                    for (size_t r = 0; r < 3; ++r) {
+                        for (size_t c = 0; c < 4; ++c) {
+                            m.geomBind[r * 4 + c] = entry.geomBind[r * 4 + c];
+                        }
+                    }
+                    frameMeasured_.push_back(m);
+                }
+                frameSlots_ += drawn->count;
             }
             const lod::LodCloud* cloud = entry.pool != nullptr ? &entry.pool->cloud() : entry.lodCloud.get();
             if (cloud == nullptr) {
@@ -1294,6 +1359,7 @@ Result<void> Engine::render(const render::Projection& projection, const render::
                 if (entry.lodCloud != nullptr) {
                     splats.push_back({&entry.lodCloud->splats, entry.objectToWorld, entry.edit, entry.relight,
                                       entry.litBody, categoryMask(entry.categories)});
+                    frameSlots_ += entry.lodCloud->splats.count;
                 } else {
                     log::warn("hdLrt: {}: a streamed asset is drawn by the rasteriser only", id.GetString());
                 }
@@ -1481,6 +1547,7 @@ Result<void> Engine::render(const render::Projection& projection, const render::
                 tracedLights.count = lightTable_->count();
             }
         }
+        LRT_TRY(measureVisibility(tracedLights));
         LRT_TRY(rayTracer_->render(projection, splats, settings, targets, &tracedLights));
         // What every other route does when it has finished drawing, and what
         // this one used to return without: the sky behind the frame, and the
@@ -2021,6 +2088,7 @@ Result<void> Engine::render(const render::Projection& projection, const render::
         splatLights.records = &lightTable_->records();
         splatLights.count = lightTable_->count();
     }
+    LRT_TRY(measureVisibility(splatLights));
     // And what it casts its shadow against: the proxies of every cloud in the
     // frame, built by a tracer of their own on the hardware route. Only where
     // a cloud is relit, the device traces inline, and the setting asks.
@@ -2126,18 +2194,102 @@ namespace {
 }   // namespace
 
 CloudIdentity Engine::identityOf(const ParticleFieldArrays& arrays) {
-    const pxr::VtValue* const held[10] = {
+    const pxr::VtValue* const held[14] = {
         &arrays.positions,   &arrays.orientations, &arrays.scales,       &arrays.opacities,
         &arrays.shCoefficients, &arrays.metallic,  &arrays.roughness,    &arrays.transmission,
-        &arrays.jointIndices,   &arrays.jointWeights};
+        &arrays.jointIndices,   &arrays.jointWeights, &arrays.visibilityParts, &arrays.visibilityTexels,
+        &arrays.visibilityPartOf, &arrays.visibilityAmbient};
     CloudIdentity identity;
-    for (size_t k = 0; k < 10; ++k) {
+    for (size_t k = 0; k < 14; ++k) {
         const auto [data, bytes] = arrayIdentity(*held[k]);
         identity.data[k] = data;
         identity.bytes[k] = bytes;
     }
     identity.shDegree = arrays.shDegree;
     return identity;
+}
+
+Result<Engine::BakedVisibility> Engine::bakeVisibility(const pxr::SdfPath& id,
+                                                       const technique::VisibilityParts& parts,
+                                                       const technique::VisibilityBakeOptions& options) {
+    const std::lock_guard<std::mutex> held(guard_);
+    auto found = splats_.find(id);
+    if (found == splats_.end() || found->second.gpu == nullptr) {
+        return Error::make(ErrorCode::InvalidArgument, "'{}': no committed cloud", id.GetString());
+    }
+    SplatEntry& entry = found->second;
+    if (!entry.influences.valid() || entry.joints == 0) {
+        return Error::make(ErrorCode::InvalidArgument,
+                           "'{}': a visibility bake needs a cloud a skeleton carries", id.GetString());
+    }
+    if (parts.jointToPart.size() != entry.joints) {
+        return Error::make(ErrorCode::InvalidArgument, "'{}': {} joints partitioned, the cloud has {}",
+                           id.GetString(), parts.jointToPart.size(), entry.joints);
+    }
+    if (!splatVisibility_.has_value()) {
+        auto made = technique::SplatVisibility::create(*library_);
+        if (!made) return std::move(made).error();
+        splatVisibility_.emplace(std::move(*made));
+    }
+    LRT_TRY(splatVisibility_->bake(*entry.gpu, entry.influences, 4, parts, options));
+    BakedVisibility out;
+    out.partCount = entry.gpu->visibilityPartCount;
+    out.parts.resize(size_t{out.partCount} * 12);
+    LRT_TRY(entry.gpu->visibilityParts.read(*device_, 0, out.parts.size() * sizeof(float), out.parts.data()));
+    out.texels.resize(entry.gpu->visibilityTexels.count());
+    LRT_TRY(entry.gpu->visibilityTexels.read(*device_, 0, out.texels.size() * sizeof(int32_t), out.texels.data()));
+    out.partOf.resize(entry.gpu->count);
+    LRT_TRY(entry.gpu->visibilityPartOf.read(*device_, 0, out.partOf.size() * sizeof(int32_t), out.partOf.data()));
+    out.ambient.resize(entry.gpu->visibilityAmbient.count());
+    LRT_TRY(entry.gpu->visibilityAmbient.read(*device_, 0, out.ambient.size() * sizeof(int32_t), out.ambient.data()));
+    return out;
+}
+
+Result<void> Engine::measureVisibility(render::SplatLights& into) {
+    if (frameMeasured_.empty() || !into.any()) {
+        return ok();
+    }
+    if (!splatVisibility_.has_value()) {
+        auto made = technique::SplatVisibility::create(*library_);
+        if (!made) return std::move(made).error();
+        splatVisibility_.emplace(std::move(*made));
+    }
+    const uint32_t lightsMeasured = std::min(into.count, uint32_t{8});
+    const uint64_t wanted = uint64_t{frameSlots_} * lightsMeasured;
+    if (!visibilityFactors_.valid() || visibilityFactors_.count() < wanted) {
+        gpu::BufferDesc desc;
+        desc.bytes = std::max<uint64_t>(wanted, 1) * 4;
+        desc.elementBytes = 4;
+        desc.label = "splat.visibilityFactors";
+        auto made = gpu::Buffer::create(*device_, desc);
+        if (!made) return std::move(made).error();
+        visibilityFactors_ = std::move(*made);
+    }
+    gpu::CommandBatch batch(*device_);
+    for (const MeasuredCloud& m : frameMeasured_) {
+        technique::VisibilityFactorsJob job;
+        job.cloud = m.fields;
+        job.positions = &m.drawn->positions;
+        job.skinningXforms = m.xforms;
+        job.lights = into.records;
+        job.lightCount = lightsMeasured;
+        job.base = m.slot;
+        job.categories = m.categories;
+        job.objectToWorld = m.rows;
+        job.geomBind = m.geomBind;
+        LRT_TRY(splatVisibility_->factors(batch, job, visibilityFactors_));
+    }
+    LRT_TRY(batch.submit(true));
+    into.visibilityFactors = &visibilityFactors_;
+    into.visibilityLights = lightsMeasured;
+    if (std::getenv("LRT_VISIBILITY_DEBUG") != nullptr) {
+        auto share = splatVisibility_->shadowedShare(visibilityFactors_, frameSlots_ * lightsMeasured);
+        if (share) {
+            log::info("visibility: {} clouds, {} slots x {} lights, {:.1f}% of factors under a half",
+                      frameMeasured_.size(), frameSlots_, lightsMeasured, 100.0 * *share);
+        }
+    }
+    return ok();
 }
 
 Result<void> Engine::carryCloud(const pxr::SdfPath& id, SplatEntry& entry, bool reuploaded) {

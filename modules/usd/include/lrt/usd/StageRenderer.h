@@ -20,6 +20,7 @@
 #include "lrt/render/TileRasterizer.h"
 #include "lrt/scene/GpuClouds.h"
 #include "lrt/technique/DisplayTransform.h"
+#include "lrt/technique/SplatVisibility.h"
 
 namespace lrt::gpu {
 class Device;
@@ -49,6 +50,16 @@ struct StagePick {
     std::string rprim;          ///< Hydra's path (a prototype's, under instancing)
     std::string prim;           ///< the USD prim it came from
     int32_t     instance = -1;  ///< which instance of it
+};
+
+/// What `bakeVisibility` hands back (Engine::BakedVisibility, without the
+/// delegate's types).
+struct BakedVisibilityArrays {
+    std::vector<float>   parts;    ///< 12 floats a part
+    std::vector<int32_t> texels;   ///< two f16 a word
+    std::vector<int32_t> partOf;   ///< the part of each gaussian
+    std::vector<int32_t> ambient;  ///< a probe's mean, for domes
+    uint32_t             partCount = 0;
 };
 
 class StageRenderer {
@@ -151,6 +162,14 @@ public:
     void setChooseLights(bool choose);
     /// `lrt:splatShadows`: a relit cloud shadows itself, one ray a splat.
     void setSplatShadows(bool shadows);
+
+    /// Bakes the per-part visibility of the ParticleField at `prim` (a cloud
+    /// a skeleton carries), commits the stage first so it is on the device,
+    /// and hands back the two arrays the file will carry.
+    [[nodiscard]] Result<BakedVisibilityArrays> bakeVisibility(const std::string& prim,
+                                                               const technique::VisibilityParts& parts,
+                                                               const technique::VisibilityBakeOptions& options,
+                                                               double time = 0.0);
 
     /// The path traced technique ("rt" over meshes): paths a pixel each pass
     /// gathers, bounces after the first hit, and the paths a pixel at which

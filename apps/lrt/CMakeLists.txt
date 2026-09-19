@@ -5,6 +5,7 @@ add_executable(lrt
     src/CmdStage.cpp
     src/CmdAofx.cpp
     src/CmdMesh2Splat.cpp
+    src/CmdVisibility.cpp
     src/CmdLive.cpp)
 target_link_libraries(lrt PRIVATE lrt::usd lrt::lod lrt::sched lrt::technique lrt::aofx_host CLI11::CLI11)
 if(LRT_BUILD_VIEW)

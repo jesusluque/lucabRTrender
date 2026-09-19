@@ -26,7 +26,7 @@ StructuredBuffer<uint>     shape;
 StructuredBuffer<uint>     sh;
 StructuredBuffer<uint>     pbr;      // metallic and roughness a splat, where the cloud carries them
 StructuredBuffer<LightRecord> lights;
-StructuredBuffer<float>    shadowFactors;   // unused here: a traced splat has no shadow pass of its own
+StructuredBuffer<float>    shadowFactors;   // measured before the frame, where a cloud carries a baked visibility
 RWStructuredBuffer<float4> colours;
 ConstantBuffer<RtParams>   params;   // count, base, shWords, restPerColour, shLimit; v03/v13/v23: eye in cloud space
 
@@ -74,12 +74,13 @@ void rtShade(uint3 tid: SV_DispatchThreadID) {
         surface.roughness = params.hasPbr != 0 ? pbrRoughness(pbr[i]) : 1.0;
         surface.transmission = params.hasPbr != 0 ? pbrTransmission(pbr[i]) : 0.0;
         surface.lit = params.litBody != 0;
-        // No shadow factors on this route: the rasteriser measures them in a
-        // pass of its own before it projects, and a traced frame has no such
-        // pass. Every light is taken whole.
+        // A traced frame has no shadow pass of its own, but a cloud that
+        // carries a baked visibility had its factors measured before the
+        // frame, and they are read here exactly as the rasteriser reads its.
         colour = relitForBlend(relitSplat(surface, normalize(eyeWorld - surface.position), lights,
                                           params.lightCount, params.categoriesLo, params.categoriesHi,
-                                          shadowFactors, 0, 0),
+                                          shadowFactors, (params.shadowBase + i) * params.shadowLights,
+                                          params.shadowLights),
                                params.linearise != 0);
     }
     if (fate.graded) {

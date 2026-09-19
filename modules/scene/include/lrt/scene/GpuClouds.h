@@ -51,9 +51,24 @@ struct GpuSplats {
     /// splat, metallic in the low byte and roughness in the next. Empty for a
     /// capture, which has neither -- `hasPbr` is how a kernel asks.
     gpu::Buffer pbr;
+    /// WHAT THIS CLOUD CASTS ON THE SPACE AROUND IT, baked by part (a part is
+    /// what one joint carries) and read as a product over parts. Empty for a
+    /// cloud nothing baked; `hasVisibility` is how a kernel asks. The layout
+    /// is splat_visibility.slang's: `visibilityParts` holds one
+    /// `VisibilityPart` a part, `visibilityTexels` two f16 a word, and
+    /// `visibilityPartOf` the part each gaussian belongs to.
+    gpu::Buffer visibilityParts;
+    gpu::Buffer visibilityTexels;
+    gpu::Buffer visibilityPartOf;
+    gpu::Buffer visibilityAmbient;   ///< a probe's mean over its directions, for domes
+    uint32_t    visibilityPartCount = 0;
     Bounds      bounds;
 
     [[nodiscard]] bool hasPbr() const noexcept { return pbr.valid(); }
+    [[nodiscard]] bool hasVisibility() const noexcept {
+        return visibilityPartCount > 0 && visibilityParts.valid() && visibilityTexels.valid() &&
+               visibilityPartOf.valid();
+    }
 
     [[nodiscard]] uint32_t degree() const noexcept {
         return restPerColour == 15 ? 3 : restPerColour == 8 ? 2 : restPerColour == 3 ? 1 : 0;

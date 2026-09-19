@@ -43,6 +43,13 @@ struct ParticleFieldArrays {
     pxr::VtValue jointWeights;     ///< VtFloatArray, 4 a gaussian
     pxr::VtValue skinningXforms;   ///< VtMatrix4dArray or VtMatrix4fArray, one a joint
     pxr::VtValue geomBindTransform;///< GfMatrix4d
+    /// LrtSplatVisibilityAPI: what the cloud casts on the space around it,
+    /// baked by part (`lrt visibility`). `visibilityParts` is 12 floats a
+    /// part, `visibilityTexels` two f16 a word; empty for a cloud with none.
+    pxr::VtValue visibilityParts;  ///< VtFloatArray
+    pxr::VtValue visibilityTexels; ///< VtIntArray (words)
+    pxr::VtValue visibilityPartOf; ///< VtIntArray, one a gaussian
+    pxr::VtValue visibilityAmbient;///< VtIntArray (words), a probe's mean, for domes
 };
 
 /// A volume's field asset, as UsdVolOpenVDBAsset names it.

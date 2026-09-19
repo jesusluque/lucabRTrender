@@ -672,6 +672,32 @@ Result<StageImage> StageRenderer::render(const std::string& camera, double time,
     return readImage(width, height);
 }
 
+Result<BakedVisibilityArrays> StageRenderer::bakeVisibility(const std::string& prim,
+                                                            const technique::VisibilityParts& parts,
+                                                            const technique::VisibilityBakeOptions& options,
+                                                            double time) {
+    Impl& impl = *impl_;
+    if (!impl.delegate->HasEngine()) {
+        return Error(ErrorCode::DeviceFailure, "visibility: the render delegate has no GPU");
+    }
+    // On the device first, as a bake of its light is: one traced pixel.
+    impl.delegate->SetRenderSetting(TfToken("lrt:settleStreams"), VtValue(true));
+    auto framing = framingCamera(time, 35.0, "rt");
+    if (!framing) return std::move(framing).error();
+    LRT_TRY(aim(*framing, time, 1, 1, "rt"));
+    LRT_TRY(execute(1, 1));
+    lrt::usd::Engine& engine = impl.delegate->GetEngine();
+    auto baked = engine.bakeVisibility(SdfPath(prim), parts, options);
+    if (!baked) return std::move(baked).error();
+    BakedVisibilityArrays out;
+    out.parts = std::move(baked->parts);
+    out.texels = std::move(baked->texels);
+    out.partOf = std::move(baked->partOf);
+    out.ambient = std::move(baked->ambient);
+    out.partCount = baked->partCount;
+    return out;
+}
+
 Result<std::vector<float>> StageRenderer::bakePoints(const std::vector<float>& rays, uint32_t count,
                                                      double time, uint32_t samples, uint32_t bounces,
                                                      uint32_t degree) {

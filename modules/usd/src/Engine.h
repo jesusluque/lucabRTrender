@@ -39,6 +39,7 @@
 #include "lrt/geom/Subdivision.h"
 #include "lrt/lod/Lod.h"
 #include "lrt/technique/Visibility.h"
+#include "lrt/technique/SplatVisibility.h"
 #include "lrt/io/Vdb.h"
 #include "lrt/world/VolumeSet.h"
 #include "lrt/scene/SplatSkinner.h"
@@ -79,8 +80,8 @@ struct StreamedAsset {
 /// actually changed. `skinningXforms` is deliberately not among them -- it is
 /// the one array that does change every frame, and no decode depends on it.
 struct CloudIdentity {
-    std::array<const void*, 10> data{};
-    std::array<size_t, 10>      bytes{};
+    std::array<const void*, 14> data{};
+    std::array<size_t, 14>      bytes{};
     int                         shDegree = -1;
 
     [[nodiscard]] bool operator==(const CloudIdentity& other) const noexcept {
@@ -357,6 +358,22 @@ public:
     /// same lights, the same integrator -- so it is a render with a bake
     /// request in it rather than a pipeline of its own. What it is for:
     /// turning a mesh into gaussians that carry the light the mesh had.
+    /// WHAT A BAKE OF A CLOUD'S VISIBILITY HANDS BACK: the two arrays the
+    /// file will carry, as the device wrote them.
+    struct BakedVisibility {
+        std::vector<float>   parts;    ///< 12 floats a part
+        std::vector<int32_t> texels;   ///< two f16 a word
+        std::vector<int32_t> partOf;   ///< the part of each gaussian
+        std::vector<int32_t> ambient;  ///< a probe's mean, for domes
+        uint32_t             partCount = 0;
+    };
+    /// Bakes the per-part visibility of the committed cloud at `id`, which
+    /// must be one a skeleton carries (its influences say which part each
+    /// gaussian is). The cloud keeps the fields afterwards, so the frames
+    /// that follow already read them.
+    [[nodiscard]] Result<BakedVisibility> bakeVisibility(const pxr::SdfPath& id, const technique::VisibilityParts& parts,
+                                                         const technique::VisibilityBakeOptions& options);
+
     [[nodiscard]] Result<void> bakePoints(const BakeRequest& bake, const render::Projection& projection,
                                           const render::RenderSettings& settings);
 
@@ -409,6 +426,26 @@ private:
     std::optional<geom::CurveBuilder>         curveBuilder_;
     std::optional<geom::Subdivider>           subdivider_;   ///< made on first use
     std::optional<world::GpuScene>            scene_;
+    /// A cloud that carries a baked visibility has its factors measured
+    /// before the frame -- one float a splat a light -- and both routes read
+    /// them instead of casting a ray. Grown to the frame's clouds.
+    std::optional<technique::SplatVisibility> splatVisibility_;
+    gpu::Buffer                               visibilityFactors_;
+    /// This frame's clouds that carry one, noted as the instance list is
+    /// built so their factors sit at the slots the renderers will read.
+    struct MeasuredCloud {
+        const scene::GpuSplats* drawn = nullptr;   ///< what the frame draws (posed, or the cloud)
+        const scene::GpuSplats* fields = nullptr;  ///< what carries the baked fields (the bind pose)
+        const gpu::Buffer*      xforms = nullptr;  ///< the skeleton's, or null for a cloud nothing moves
+        uint32_t                slot = 0;
+        std::array<float, 12>   rows{};
+        uint64_t                categories = 0;
+        std::array<float, 12>   geomBind{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0};
+    };
+    std::vector<MeasuredCloud>                frameMeasured_;
+    uint32_t                                  frameSlots_ = 0;
+    /// Measures the frame's factors into `into`, once, for either route.
+    [[nodiscard]] Result<void> measureVisibility(render::SplatLights& into);
     std::optional<scene::SplatSkinner>        splatSkinner_;
     std::optional<technique::VisibilityRaster> visibilityRaster_;   ///< each made on first use
     std::optional<world::RayTracingScene>      rayTracingScene_;

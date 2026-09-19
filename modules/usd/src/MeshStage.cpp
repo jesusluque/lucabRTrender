@@ -350,6 +350,24 @@ Result<std::vector<float>> MeshStage::skeletonTransforms(const std::string& skel
     return out;
 }
 
+Result<std::vector<std::string>> MeshStage::joints(const std::string& skeleton) const {
+    if (impl_ == nullptr) {
+        return Error(ErrorCode::InvalidArgument, "no stage");
+    }
+    const UsdPrim prim = impl_->stage->GetPrimAtPath(SdfPath(skeleton));
+    if (!prim || !prim.IsA<UsdSkelSkeleton>()) {
+        return Error::make(ErrorCode::InvalidArgument, "'{}': not a Skeleton on this stage", skeleton);
+    }
+    VtTokenArray held;
+    UsdSkelSkeleton(prim).GetJointsAttr().Get(&held);
+    std::vector<std::string> out;
+    out.reserve(held.size());
+    for (const TfToken& token : held) {
+        out.push_back(token.GetString());
+    }
+    return out;
+}
+
 double MeshStage::timeCodesPerSecond() const {
     if (impl_ == nullptr) {
         return 24.0;

@@ -55,7 +55,10 @@ public struct RtParams {
     /// Where a query is cut in two and composed again (rtRenderSplit): what
     /// proves the segment query composes. 0: one query, as a frame draws.
     public float splitAt;
-    public uint  pad1; public uint pad2;
+    // shade: what reaches each splat from each light, measured before the
+    // frame (technique::SplatVisibility) -- `shadowFactors[(shadowBase + i) *
+    // shadowLights + k]`. Zero lights: every light is taken whole.
+    public uint  shadowBase; public uint shadowLights;
     // shade: what this cloud is relit with. The rows take a splat to the
     // world, where the lights are; the eye is there too.
     public uint  relight;        // 1: light these splats rather than show them as baked

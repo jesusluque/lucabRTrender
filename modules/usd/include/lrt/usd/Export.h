@@ -3,6 +3,7 @@
 
 #include <array>
 #include <filesystem>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -76,5 +77,13 @@ struct ExportOptions {
                                                    const io::RawSplats& raw,
                                                    const std::filesystem::path& path,
                                                    const ExportOptions& options = {});
+
+/// Writes a baked visibility onto the ParticleField at `prim` of the stage at
+/// `path`, in place: `primvars:lrt:splat:visibilityParts` (12 floats a part)
+/// and `primvars:lrt:splat:visibilityTexels` (two f16 a word), as
+/// `lrt visibility` bakes them and `HdLrtParticleField` reads them back.
+[[nodiscard]] Result<void> writeVisibility(const std::filesystem::path& path, const std::string& prim,
+                                           std::span<const float> parts, std::span<const int32_t> texels,
+                                           std::span<const int32_t> partOf, std::span<const int32_t> ambient);
 
 }   // namespace lrt::usd

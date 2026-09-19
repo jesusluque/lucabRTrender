@@ -87,6 +87,13 @@ struct SplatLights {
     /// surface is a crowd of overlapping Gaussians), and where it gives up.
     float                        shadowOffset = 3.0F;
     float                        shadowCut = 1.0e-3F;
+    /// WHAT REACHES EACH SPLAT FROM EACH LIGHT, MEASURED BEFORE THE FRAME:
+    /// one float a splat a light, `visibilityLights` a splat, in instance
+    /// order (technique::SplatVisibility writes them from a cloud's baked
+    /// fields). Set, the rasteriser takes these instead of tracing a shadow
+    /// ray, and so can the traced route, which has no ray of its own.
+    const gpu::Buffer*           visibilityFactors = nullptr;
+    uint32_t                     visibilityLights = 0;
 
     [[nodiscard]] bool any() const noexcept { return records != nullptr && count > 0; }
     [[nodiscard]] bool shadows() const noexcept {

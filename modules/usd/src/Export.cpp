@@ -294,4 +294,38 @@ Result<void> writeParticleFieldStage(gpu::ShaderLibrary& library, const io::RawS
     return ok();
 }
 
+Result<void> writeVisibility(const std::filesystem::path& path, const std::string& prim,
+                             std::span<const float> parts, std::span<const int32_t> texels,
+                             std::span<const int32_t> partOf, std::span<const int32_t> ambient) {
+    UsdStageRefPtr stage = UsdStage::Open(path.string());
+    if (!stage) {
+        return Error::make(ErrorCode::IoFailure, "cannot open USD stage '{}'", path.string());
+    }
+    const UsdPrim held = stage->GetPrimAtPath(SdfPath(prim));
+    if (!held) {
+        return Error::make(ErrorCode::InvalidArgument, "'{}': no such prim on '{}'", prim, path.string());
+    }
+    UsdGeomPrimvarsAPI primvars(held);
+    VtFloatArray partArray(parts.begin(), parts.end());
+    VtIntArray texelArray(texels.begin(), texels.end());
+    primvars.CreatePrimvar(TfToken("primvars:lrt:splat:visibilityParts"), SdfValueTypeNames->FloatArray,
+                           UsdGeomTokens->constant)
+        .Set(partArray);
+    primvars.CreatePrimvar(TfToken("primvars:lrt:splat:visibilityTexels"), SdfValueTypeNames->IntArray,
+                           UsdGeomTokens->constant)
+        .Set(texelArray);
+    VtIntArray ambientArray(ambient.begin(), ambient.end());
+    primvars.CreatePrimvar(TfToken("primvars:lrt:splat:visibilityAmbient"), SdfValueTypeNames->IntArray,
+                           UsdGeomTokens->constant)
+        .Set(ambientArray);
+    VtIntArray partOfArray(partOf.begin(), partOf.end());
+    primvars.CreatePrimvar(TfToken("primvars:lrt:splat:visibilityPartOf"), SdfValueTypeNames->IntArray,
+                           UsdGeomTokens->vertex)
+        .Set(partOfArray);
+    if (!stage->GetRootLayer()->Save()) {
+        return Error::make(ErrorCode::IoFailure, "cannot save '{}'", path.string());
+    }
+    return ok();
+}
+
 }   // namespace lrt::usd

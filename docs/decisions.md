@@ -5569,3 +5569,91 @@ The rasteriser is at 75 fps on 4.27 M skinned gaussians. The traced route
 improves in the median and not in its warm frame, so its remaining cost is
 elsewhere -- the proxies and the acceleration structure the posed cloud is
 traced through, which is the next thing to look at.
+
+## A cloud shadows itself by part: baked once, read every frame, no ray
+
+The previous section measured that a relit cloud in the traced route casts no
+shadow ray at all, that the rasteriser's does so at 36x the frame and crushes
+the cloud to black, and that no offset fixes it. The survey said the only
+baked visibility in the literature that survives articulation factors by body
+part (Lin et al. 2024 with a network a part, DNF-Avatar with a scalar AO
+grid a part), and that nobody had published the combination: **a directional
+table a part**. This is that.
+
+### What it is
+
+A skinned cloud already carries the joints each gaussian is held by. The rig
+is partitioned into parts by its largest subtrees (`partitionJoints`: the
+biggest subtree anywhere that is not yet a part and has `minJoints` joints
+becomes one, until there are enough -- on the sparrow, 12 parts: root, centre,
+chest, pelvis, head, and each wing in three segments). For every part a field
+is baked **in the pose the cloud was bound in**: a grid of probes over the
+cloud's box, and at each probe an octahedral map of directions holding the
+transmittance of a ray leaving the probe through that part's gaussians alone
+(`splat_visibility.slang`: the part gathered into a cloud of its own, proxies
+built over it by the Gaussian ray tracer, one inline ray a texel with the
+same `shadowAlpha` product the shadow kernels use). Beside it, one number a
+probe: the mean over its directions, for a light that has none.
+
+At render (`splat_visibility_read.slang`) a gaussian asks every part but its
+own: its posed position and the light's direction are taken back through the
+part's current skinning transform and the bind transform into the space the
+field was baked in, the field is read trilinearly over the probes and
+bilinearly over the map, and the parts' answers multiply. One factor a light a
+gaussian goes into the same `shadowFactors` both routes already read -- so the
+traced route, which had no shadow pass of its own, reads them too. A dome is
+cut by the ambient term instead. Zero rays a frame.
+
+The fields are the cloud's own: `primvars:lrt:splat:visibilityParts`,
+`visibilityTexels`, `visibilityAmbient` and `visibilityPartOf`, written by
+`lrt visibility` and read back by `HdLrtParticleField`.
+
+### What was found building it
+
+- **A part nothing stands on read as a total shadow.** Its texels were never
+  written and held zero, and zero as a transmittance is black from every
+  direction: the first sparrow came out black under the sun, from the two
+  parts (root, centre) that carry no gaussian. A grid of 0 marks such a part
+  and the read skips it.
+- **Metal binds 31 buffers, and a module's globals are laid out for every
+  entry point it holds.** The read's light tables beside the bake's shadow
+  tables put `iesValues` at buffer 31 and the pipeline could not be made,
+  though `slangc` was happy. The read is a module of its own.
+- **A part does not shadow itself.** Its field, read at one of its own
+  gaussians, is the crowd that gaussian stands in -- the same thing that made
+  a shadow ray from a splat black, one level up. The read skips the part a
+  gaussian is of. What that gives up is the part's own local shadowing --
+  feather on feather within one wing segment -- which is the term the survey
+  said only a per-frame trace or a per-bone ambient term supplies.
+- **Directions cannot be coarse.** With an octahedral map of 8 x 8 a texel is
+  some 22 degrees and the penumbra at a wing's height is wider than the wing;
+  the test's body-under-a-wing slab could not be resolved at all. At 16 and
+  32 the answer is exact outside a band of one probe cell plus the wing's
+  height times tan(pitch), and moving the wing's joint aside without baking
+  again lights the body: the test's second section, which is the claim that
+  matters. Harmonics were never an option here (RGCA, PRTGaussian, GUS-IR).
+
+### What was measured
+
+Sparrow, 4 269 858 gaussians, 609 joints, 12 parts, grid 24, octave 16:
+
+| | |
+|---|---|
+| bake | 22 s on the M5 Pro, 3 538 944 texels a part |
+| the fields in the file | 81 MB (two f16 a word) |
+| factors under a half, frame 31, sun and dome | 21.3 % |
+| viewer, raster, 400 frames playing | 71.82 ms median, 9.69 ms warm (56.87 / 13.40 without) |
+| viewer, `rt`, 400 frames playing | 193.88 ms median, 51.65 ms warm (178.99 / 55.05 without) |
+
+The warm frame does not move: the read is a table lookup a part a light a
+gaussian, and it is not what a frame costs. The shadow lands where the mesh's
+does -- the far wing, the flank under the raised wing, the tail root -- and
+follows the wings from frame to frame.
+
+### What it is not
+
+Weaker than the mesh's path-traced shadow, and for a stated reason: the part's
+own local term is left out, the ambient term is a mean over the sphere rather
+than a cosine lobe about the receiver's normal, and a part is taken as rigid.
+The self-part term is the next thing to add, and the survey says it is either
+a per-bone canonical AO grid (DNF-Avatar) or a short trace.
