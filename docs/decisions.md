@@ -5417,3 +5417,119 @@ a stage at 30 was stretched by 30/24 and lagged the mesh by a quarter,
 cumulatively. `MeshStage::timeCodesPerSecond()` reads the source stage's rate,
 `SplatSkinning` carries it, and the export writes it. Before: `0.031` mean
 error at frame 16 and `0.049` at frame 61. After: `1.4e-05` and `1.1e-05`.
+
+## A cloud does not shadow itself, and the offset cannot be tuned to fix it
+
+Measured, not assumed. `--splat-shadows` on the traced route changes nothing:
+the images come back identical. The flag feeds the **rasteriser's** shadow
+pass alone (`splat_shadow.slang`), and `rt_shade.slang` says so in the
+declaration it never uses -- *"unused here: a traced splat has no shadow pass
+of its own"*. So a relit splat in the path tracer takes every light whole, and
+the sparrow's wings do not darken its body.
+
+| route | `--splat-shadows` off vs on |
+|---|---|
+| `rt` | no difference at all |
+| `raster` | 13.7 % of pixels, mean error 0.019 |
+
+And where it does work it is both too expensive and wrong: **49.58 ms to
+1810.24 ms**, 36x, and the bird is crushed to near black -- the pixel of
+greatest change goes from 6.67 to 0.37.
+
+### Why it crushes, and why no offset saves it
+
+The kernel already knows the hazard and says so: *"without it every splat is
+shadowed by the splats it is made of, and a relit capture renders black."* Its
+guard is to start the ray at `shadowOffset * own`, three sigmas of **that
+splat's** largest scale. Three sigmas is a photogrammetric capture's number,
+where splats are fat and sparse. A converted cloud is the opposite: at
+resolution 1400 a sparrow splat is 1.6e-4 across and the plumage stacks many
+layers inside half a millimetre. Transmittance is a product of `(1 - alpha)`
+and `sigma = 1.0` leaves a traced surface 91 % opaque, so three layers of a
+splat's own neighbours take it to 0.0007.
+
+Sweeping the offset settles it. Mean image value, against a ceiling of 0.7547
+with no shadows at all:
+
+| offset (own sigmas) | mean | of the way to no shadow |
+|---|---|---|
+| 1 | 0.7172 | 0 % |
+| 3 (the default) | 0.7198 | 7 % |
+| 12 | 0.7235 | 17 % |
+| 50 | 0.7339 | 45 % |
+| 200 | 0.7444 | 73 % |
+| 400 | 0.7508 | 90 % |
+| 800 | 0.7543 | **99 %** |
+
+**There is no plateau anywhere.** It goes from everything black to no shadow
+monotonically, and by 800 sigmas -- 0.128 units, over half the bird -- the
+shadow is gone entirely. Every step that buys less self-occlusion sells the
+same amount of real occlusion. The parameter cannot be tuned to a right
+answer.
+
+PTIR-GS reaches the same conclusion with an ablation: a fixed offset *"does
+not generalize well across models, since the appropriate offset magnitude
+depends on object scale and local Gaussian support thickness"* -- 0.025 leaves
+self-occlusion, 0.05 leaks light, and their backface-aware origin
+`o + 1(t_peak>0) 1(d.n>0) (t_peak+eps) d` wins on all three of their tasks
+(relight 28.94 / 29.52 / **31.55** PSNR). Two independent codebases, R3DG and
+IRGS, both ship the same fixed constant of 0.05 world units on a unit-scaled
+object.
+
+### What the field does, since none of it was obvious
+
+Surveyed because the measurement said the parameter was the wrong knob.
+
+- **Directional self-shadowing on a deforming cloud is only ever recomputed
+  per frame.** Every baked representation -- R3DG's degree-3 scalar visibility
+  SH, GS-IR's probe volumes, PRTGaussian's order-9 transfer -- is indexed by
+  canonical position and dies when a splat moves relative to its neighbours.
+  R3DG says so and re-bakes when it composes objects.
+- **The learned shortcut is a dead end, on the authors' own evidence.**
+  Animatable & Relightable Gaussians trained a network to predict pose-
+  conditioned visibility and abandoned it: *"we do not predict light
+  visibility maps during testing because we empirically find it cannot
+  accurately generalize to novel poses."* At test time they trace.
+- **Two schemes do survive articulation, and both factor by body part.** Lin
+  et al. keep 15 part-local visibility MLPs queried in each part's own frame
+  and multiplied, which is **directional** and does generalise; DNF-Avatar
+  bakes a per-bone canonical SH **ambient occlusion** probe grid and
+  multiplies the parts, which is a scalar and runs at 67 FPS with no tracing.
+  The rationale both rest on is Sloan's 2005 bargain: *"for a single body
+  part, its geometry changes are relatively small among different poses."*
+- **Spherical harmonics cannot hold a shadow edge.** RGCA: *"while diffuse
+  light transport is a low-pass filter that requires only 2nd or 3rd order SH,
+  this is not sufficient to represent shadows"*; PRTGaussian at order 9 still
+  *"struggles to reproduce the sharp edges in hard shadows"*; GUS-IR replaced
+  GS-IR's SH occlusion with a binary cubemap over leaking.
+- **Transmittance is order invariant**, which is why nobody sorts shadow hits;
+  ours already accumulates a product. And the closed-form alternative to a
+  binary hit is an `erf` line integral of the opacity along the ray,
+  normalised by the maximum attainable, which is what RAGA uses and what Deep
+  Gaussian Shadow Maps tabulates in an octahedral atlas.
+
+### What this renderer should do, and has not done
+
+Nothing here is built yet. Recorded so the measurements are not lost.
+
+1. **The per-frame rebuild comes first**, because it is half of what a frame
+   costs and it makes every other measurement meaningless until it is fixed.
+   Measured on the viewer at 1280x720 with 4 269 858 skinned splats: raster
+   median 134.96 ms and 31.56 ms once warm, `rt` 268.66 ms and 55.31 ms. And
+   the paths are free -- 1, 16 and 64 paths a pixel all cost the same, 102.22
+   / 102.18 / 100.77 ms -- so the cost is the skinning and the proxy rebuild,
+   not the shading. A **static** 6.77 M cloud costs 604 ms a frame on the same
+   route, which can only be the delegate rebuilding it every time.
+2. **Per-part directional visibility, baked in each part's canonical frame,
+   multiplied over parts.** The parts come free: a skinned cloud already
+   carries its joints and weights per gaussian. Lin et al. show the
+   factorisation is directional and generalises; DNF-Avatar shows a baked
+   per-part table is real time. Nobody has published the combination, and the
+   thing to store is an octahedral map rather than harmonics, for the
+   frequency reason above. What it gives up is the rigid-part assumption and
+   cross-part occlusion as a product of independent terms.
+3. **A scalar visibility field for static clouds**, which is the easy case and
+   covers the car and captures.
+4. **The `erf` line integral in the traced route** as the quality path, which
+   wants any-hit shaders and RT cores -- CUDA, not Metal, where the stochastic
+   intersection-shader form is the way round the missing any-hit.
